@@ -137,6 +137,7 @@ schemes:
         VoiceKeyboardUIKitTests: [test]
         VoiceKeyboardInputUITests: [test]
     test:
+      macroExpansion: VoiceKeyboardInput
       targets:
         - VoiceKeyboardInputPreviewTests
         - VoiceKeyboardUIKitTests
@@ -144,3 +145,9 @@ schemes:
       gatherCoverageData: false
       environmentVariables:
         SNAPSHOTS_RUNNING_FOR_PREVIEWS: "1"
+    run:
+      config: Debug
+      executable: VoiceKeyboardInput
+    profile:
+      config: Release
+      executable: VoiceKeyboardInput

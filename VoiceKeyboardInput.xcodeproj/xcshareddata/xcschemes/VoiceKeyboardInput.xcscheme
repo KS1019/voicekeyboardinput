@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
    LastUpgradeVersion = "1430"
-   wasCreatedForAppExtension = "YES"
    version = "1.7">
    <BuildAction
       parallelizeBuildables = "YES"
@@ -89,9 +88,9 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "44EF56E44308FFEF9C106D76"
-            BuildableName = "VoiceKeyboardExtension.appex"
-            BlueprintName = "VoiceKeyboardExtension"
+            BlueprintIdentifier = "B08F9F4B3BB328F2F23F7BE1"
+            BuildableName = "VoiceKeyboardInput.app"
+            BlueprintName = "VoiceKeyboardInput"
             ReferencedContainer = "container:VoiceKeyboardInput.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
@@ -142,25 +141,26 @@
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
-      selectedDebuggerIdentifier = ""
-      selectedLauncherIdentifier = "Xcode.IDEFoundation.Launcher.PosixSpawn"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       launchStyle = "0"
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
-      allowLocationSimulation = "YES"
-      launchAutomaticallySubstyle = "2">
+      allowLocationSimulation = "YES">
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "44EF56E44308FFEF9C106D76"
-            BuildableName = "VoiceKeyboardExtension.appex"
-            BlueprintName = "VoiceKeyboardExtension"
+            BlueprintIdentifier = "B08F9F4B3BB328F2F23F7BE1"
+            BuildableName = "VoiceKeyboardInput.app"
+            BlueprintName = "VoiceKeyboardInput"
             ReferencedContainer = "container:VoiceKeyboardInput.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -172,12 +172,14 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "44EF56E44308FFEF9C106D76"
-            BuildableName = "VoiceKeyboardExtension.appex"
-            BlueprintName = "VoiceKeyboardExtension"
+            BlueprintIdentifier = "B08F9F4B3BB328F2F23F7BE1"
+            BuildableName = "VoiceKeyboardInput.app"
+            BlueprintName = "VoiceKeyboardInput"
             ReferencedContainer = "container:VoiceKeyboardInput.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">
