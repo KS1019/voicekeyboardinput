@@ -4,6 +4,7 @@
 
 ## User settings
 xcuserdata/
+.DS_Store
 
 ## Obj-C/Swift specific
 *.hmap
@@ -21,15 +22,27 @@ playground.xcworkspace
 #
 # Add this line if you want to avoid checking in source code from Swift Package Manager dependencies.
 # Packages/
-# Package.pins
-# Package.resolved
-# *.xcodeproj
+# Keep volatile generated project files ignored, but track deterministic XcodeGen outputs
+# and Xcode's SwiftPM lockfile for reproducible verification.
+/VoiceKeyboardInput.xcodeproj/*
+!/VoiceKeyboardInput.xcodeproj/project.pbxproj
+!/VoiceKeyboardInput.xcodeproj/project.xcworkspace/
+/VoiceKeyboardInput.xcodeproj/project.xcworkspace/*
+!/VoiceKeyboardInput.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+!/VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/
+!/VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+!/VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+!/VoiceKeyboardInput.xcodeproj/xcshareddata/
+!/VoiceKeyboardInput.xcodeproj/xcshareddata/xcschemes/
+!/VoiceKeyboardInput.xcodeproj/xcshareddata/xcschemes/VoiceKeyboardInput.xcscheme
 #
 # Xcode automatically generates this directory with a .xcworkspacedata file and xcuserdata
 # hence it is not needed unless you have added a package configuration file to your project
-# .swiftpm
+.swiftpm/
 
 .build/
+.superpowers/
+docs/superpowers/
 
 # CocoaPods
 #

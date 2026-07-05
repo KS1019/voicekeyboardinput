@@ -1,0 +1,146 @@
+name: VoiceKeyboardInput
+options:
+  bundleIdPrefix: com.ks1019
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    IPHONEOS_DEPLOYMENT_TARGET: 26.0
+packages:
+  VoiceKeyboardPackage:
+    path: Packages/VoiceKeyboardPackage
+  SnapshotPreviews:
+    url: https://github.com/getsentry/SnapshotPreviews
+    exactVersion: 0.17.0
+targets:
+  VoiceKeyboardInput:
+    type: application
+    platform: iOS
+    sources:
+      - VoiceKeyboardInputApp
+      # Keep UIKit source-shared while it is small and extension-safe.
+      # Promote to an iOS-only local framework only when app/extension UI APIs need an explicit module boundary.
+      - VoiceKeyboardUIKit
+    dependencies:
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardModels
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardInterfaces
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardCore
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardPresentation
+      - target: VoiceKeyboardExtension
+        embed: true
+    info:
+      path: VoiceKeyboardInputApp/Info.plist
+      properties:
+        CFBundleDisplayName: Voice Keyboard Input
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ks1019.voicekeyboardinput
+            CFBundleURLSchemes:
+              - voicekeyboard
+        UILaunchScreen: {}
+        NSMicrophoneUsageDescription: Voice Keyboard Input uses the microphone only when you explicitly start voice input or microphone validation.
+        NSSpeechRecognitionUsageDescription: Voice Keyboard Input may use speech recognition only during explicit voice input validation where supported.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput
+
+  VoiceKeyboardExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      # Extension compiles shared UIKit directly under APPLICATION_EXTENSION_API_ONLY.
+      # SwiftUI previews stay app/preview-only and must not enter the extension binary.
+      - path: VoiceKeyboardUIKit
+        excludes:
+          - KeyboardRootViewPreview.swift
+      - VoiceKeyboardExtension
+    dependencies:
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardModels
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardInterfaces
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardCore
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardPresentation
+    info:
+      path: VoiceKeyboardExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Voice Keyboard
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionAttributes:
+            IsASCIICapable: true
+            PrefersRightToLeft: false
+            PrimaryLanguage: mul
+            RequestsOpenAccess: false
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+        NSMicrophoneUsageDescription: Voice Keyboard uses the microphone only when you explicitly start keyboard voice input validation.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.keyboard
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  VoiceKeyboardInputPreviewTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - VoiceKeyboardInputPreviewTests
+    dependencies:
+      - target: VoiceKeyboardInput
+      - package: SnapshotPreviews
+        product: SnapshottingTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.previewtests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/VoiceKeyboardInput.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VoiceKeyboardInput
+        BUNDLE_LOADER: $(TEST_HOST)
+
+  VoiceKeyboardUIKitTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - VoiceKeyboardUIKitTests
+    dependencies:
+      - target: VoiceKeyboardInput
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uikittests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/VoiceKeyboardInput.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VoiceKeyboardInput
+        BUNDLE_LOADER: $(TEST_HOST)
+
+  VoiceKeyboardInputUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - VoiceKeyboardInputUITests
+    dependencies:
+      - target: VoiceKeyboardInput
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uitests
+schemes:
+  VoiceKeyboardInput:
+    build:
+      targets:
+        VoiceKeyboardInput: all
+        VoiceKeyboardExtension: all
+        VoiceKeyboardInputPreviewTests: [test]
+        VoiceKeyboardUIKitTests: [test]
+        VoiceKeyboardInputUITests: [test]
+    test:
+      targets:
+        - VoiceKeyboardInputPreviewTests
+        - VoiceKeyboardUIKitTests
+        - VoiceKeyboardInputUITests
+      gatherCoverageData: false
+      environmentVariables:
+        SNAPSHOTS_RUNNING_FOR_PREVIEWS: "1"
