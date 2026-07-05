@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Keyboard Design Patterns</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --canvas: #f5f6f8;
+      --surface: #ffffff;
+      --surface-2: #eef1f5;
+      --label: #15171a;
+      --secondary: #606772;
+      --tertiary: #b9c0ca;
+      --warning: #b87900;
+      --positive: #16834a;
+      --critical: #c52b36;
+      --accent: #0a84ff;
+      --shadow: rgba(20, 24, 31, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #f9fafb, #eef1f5);
+      color: var(--label);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 48px));
+      margin: 34px auto;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      letter-spacing: 0;
+    }
+
+    .intro {
+      margin: 0 0 24px;
+      color: var(--secondary);
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      align-items: start;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid rgba(100, 108, 120, 0.18);
+      border-radius: 12px;
+      box-shadow: 0 14px 30px var(--shadow);
+      overflow: hidden;
+    }
+
+    .card h2 {
+      margin: 0;
+      padding: 15px 16px 3px;
+      font-size: 17px;
+    }
+
+    .card p {
+      margin: 0;
+      padding: 0 16px 14px;
+      color: var(--secondary);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .phone {
+      padding: 14px;
+      background: #e8ebf0;
+    }
+
+    .host-field {
+      height: 118px;
+      margin-bottom: 10px;
+      padding: 12px;
+      border-radius: 12px;
+      background: #fff;
+      border: 1px solid #d9dde4;
+      color: #7b828d;
+      font-size: 13px;
+    }
+
+    .keyboard {
+      height: 210px;
+      border-radius: 18px 18px 12px 12px;
+      padding: 10px;
+      background: var(--surface);
+      border: 1px solid rgba(100, 108, 120, 0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .transcript {
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      padding: 0 2px;
+      font-size: 15px;
+      line-height: 1.25;
+      color: var(--label);
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 28px;
+      color: var(--secondary);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .meter {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 28px;
+    }
+
+    .bar {
+      width: 7px;
+      min-height: 4px;
+      border-radius: 99px;
+      background: var(--tertiary);
+      opacity: 0.45;
+    }
+
+    .bar.active {
+      background: currentColor;
+      opacity: 1;
+    }
+
+    .capability {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      width: 44px;
+    }
+
+    .capability span {
+      flex: 1;
+      height: 8px;
+      border-radius: 99px;
+      background: var(--tertiary);
+      opacity: 0.35;
+    }
+
+    .capability span.active {
+      background: currentColor;
+      opacity: 1;
+    }
+
+    .keys {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .key {
+      min-height: 42px;
+      border: 0;
+      border-radius: 10px;
+      background: #e7ebf1;
+      color: var(--label);
+      font-size: 14px;
+      font-weight: 600;
+      box-shadow: inset 0 -1px rgba(0,0,0,0.08);
+    }
+
+    .status {
+      color: var(--secondary);
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .warning {
+      color: var(--warning);
+    }
+
+    .positive {
+      color: var(--positive);
+    }
+
+    .critical {
+      color: var(--critical);
+    }
+
+    .pattern-b .keyboard {
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.86), rgba(245,248,252,0.78)),
+        radial-gradient(circle at 20% 0%, rgba(10,132,255,0.18), transparent 42%);
+      backdrop-filter: blur(18px);
+      border-color: rgba(255,255,255,0.72);
+    }
+
+    .pattern-b .keys {
+      padding: 8px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.42);
+      box-shadow: inset 0 1px rgba(255,255,255,0.65);
+    }
+
+    .pattern-b .key {
+      background: rgba(255,255,255,0.78);
+      border: 1px solid rgba(255,255,255,0.84);
+      box-shadow: 0 4px 12px rgba(20,30,46,0.08);
+    }
+
+    .pattern-b .mic {
+      color: #075eb8;
+      background: rgba(10,132,255,0.13);
+    }
+
+    .pattern-c .keyboard {
+      padding: 12px;
+      background: #0f1722;
+      color: #f4f7fb;
+      border-color: #263445;
+    }
+
+    .pattern-c .transcript {
+      color: #f4f7fb;
+      justify-content: center;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .pattern-c .row.voice {
+      min-height: 58px;
+      justify-content: center;
+      flex-direction: column;
+      gap: 7px;
+      color: #7ee2b8;
+    }
+
+    .pattern-c .row.cap {
+      justify-content: center;
+      color: #f0b44c;
+    }
+
+    .pattern-c .meter {
+      height: 38px;
+      gap: 5px;
+    }
+
+    .pattern-c .bar {
+      width: 10px;
+    }
+
+    .pattern-c .key {
+      background: #263445;
+      color: #f4f7fb;
+      box-shadow: inset 0 -1px rgba(255,255,255,0.08);
+    }
+
+    .pattern-c .mic {
+      background: #177451;
+    }
+
+    .pattern-c .status {
+      color: #b7c2d1;
+      text-align: center;
+    }
+
+    .notes {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      color: var(--secondary);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .note {
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.7);
+      border: 1px solid rgba(100,108,120,0.16);
+      border-radius: 12px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Voice Keyboard: design pattern comparison</h1>
+    <p class="intro">Current constraints: iOS 26+ keyboard extension, microphone capture still unvalidated, small height, high trust requirement. These are visual explorations, not implementation.</p>
+
+    <section class="grid">
+      <article class="card pattern-a">
+        <h2>A. Native Utility</h2>
+        <p>標準 iOS らしさ、低リスク、読みやすさ優先。</p>
+        <div class="phone">
+          <div class="host-field">Keyboard Extension QA<br>Tap here, then switch to Voice Keyboard.</div>
+          <div class="keyboard">
+            <div class="transcript">Speech capture needs validation.</div>
+            <div class="row voice warning">
+              <span>Idle</span>
+              <div class="meter" aria-hidden="true">
+                <i class="bar active" style="height: 10px"></i>
+                <i class="bar active" style="height: 17px"></i>
+                <i class="bar" style="height: 6px"></i>
+                <i class="bar" style="height: 14px"></i>
+                <i class="bar" style="height: 9px"></i>
+              </div>
+            </div>
+            <div class="row cap warning">
+              <span>Mic check needed</span>
+              <div class="capability"><span class="active"></span><span class="active"></span><span></span></div>
+            </div>
+            <div class="keys">
+              <button class="key">Next</button>
+              <button class="key mic">Mic</button>
+              <button class="key">Delete</button>
+              <button class="key">Return</button>
+            </div>
+            <div class="status">Speech capture needs validation.</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card pattern-b">
+        <h2>B. Frosted Control Strip</h2>
+        <p>Liquid Glass 風味を controls に限定。透明感は弱め。</p>
+        <div class="phone">
+          <div class="host-field">Keyboard Extension QA<br>Tap here, then switch to Voice Keyboard.</div>
+          <div class="keyboard">
+            <div class="transcript">Speech capture needs validation.</div>
+            <div class="row voice warning">
+              <span>Idle</span>
+              <div class="meter" aria-hidden="true">
+                <i class="bar active" style="height: 10px"></i>
+                <i class="bar active" style="height: 17px"></i>
+                <i class="bar" style="height: 6px"></i>
+                <i class="bar" style="height: 14px"></i>
+                <i class="bar" style="height: 9px"></i>
+              </div>
+            </div>
+            <div class="row cap warning">
+              <span>Mic check needed</span>
+              <div class="capability"><span class="active"></span><span class="active"></span><span></span></div>
+            </div>
+            <div class="keys">
+              <button class="key">Next</button>
+              <button class="key mic">Mic</button>
+              <button class="key">Delete</button>
+              <button class="key">Return</button>
+            </div>
+            <div class="status">Speech capture needs validation.</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card pattern-c">
+        <h2>C. Voice Focus</h2>
+        <p>音声入力感を強調。実機 probe 後向け。</p>
+        <div class="phone">
+          <div class="host-field">Keyboard Extension QA<br>Tap here, then switch to Voice Keyboard.</div>
+          <div class="keyboard">
+            <div class="transcript">Checking microphone...</div>
+            <div class="row voice positive">
+              <span>Voice activity</span>
+              <div class="meter" aria-hidden="true">
+                <i class="bar active" style="height: 14px"></i>
+                <i class="bar active" style="height: 28px"></i>
+                <i class="bar active" style="height: 18px"></i>
+                <i class="bar active" style="height: 34px"></i>
+                <i class="bar active" style="height: 22px"></i>
+              </div>
+            </div>
+            <div class="row cap warning">
+              <span>Validation in progress</span>
+              <div class="capability"><span class="active"></span><span class="active"></span><span></span></div>
+            </div>
+            <div class="keys">
+              <button class="key">Next</button>
+              <button class="key mic">Mic</button>
+              <button class="key">Delete</button>
+              <button class="key">Return</button>
+            </div>
+            <div class="status">Do not ship this as ready until real device probe passes.</div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="notes">
+      <div class="note"><strong>A:</strong> 一番安全。現状の honest UI を維持しながら、key spacing と状態表示を整える方向。</div>
+      <div class="note"><strong>B:</strong> iOS 26 らしさを少し足せる。ただし透明感は controls だけに限定し、文字の背後には置かない。</div>
+      <div class="note"><strong>C:</strong> 魅力はあるが ready 感が強い。実機 microphone probe が安定するまでは避ける。</div>
+    </section>
+  </main>
+</body>
+</html>

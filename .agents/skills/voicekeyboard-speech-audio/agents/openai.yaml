@@ -1,0 +1,7 @@
+interface:
+  display_name: "VoiceKeyboard Speech Audio"
+  short_description: "iOS voice keyboard audio constraints"
+  default_prompt: "Use $voicekeyboard-speech-audio to design or review the next voice capture change."
+
+policy:
+  allow_implicit_invocation: true

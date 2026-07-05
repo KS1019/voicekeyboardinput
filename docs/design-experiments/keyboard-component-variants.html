@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Keyboard Component Variants</title>
+  <style>
+    :root {
+      --bg: #f4f6f9;
+      --surface: #fff;
+      --ink: #15171a;
+      --muted: #626a76;
+      --line: #dbe0e7;
+      --key: #e8ecf2;
+      --blue: #0a84ff;
+      --amber: #b87900;
+      --green: #16834a;
+      --red: #c52b36;
+      --purple: #7b61ff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    }
+
+    main {
+      width: min(1120px, calc(100vw - 48px));
+      margin: 34px auto;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+    }
+
+    .intro {
+      margin: 0 0 22px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .section {
+      margin: 0 0 22px;
+      padding: 18px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.82);
+      border: 1px solid rgba(120,128,140,0.18);
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+
+    .variants {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .variant {
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      min-height: 118px;
+    }
+
+    .variant h3 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+
+    .variant p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .palette {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .swatch {
+      flex: 1;
+      height: 54px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,0.08);
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 34px;
+      color: var(--amber);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .pill {
+      padding: 8px 10px;
+      border-radius: 999px;
+      background: rgba(184,121,0,0.11);
+    }
+
+    .panel {
+      padding: 10px;
+      border-radius: 12px;
+      background: #f7f9fc;
+      border: 1px solid var(--line);
+    }
+
+    .meter {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--amber);
+    }
+
+    .bar {
+      width: 7px;
+      border-radius: 99px;
+      background: currentColor;
+    }
+
+    .capsule-meter {
+      height: 12px;
+      border-radius: 99px;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 2fr 2fr 1fr;
+      background: #e6e9ef;
+    }
+
+    .capsule-meter span {
+      background: var(--amber);
+      border-right: 2px solid #fff;
+    }
+
+    .wave {
+      height: 34px;
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 12% 50%, currentColor 0 4px, transparent 5px),
+        radial-gradient(circle at 28% 50%, currentColor 0 8px, transparent 9px),
+        radial-gradient(circle at 44% 50%, currentColor 0 5px, transparent 6px),
+        radial-gradient(circle at 60% 50%, currentColor 0 11px, transparent 12px),
+        radial-gradient(circle at 76% 50%, currentColor 0 6px, transparent 7px);
+      color: var(--amber);
+    }
+
+    .keys {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .key {
+      min-height: 40px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--key);
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .mic-primary {
+      background: var(--blue);
+      color: #fff;
+    }
+
+    .mic-outline {
+      background: #fff;
+      color: var(--blue);
+      border: 1px solid rgba(10,132,255,0.35);
+    }
+
+    .mic-warning {
+      background: rgba(184,121,0,0.12);
+      color: #8a5900;
+      border: 1px solid rgba(184,121,0,0.25);
+    }
+
+    .verdict {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #eef6ff;
+      color: #175187;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Component variants</h1>
+    <p class="intro">要素単位の比較。現段階では「検証前の音声入力」を誇張しない案を優先する。</p>
+
+    <section class="section">
+      <h2>1. Color palette</h2>
+      <div class="variants">
+        <div class="variant">
+          <h3>A. Semantic Native</h3>
+          <div class="palette">
+            <span class="swatch" style="background:#ffffff"></span>
+            <span class="swatch" style="background:#e8ecf2"></span>
+            <span class="swatch" style="background:#b87900"></span>
+            <span class="swatch" style="background:#c52b36"></span>
+          </div>
+          <p>標準色中心。最も安全で長期保守しやすい。</p>
+        </div>
+        <div class="variant">
+          <h3>B. Cool Glass Accent</h3>
+          <div class="palette">
+            <span class="swatch" style="background:#f8fbff"></span>
+            <span class="swatch" style="background:#dbeeff"></span>
+            <span class="swatch" style="background:#0a84ff"></span>
+            <span class="swatch" style="background:#16834a"></span>
+          </div>
+          <p>iOS 26 らしさは出るが、ready 感が強くなりやすい。</p>
+        </div>
+        <div class="variant">
+          <h3>C. Dark Voice Mode</h3>
+          <div class="palette">
+            <span class="swatch" style="background:#0f1722"></span>
+            <span class="swatch" style="background:#263445"></span>
+            <span class="swatch" style="background:#7ee2b8"></span>
+            <span class="swatch" style="background:#f0b44c"></span>
+          </div>
+          <p>音声感は強いが、未検証状態には強すぎる。</p>
+        </div>
+      </div>
+      <div class="verdict">推奨: A を基準に、B の blue は実機 probe 成功後だけ限定使用。</div>
+    </section>
+
+    <section class="section">
+      <h2>2. Status and capability row</h2>
+      <div class="variants">
+        <div class="variant">
+          <h3>A. Plain Row</h3>
+          <div class="status-row">
+            <span>Mic check needed</span>
+            <div class="meter"><i class="bar" style="height:8px"></i><i class="bar" style="height:14px"></i><i class="bar" style="height:6px;opacity:.35"></i></div>
+          </div>
+          <p>現状に近い。小さい高さで一番読みやすい。</p>
+        </div>
+        <div class="variant">
+          <h3>B. Pill Status</h3>
+          <div class="status-row pill">
+            <span>Mic check needed</span>
+            <div class="meter"><i class="bar" style="height:8px"></i><i class="bar" style="height:14px"></i><i class="bar" style="height:6px;opacity:.35"></i></div>
+          </div>
+          <p>状態のまとまりは出るが、縦方向の密度が落ちる。</p>
+        </div>
+        <div class="variant">
+          <h3>C. Panel Status</h3>
+          <div class="panel">
+            <div class="status-row">
+              <span>Mic check needed</span>
+              <div class="meter"><i class="bar" style="height:8px"></i><i class="bar" style="height:14px"></i><i class="bar" style="height:6px;opacity:.35"></i></div>
+            </div>
+          </div>
+          <p>カード感が強く、キーボード領域では重い。</p>
+        </div>
+      </div>
+      <div class="verdict">推奨: A。必要なら B を warning/error 時だけ使う。</div>
+    </section>
+
+    <section class="section">
+      <h2>3. Mic key treatment</h2>
+      <div class="variants">
+        <div class="variant">
+          <h3>A. Neutral Key</h3>
+          <div class="keys"><button class="key">Next</button><button class="key">Mic</button><button class="key">Delete</button><button class="key">Return</button></div>
+          <p>未検証段階に最も合う。ready と誤認しにくい。</p>
+        </div>
+        <div class="variant">
+          <h3>B. Outline Accent</h3>
+          <div class="keys"><button class="key">Next</button><button class="key mic-outline">Mic</button><button class="key">Delete</button><button class="key">Return</button></div>
+          <p>押せる導線が分かる。probe needed に向く。</p>
+        </div>
+        <div class="variant">
+          <h3>C. Primary Accent</h3>
+          <div class="keys"><button class="key">Next</button><button class="key mic-primary">Mic</button><button class="key">Delete</button><button class="key">Return</button></div>
+          <p>録音可能に見える。probe 成功後まで避ける。</p>
+        </div>
+      </div>
+      <div class="verdict">推奨: A か B。C は実機で録音/STT が安定してから。</div>
+    </section>
+
+    <section class="section">
+      <h2>4. Voice activity meter</h2>
+      <div class="variants">
+        <div class="variant">
+          <h3>A. Vertical Bars</h3>
+          <div class="meter"><i class="bar" style="height:10px"></i><i class="bar" style="height:22px"></i><i class="bar" style="height:14px"></i><i class="bar" style="height:28px"></i><i class="bar" style="height:16px"></i></div>
+          <p>現状に近い。音量感と省スペースのバランスが良い。</p>
+        </div>
+        <div class="variant">
+          <h3>B. Capsule Progress</h3>
+          <div class="capsule-meter"><span></span><span></span><span style="opacity:.25"></span></div>
+          <p>capability には向くが、音声波形には見えにくい。</p>
+        </div>
+        <div class="variant">
+          <h3>C. Soft Wave</h3>
+          <div class="wave"></div>
+          <p>音声感は強いが、小さい領域では装飾に寄りやすい。</p>
+        </div>
+      </div>
+      <div class="verdict">推奨: A。C は録音中状態のみに限定するなら候補。</div>
+    </section>
+  </main>
+</body>
+</html>
