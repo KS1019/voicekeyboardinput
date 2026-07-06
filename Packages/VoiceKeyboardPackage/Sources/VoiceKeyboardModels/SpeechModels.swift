@@ -12,4 +12,14 @@ public struct SpeechRecognitionUpdate: Equatable, Sendable {
 
 public enum SpeechRecognitionError: Error, Equatable, Sendable {
     case unavailableInCurrentProcess
+    case microphonePermissionDenied
+    case microphonePermissionUndetermined
+    case audioSessionActivationFailed(String)
+    case audioInputUnavailable
+    case audioEngineStartFailed(String)
+    case speechRecognizerUnavailable
+    case speechAuthorizationDenied
+    case recognitionStartFailed(String)
+    case recognitionFailed(String)
+    case cancelled
 }

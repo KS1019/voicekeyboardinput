@@ -5,6 +5,24 @@ import XCTest
 
 @MainActor
 final class KeyboardRootViewTests: XCTestCase {
+    func testListeningSpeechCaptureKeepsMicrophoneEnabledAsStopButton() throws {
+        let view = KeyboardRootView()
+
+        view.render(speechCapture: .keyboardSpeechCapture(.listening))
+        let button = try microphoneButton(in: view)
+
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertEqual(button.configuration?.title, "Stop")
+    }
+
+    func testRecognitionUnavailableDisablesMicrophoneButton() throws {
+        let view = KeyboardRootView()
+
+        view.render(speechCapture: .keyboardSpeechCapture(.recognitionFailed(.speechRecognizerUnavailable)))
+
+        XCTAssertFalse(try microphoneButton(in: view).isEnabled)
+    }
+
     func testUnavailableSpeechCaptureDisablesMicrophoneButton() throws {
         let view = KeyboardRootView()
 

@@ -2,6 +2,19 @@ import VoiceKeyboardModels
 import XCTest
 
 final class SpeechRecognitionUpdateTests: XCTestCase {
+    func testSpeechRecognitionErrorsCompareByValue() {
+        XCTAssertEqual(
+            SpeechRecognitionError.audioSessionActivationFailed("setActive failed"),
+            .audioSessionActivationFailed("setActive failed")
+        )
+        XCTAssertNotEqual(
+            SpeechRecognitionError.audioSessionActivationFailed("setActive failed"),
+            .audioEngineStartFailed("engine failed")
+        )
+        XCTAssertEqual(SpeechRecognitionError.microphonePermissionDenied, .microphonePermissionDenied)
+        XCTAssertEqual(SpeechRecognitionError.cancelled, .cancelled)
+    }
+
     func testInputLevelIsOptional() {
         let update = SpeechRecognitionUpdate(transcript: "hello", isFinal: false)
 

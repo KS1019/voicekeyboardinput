@@ -10,6 +10,10 @@ public enum KeyboardSpeechCaptureState: Equatable, Sendable {
     case probing
     case ready
     case probeFailed(AudioCaptureProbeError)
+    case listening
+    case transcribing(SpeechRecognitionUpdate)
+    case inserted(String)
+    case recognitionFailed(SpeechRecognitionError)
 }
 
 public struct KeyboardSpeechCaptureStateMachine: Equatable, Sendable {
