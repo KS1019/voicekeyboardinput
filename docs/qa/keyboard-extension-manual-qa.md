@@ -6,9 +6,10 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 
 - Build and install `VoiceKeyboardInput` on an iOS 26+ simulator or device.
 - Run `make verify` first so package, UIKit, app UI, build, preview layout, and generated-file checks are green.
-- Keep `Allow Full Access` off for the baseline keyboard. The current extension does not require network or shared-container access.
+- Turn `Allow Full Access` on for `Voice Keyboard` when validating keyboard-side STT. The extension requests open access so Settings exposes the switch; the first STT path still records diagnostics if the platform blocks microphone or Speech access.
 - On Simulator, grant microphone access for both the containing app and keyboard extension before probing if you want to bypass the permission prompt:
   `make simulator-grant-microphone`
+- The current Xcode 27 beta 2 SDK marks `AnalyzerInputConverter` as iOS 27-only. On iOS 26, the keyboard speech adapter is expected to fail closed with `speechRecognizerUnavailable` until an iOS 26-compatible input path is available.
 
 ## Enable The Keyboard
 
@@ -17,7 +18,7 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 3. Go to General, Keyboard, Keyboards.
 4. Choose Add New Keyboard.
 5. Add `Voice Keyboard`.
-6. Open the `Voice Keyboard` entry and confirm `Allow Full Access` is off.
+6. Open the `Voice Keyboard` entry and turn `Allow Full Access` on.
 
 ## Load The Extension
 
@@ -26,17 +27,22 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 3. Use the system keyboard switcher to select `Voice Keyboard`.
 4. Confirm the keyboard extension appears without crashing.
 
-## Expected Baseline Behavior
+## Expected Keyboard STT Behavior
 
-- Without microphone permission, the keyboard shows `Open the app to start voice input.` and tapping Mic opens `VoiceKeyboardInput` through `voicekeyboard://start-dictation`.
-- With microphone permission granted to the keyboard extension, tapping Mic runs a short keyboard-process `AVAudioSession`/`AVAudioEngine` input probe.
-- A successful keyboard-side probe shows `Microphone probe passed.`.
+- Tapping Mic in `Voice Keyboard` starts the keyboard-process STT path.
+- The keyboard first shows `Listening...`.
+- Partial recognition shows the live transcript and a Stop microphone button.
+- A final transcript is inserted into the host text field.
+- If iOS blocks microphone capture in the keyboard process, the keyboard shows a specific unavailable or failed message.
+- If the current OS cannot use the Speech input converter, the keyboard shows speech unavailable rather than falling back silently.
+- The diagnostic log should include permission state, locale, audio session activation, input format, audio engine start, speech recognizer availability, recognition start, and stop reason.
+- Do not treat Simulator success as proof that real-device keyboard STT works.
 - The app-side `Start Voice Input` button still runs the containing-app probe and shows `Microphone Active` with a peak input value when non-silent audio was observed.
 - Delete removes the previous character from the host text field.
 - Return inserts a newline into the host text field.
 - Next switches to another enabled keyboard when iOS exposes the input-mode switch key.
 
-## Simulator Audio Input Probe
+## Simulator Keyboard STT Probe
 
 1. Boot the target Simulator and install the app.
 2. Run `make simulator-grant-microphone`.
@@ -44,9 +50,22 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 4. Speak into the Mac microphone during the short probe.
 5. Confirm the app reports `Microphone Active`.
 6. Load `Voice Keyboard` in the app text field.
-7. Tap Mic in the keyboard and confirm it reports `Microphone probe passed.`.
+7. Tap Mic in the keyboard and speak a short phrase.
+8. Confirm either that recognized text is inserted or that the keyboard reports a specific Speech/microphone unavailable state.
 
 If the probe fails on Simulator, check macOS microphone permission for Simulator/Xcode and the Mac input device in System Settings. `simctl io` does not provide an audio injection operation in the current local Xcode help output; microphone permission is controlled through `simctl privacy`.
+
+## Physical Device STT Validation
+
+1. Install a signed build on an iOS 26+ physical device.
+2. Enable `Voice Keyboard` in Settings.
+3. Turn `Allow Full Access` on.
+4. Open a host text field and switch to `Voice Keyboard`.
+5. Tap Mic and speak a short phrase.
+6. Confirm whether text is inserted.
+7. Capture the `KeyboardSpeechRecognition` logs.
+8. Repeat with `Allow Full Access` off only to record whether behavior changes; do not ship an off-state requirement without a separate design update.
+9. On iOS 26, expect `speechRecognizerUnavailable` if `AnalyzerInputConverter` remains iOS 27-only in the active SDK/runtime.
 
 ## Known Automation Boundary
 
