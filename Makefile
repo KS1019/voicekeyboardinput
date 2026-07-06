@@ -16,7 +16,7 @@ XCODEGEN ?= $(or $(shell command -v xcodegen 2>/dev/null),$(wildcard /opt/homebr
 DEPENDENCY_POLICY_PATHS := project.yml VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved Packages/VoiceKeyboardPackage VoiceKeyboardInputApp VoiceKeyboardExtension VoiceKeyboardUIKit
 FORBIDDEN_PACKAGE_IMPORTS := '^[[:space:]]*import[[:space:]]+(AuralKit|UIKit|AVFoundation|Speech|FoundationModels)\b'
 EXTENSION_SAFE_PATHS := VoiceKeyboardExtension VoiceKeyboardUIKit
-FORBIDDEN_EXTENSION_APIS := 'UIApplication[.]shared|^[[:space:]]*import[[:space:]]+(Speech|FoundationModels)\b'
+FORBIDDEN_EXTENSION_APIS := 'UIApplication[.]shared|^[[:space:]]*import[[:space:]]+FoundationModels\b'
 
 .PHONY: generate
 generate:
