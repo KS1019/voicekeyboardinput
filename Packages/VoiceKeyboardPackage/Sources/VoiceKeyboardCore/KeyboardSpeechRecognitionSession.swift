@@ -36,6 +36,7 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         documentContextBeforeInput: String?
     ) -> AsyncStream<KeyboardSpeechRecognitionEvent> {
         AsyncStream { continuation in
+            let stopController = SpeechRecognitionStopController()
             let task = Task {
                 continuation.yield(KeyboardSpeechRecognitionEvent(state: .listening))
                 do {
@@ -49,7 +50,7 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                             )
                             continuation.yield(
                                 KeyboardSpeechRecognitionEvent(
-                                    state: .inserted(insertedText(from: actions, fallback: update.transcript)),
+                                    state: eventState(for: update, actions: actions),
                                     actions: actions
                                 )
                             )
@@ -57,18 +58,18 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                             continuation.yield(KeyboardSpeechRecognitionEvent(state: .transcribing(update)))
                         }
                     }
-                    await speechService.stop()
+                    await stopController.stopIfNeeded(speechService)
                     continuation.finish()
                 } catch let error as SpeechRecognitionError {
-                    await speechService.stop()
+                    await stopController.stopIfNeeded(speechService)
                     continuation.yield(KeyboardSpeechRecognitionEvent(state: .recognitionFailed(error)))
                     continuation.finish()
                 } catch is CancellationError {
-                    await speechService.stop()
+                    await stopController.stopIfNeeded(speechService)
                     continuation.yield(KeyboardSpeechRecognitionEvent(state: .recognitionFailed(.cancelled)))
                     continuation.finish()
                 } catch {
-                    await speechService.stop()
+                    await stopController.stopIfNeeded(speechService)
                     continuation.yield(
                         KeyboardSpeechRecognitionEvent(
                             state: .recognitionFailed(.recognitionFailed(String(describing: error)))
@@ -77,7 +78,12 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                     continuation.finish()
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.onTermination = { _ in
+                task.cancel()
+                Task {
+                    await stopController.stopIfNeeded(speechService)
+                }
+            }
         }
     }
 
@@ -101,16 +107,25 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         return coalescedInsertActions(from: mappedActions)
     }
 
+    private func eventState(
+        for update: SpeechRecognitionUpdate,
+        actions: [KeyboardTextInsertionAction]
+    ) -> KeyboardSpeechCaptureState {
+        guard let insertedText = insertedText(from: actions) else {
+            return .transcribing(update)
+        }
+        return .inserted(insertedText)
+    }
+
     private func insertedText(
-        from actions: [KeyboardTextInsertionAction],
-        fallback: String
-    ) -> String {
+        from actions: [KeyboardTextInsertionAction]
+    ) -> String? {
         let text = actions.reduce(into: "") { result, action in
             if case .insertText(let value) = action {
                 result.append(value)
             }
         }
-        return text.isEmpty ? fallback : text
+        return text.isEmpty ? nil : text
     }
 
     private func coalescedInsertActions(
@@ -137,5 +152,15 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
 
         flushPendingText()
         return result
+    }
+}
+
+private actor SpeechRecognitionStopController {
+    private var didStop = false
+
+    func stopIfNeeded(_ speechService: any SpeechRecognitionService) async {
+        guard !didStop else { return }
+        didStop = true
+        await speechService.stop()
     }
 }
