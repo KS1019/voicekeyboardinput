@@ -21,6 +21,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
+                    keyboardSetupPanel
                     voiceInputPanel
                     keyboardQAPanel
                     developerDetails
@@ -35,14 +36,31 @@ struct ContentView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Speak anywhere. Validate locally.")
+            Text("Keyboard-first voice input")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.primary)
-            Text("On-device voice input validation for iOS 26 keyboard workflows.")
+            Text("Set up Voice Keyboard, enable full access, then validate speech input from any host text field.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var keyboardSetupPanel: some View {
+        Panel("Setup Checklist") {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Add Voice Keyboard in Settings > General > Keyboard > Keyboards.", systemImage: "keyboard")
+                Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
+                Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "mic.circle")
+
+                Text("iOS 26 may report speech unavailable until the Speech input converter is available in the keyboard process.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
     }
 
     private var voiceInputPanel: some View {
@@ -127,7 +145,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("keyboard.qa.textField")
 
-                Text("Use this field to verify the keyboard extension loads, runs the Mic probe, and keeps Delete / Return responsive.")
+                Text("Use this field to verify the keyboard extension loads, starts keyboard STT from Mic, inserts final text or shows a specific unavailable state, and keeps Delete / Return responsive.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("keyboard.qa.instructions")
@@ -159,7 +177,7 @@ struct ContentView: View {
         Panel("Setup") {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Add Voice Keyboard in Settings > General > Keyboard > Keyboards.", systemImage: "keyboard")
-                Label("Keep Allow Full Access off for the baseline keyboard.", systemImage: "lock")
+                Label("Turn Allow Full Access on before validating keyboard-side STT.", systemImage: "checkmark.shield")
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -168,7 +186,7 @@ struct ContentView: View {
 
     private var validationPanel: some View {
         Panel("Validation Notes") {
-            Text("The keyboard-side microphone path is experimental. SpeechAnalyzer remains disabled in the extension until short AVAudioSession / AVAudioEngine probes are stable on iOS 26+ devices.")
+            Text("The keyboard microphone button now attempts keyboard-process STT. On iOS 26, the active SDK may still fail closed with speech unavailable because the Speech input converter is iOS 27-only.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

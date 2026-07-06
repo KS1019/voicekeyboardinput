@@ -5,6 +5,9 @@ final class VoiceKeyboardInputUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
+        XCTAssertTrue(app.staticTexts["Keyboard-first voice input"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Turn Allow Full Access on for Voice Keyboard."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["iOS 26 may report speech unavailable until the Speech input converter is available in the keyboard process."].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Keyboard Extension QA"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.textFields["keyboard.qa.textField"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["keyboard.qa.instructions"].waitForExistence(timeout: 5))
