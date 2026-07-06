@@ -53,7 +53,7 @@ struct ContentView: View {
                 Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
                 Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "mic.circle")
 
-                Text("iOS 26 may report speech unavailable until the Speech input converter is available in the keyboard process.")
+                Text("iOS 26 uses the legacy Speech audio-buffer path; iOS 27 can use the SpeechAnalyzer path.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -186,7 +186,7 @@ struct ContentView: View {
 
     private var validationPanel: some View {
         Panel("Validation Notes") {
-            Text("The keyboard microphone button now attempts keyboard-process STT. On iOS 26, the active SDK may still fail closed with speech unavailable because the Speech input converter is iOS 27-only.")
+            Text("The keyboard microphone button attempts keyboard-process STT. iOS 26 uses SFSpeechRecognizer with audio buffers; iOS 27 can use SpeechAnalyzer when available.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
