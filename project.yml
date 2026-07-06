@@ -46,6 +46,11 @@ targets:
         UILaunchScreen: {}
         NSMicrophoneUsageDescription: Voice Keyboard Input uses the microphone only when you explicitly start voice input or microphone validation.
         NSSpeechRecognitionUsageDescription: Voice Keyboard Input may use speech recognition only during explicit voice input validation where supported.
+    entitlements:
+      path: VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ks1019.voicekeyboardinput
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput
@@ -85,6 +90,11 @@ targets:
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
         NSMicrophoneUsageDescription: Voice Keyboard uses the microphone only when you explicitly start keyboard voice input validation.
         NSSpeechRecognitionUsageDescription: Voice Keyboard uses speech recognition only when you explicitly start keyboard voice input.
+    entitlements:
+      path: VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ks1019.voicekeyboardinput
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.keyboard

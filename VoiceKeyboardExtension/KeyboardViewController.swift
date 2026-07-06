@@ -7,6 +7,7 @@ import VoiceKeyboardPresentation
 public final class KeyboardViewController: UIInputViewController {
     private let keyboardRootView = KeyboardRootView()
     private let speechCaptureCoordinator = KeyboardSpeechCaptureCoordinator()
+    private lazy var sharedTranscriptStore = SharedDictationTranscriptStore.appGroupStore()
     private var renderTask: Task<Void, Never>?
     private var isRecognitionActive = false
 
@@ -30,6 +31,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        guard !consumeSharedDictationTranscriptIfNeeded() else { return }
         renderCurrentSpeechCapture()
     }
 
@@ -84,6 +86,11 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func microphoneTapped() {
+        if speechCaptureCoordinator.shouldOpenContainingAppForDictation() {
+            openContainingAppForDictation()
+            return
+        }
+
         if isRecognitionActive {
             renderTask?.cancel()
             isRecognitionActive = false
@@ -127,6 +134,23 @@ public final class KeyboardViewController: UIInputViewController {
                 }
             }
         }
+    }
+
+    private func consumeSharedDictationTranscriptIfNeeded() -> Bool {
+        guard let sharedTranscriptStore else { return false }
+        let lastConsumedToken = sharedTranscriptStore.lastConsumedToken()
+        guard let transcript = sharedTranscriptStore.claimLatestTranscript(
+            afterLastConsumedToken: lastConsumedToken
+        ) else {
+            return false
+        }
+
+        textDocumentProxy.insertText(transcript.text)
+        keyboardRootView.render(
+            speechCapture: .keyboardSpeechCapture(.inserted(transcript.text)),
+            announce: true
+        )
+        return true
     }
 
     private func openContainingAppForDictation() {

@@ -1,11 +1,13 @@
 import AVFAudio
 import Observation
+import Speech
 import VoiceKeyboardModels
 
 enum VoiceInputLaunchStatus: Equatable {
     case idle
     case requestingPermission
     case microphoneActive(peakPower: Float?)
+    case transcriptShared(String)
     case permissionDenied
     case failed(String)
 
@@ -17,6 +19,8 @@ enum VoiceInputLaunchStatus: Equatable {
             "Requesting Microphone"
         case .microphoneActive:
             "Microphone Active"
+        case .transcriptShared:
+            "Transcript Ready"
         case .permissionDenied:
             "Microphone Permission Denied"
         case .failed:
@@ -36,6 +40,8 @@ enum VoiceInputLaunchStatus: Equatable {
             } else {
                 "Audio input probe passed. No non-silent input was detected during the short probe."
             }
+        case let .transcriptShared(transcript):
+            "Transcript saved for the keyboard: \(transcript)"
         case .permissionDenied:
             "Enable microphone access in Settings to use keyboard voice input."
         case let .failed(message):
@@ -70,24 +76,46 @@ final class VoiceInputLaunchModel {
     }
 }
 
-protocol MicrophoneActivating: Sendable {
+@MainActor
+protocol MicrophoneActivating {
     func activate() async -> VoiceInputLaunchStatus
 }
 
 struct AppMicrophoneActivator: MicrophoneActivating {
+    private let transcriptStoreProvider: () -> SharedDictationTranscriptStore?
+
+    init(
+        transcriptStoreProvider: @escaping () -> SharedDictationTranscriptStore? = {
+            SharedDictationTranscriptStore.appGroupStore()
+        }
+    ) {
+        self.transcriptStoreProvider = transcriptStoreProvider
+    }
+
     func activate() async -> VoiceInputLaunchStatus {
         guard await requestRecordPermission() else {
             return .permissionDenied
         }
 
+        guard await requestSpeechRecognitionAuthorization() else {
+            return .failed("Enable speech recognition access in Settings to use keyboard voice input.")
+        }
+
         do {
-            guard let duration = AudioCaptureProbeDuration(seconds: 0.8) else {
-                preconditionFailure("Invalid audio input probe duration")
+            let transcriptText = try await AppSpeechDictationService().transcribe(
+                locale: Locale.current,
+                maximumDuration: 8
+            )
+            guard let transcript = SharedDictationTranscript(text: transcriptText) else {
+                return .failed("Speech recognition returned an empty transcript.")
             }
-            let result = try await AppAudioInputProbe().probe(duration: duration)
-            return result.microphoneCaptureAvailable
-                ? .microphoneActive(peakPower: result.peakPower)
-                : .failed("Audio input probe did not receive a microphone route.")
+
+            guard let transcriptStore = transcriptStoreProvider() else {
+                return .failed("Shared App Group storage is unavailable.")
+            }
+
+            transcriptStore.save(transcript)
+            return .transcriptShared(transcript.text)
         } catch {
             return .failed(error.localizedDescription)
         }
@@ -98,6 +126,23 @@ struct AppMicrophoneActivator: MicrophoneActivating {
             AVAudioApplication.requestRecordPermission { isGranted in
                 continuation.resume(returning: isGranted)
             }
+        }
+    }
+
+    private func requestSpeechRecognitionAuthorization() async -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            true
+        case .notDetermined:
+            await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { status in
+                    continuation.resume(returning: status == .authorized)
+                }
+            }
+        case .denied, .restricted:
+            false
+        @unknown default:
+            false
         }
     }
 }

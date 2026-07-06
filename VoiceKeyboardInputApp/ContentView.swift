@@ -53,7 +53,7 @@ struct ContentView: View {
                 Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
                 Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "mic.circle")
 
-                Text("iOS 26 uses the legacy Speech audio-buffer path; iOS 27 can use the SpeechAnalyzer path.")
+                Text("If keyboard-process STT is unavailable, Mic opens this app so the app can transcribe and hand the result back through the shared App Group.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -145,7 +145,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("keyboard.qa.textField")
 
-                Text("Use this field to verify the keyboard extension loads, starts keyboard STT from Mic, inserts final text or shows a specific unavailable state, and keeps Delete / Return responsive.")
+                Text("Use this field to verify the keyboard extension loads, starts keyboard STT or app handoff from Mic, inserts final text, and keeps Delete / Return responsive.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("keyboard.qa.instructions")
@@ -186,7 +186,7 @@ struct ContentView: View {
 
     private var validationPanel: some View {
         Panel("Validation Notes") {
-            Text("The keyboard microphone button attempts keyboard-process STT. iOS 26 uses SFSpeechRecognizer with audio buffers; iOS 27 can use SpeechAnalyzer when available.")
+            Text("The keyboard microphone button attempts keyboard-process STT first. If unavailable, it opens the containing app; the app records, transcribes, saves the transcript to the shared App Group, and the keyboard inserts that result when it appears again.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -194,7 +194,7 @@ struct ContentView: View {
 
     private var statusTint: Color {
         switch voiceInputLaunchModel.status {
-        case .microphoneActive:
+        case .microphoneActive, .transcriptShared:
             .green
         case .failed, .permissionDenied:
             .red
@@ -278,7 +278,7 @@ private struct Panel<Content: View>: View {
 private extension VoiceInputLaunchStatus {
     var isActive: Bool {
         switch self {
-        case .microphoneActive, .requestingPermission:
+        case .microphoneActive, .transcriptShared, .requestingPermission:
             true
         case .failed, .idle, .permissionDenied:
             false

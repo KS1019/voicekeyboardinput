@@ -10,7 +10,7 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         await model.startDictation()
 
         XCTAssertEqual(model.status, .microphoneActive(peakPower: -18))
-        let callCount = await activator.recordedCallCount()
+        let callCount = activator.recordedCallCount()
         XCTAssertEqual(callCount, 1)
     }
 
@@ -21,7 +21,7 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         model.handleOpenURL(try XCTUnwrap(URL(string: "voicekeyboard://start-dictation")))
         await waitForStatus(.microphoneActive(peakPower: -12), in: model)
 
-        let callCount = await activator.recordedCallCount()
+        let callCount = activator.recordedCallCount()
         XCTAssertEqual(callCount, 1)
     }
 
@@ -37,10 +37,10 @@ final class VoiceInputLaunchModelTests: XCTestCase {
             await Task.yield()
         }
 
-        let callCount = await activator.recordedCallCount()
+        let callCount = activator.recordedCallCount()
         XCTAssertEqual(callCount, 1)
 
-        await activator.finish(with: .microphoneActive(peakPower: -9))
+        activator.finish(with: .microphoneActive(peakPower: -9))
         await firstStart.value
         await secondStart.value
     }
@@ -53,7 +53,7 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         await Task.yield()
 
         XCTAssertEqual(model.status, .idle)
-        let callCount = await activator.recordedCallCount()
+        let callCount = activator.recordedCallCount()
         XCTAssertEqual(callCount, 0)
     }
 
@@ -70,7 +70,8 @@ final class VoiceInputLaunchModelTests: XCTestCase {
     }
 }
 
-private actor MicrophoneActivatorSpy: MicrophoneActivating {
+@MainActor
+private final class MicrophoneActivatorSpy: MicrophoneActivating {
     private(set) var callCount = 0
     private let status: VoiceInputLaunchStatus
 
@@ -88,7 +89,8 @@ private actor MicrophoneActivatorSpy: MicrophoneActivating {
     }
 }
 
-private actor SuspendedMicrophoneActivator: MicrophoneActivating {
+@MainActor
+private final class SuspendedMicrophoneActivator: MicrophoneActivating {
     private var continuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>] = []
     private var callCount = 0
 
