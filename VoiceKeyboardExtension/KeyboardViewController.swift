@@ -1,4 +1,5 @@
 import UIKit
+import VoiceKeyboardCore
 import VoiceKeyboardModels
 import VoiceKeyboardPresentation
 
@@ -7,6 +8,7 @@ public final class KeyboardViewController: UIInputViewController {
     private let keyboardRootView = KeyboardRootView()
     private let speechCaptureCoordinator = KeyboardSpeechCaptureCoordinator()
     private var renderTask: Task<Void, Never>?
+    private var isRecognitionActive = false
 
     public override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
         super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
@@ -82,32 +84,48 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func microphoneTapped() {
+        if isRecognitionActive {
+            renderTask?.cancel()
+            isRecognitionActive = false
+            renderCurrentSpeechCapture(announce: true)
+            return
+        }
+
         renderTask?.cancel()
 
         let speechCaptureCoordinator = speechCaptureCoordinator
+        let locale = VoiceKeyboardLocale(identifier: Locale.current.identifier)
+        let context = textDocumentProxy.documentContextBeforeInput
+
         renderTask = Task { [weak self] in
-            if speechCaptureCoordinator.shouldOpenContainingAppForDictation() {
-                guard let self else { return }
-                keyboardRootView.render(
-                    speechCapture: .keyboardSpeechCapture(.containingAppLaunchRequired),
-                    announce: true
-                )
-                openContainingAppForDictation()
-                return
-            }
-
-            await MainActor.run {
-                self?.keyboardRootView.render(
-                    speechCapture: .keyboardSpeechCapture(.probing),
-                    announce: true
-                )
-            }
-
-            let snapshot = await speechCaptureCoordinator.probeSnapshot()
-            guard !Task.isCancelled else { return }
             guard let self else { return }
+            isRecognitionActive = true
+            defer { isRecognitionActive = false }
 
-            keyboardRootView.render(speechCapture: snapshot, announce: true)
+            for await event in speechCaptureCoordinator.recognitionEvents(
+                locale: locale,
+                documentContextBeforeInput: context
+            ) {
+                guard !Task.isCancelled else { return }
+                keyboardRootView.render(
+                    speechCapture: .keyboardSpeechCapture(event.state),
+                    announce: true
+                )
+                apply(event.actions)
+            }
+        }
+    }
+
+    private func apply(_ actions: [KeyboardTextInsertionAction]) {
+        for action in actions {
+            switch action {
+            case .insertText(let value):
+                textDocumentProxy.insertText(value)
+            case .deleteBackward(let count):
+                for _ in 0..<count.value {
+                    textDocumentProxy.deleteBackward()
+                }
+            }
         }
     }
 

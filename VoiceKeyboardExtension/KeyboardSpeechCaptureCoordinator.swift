@@ -1,3 +1,4 @@
+import Foundation
 import VoiceKeyboardCore
 import VoiceKeyboardInterfaces
 import VoiceKeyboardModels
@@ -6,10 +7,12 @@ import VoiceKeyboardPresentation
 struct KeyboardSpeechCaptureCoordinator {
     private let capabilityChecker: any CapabilityChecking
     private let readinessService: KeyboardSpeechCaptureReadinessService
+    private let recognitionSession: KeyboardSpeechRecognitionSession
 
     init(
         capabilityChecker: any CapabilityChecking = KeyboardAudioCapabilityChecker(),
         audioProbe: (any AudioCaptureProbing)? = KeyboardAudioInputProbe(),
+        speechService: any SpeechRecognitionService = KeyboardSpeechRecognitionService(),
         stateMachine: KeyboardSpeechCaptureStateMachine = KeyboardSpeechCaptureStateMachine()
     ) {
         self.capabilityChecker = capabilityChecker
@@ -17,6 +20,10 @@ struct KeyboardSpeechCaptureCoordinator {
             capabilityChecker: capabilityChecker,
             audioProbe: audioProbe,
             stateMachine: stateMachine
+        )
+        recognitionSession = KeyboardSpeechRecognitionSession(
+            speechService: speechService,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: Locale.current.identifier))
         )
     }
 
@@ -43,5 +50,15 @@ struct KeyboardSpeechCaptureCoordinator {
         }
         let state = await readinessService.probeState(duration: duration)
         return .keyboardSpeechCapture(state)
+    }
+
+    func recognitionEvents(
+        locale: VoiceKeyboardLocale,
+        documentContextBeforeInput: String?
+    ) -> AsyncStream<KeyboardSpeechRecognitionEvent> {
+        recognitionSession.events(
+            locale: locale,
+            documentContextBeforeInput: documentContextBeforeInput
+        )
     }
 }
