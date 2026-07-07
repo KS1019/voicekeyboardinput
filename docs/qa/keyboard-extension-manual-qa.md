@@ -6,6 +6,7 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 
 - Build and install `VoiceKeyboardInput` on an iOS 26+ simulator or device.
 - Run `make verify` first so package, UIKit, app UI, build, preview layout, and generated-file checks are green.
+- Run `make keyboard-permission-policy-check` if `Allow Full Access` is missing in Settings or App Group handoff fails.
 - Turn `Allow Full Access` on for `Voice Keyboard` when validating keyboard-side STT. The extension requests open access so Settings exposes the switch; the first STT path still records diagnostics if the platform blocks microphone or Speech access.
 - The signed app and keyboard extension must both have the `group.com.ks1019.voicekeyboardinput` App Group entitlement. For physical devices, also enable that App Group for both bundle identifiers in the Apple Developer portal before signing.
 - On Simulator, grant microphone access for both the containing app and keyboard extension before probing if you want to bypass the permission prompt:

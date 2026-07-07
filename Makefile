@@ -17,6 +17,7 @@ DEPENDENCY_POLICY_PATHS := project.yml VoiceKeyboardInput.xcodeproj/project.xcwo
 FORBIDDEN_PACKAGE_IMPORTS := '^[[:space:]]*import[[:space:]]+(AuralKit|UIKit|AVFoundation|Speech|FoundationModels)\b'
 EXTENSION_SAFE_PATHS := VoiceKeyboardExtension VoiceKeyboardUIKit
 FORBIDDEN_EXTENSION_APIS := 'UIApplication[.]shared|^[[:space:]]*import[[:space:]]+FoundationModels\b'
+APP_GROUP_ID := group.com.ks1019.voicekeyboardinput
 
 .PHONY: generate
 generate:
@@ -112,10 +113,19 @@ dependency-policy-check:
 	status=0; rg --quiet $(FORBIDDEN_PACKAGE_IMPORTS) $(PACKAGE_SWIFT_DIRS) || status=$$?; test $$status -eq 1
 	status=0; rg --quiet $(FORBIDDEN_EXTENSION_APIS) $(EXTENSION_SAFE_PATHS) || status=$$?; test $$status -eq 1
 
+.PHONY: keyboard-permission-policy-check
+keyboard-permission-policy-check:
+	rg --quiet 'RequestsOpenAccess:[[:space:]]*true' project.yml
+	test "$$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:RequestsOpenAccess' VoiceKeyboardExtension/Info.plist)" = "true"
+	rg --quiet '$(APP_GROUP_ID)' project.yml
+	rg --quiet '$(APP_GROUP_ID)' VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements
+	rg --quiet '$(APP_GROUP_ID)' VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements
+
 .PHONY: verify
 verify:
 	$(MAKE) package-strict-test
 	$(MAKE) dependency-policy-check
+	$(MAKE) keyboard-permission-policy-check
 	$(MAKE) generated-check
 	$(MAKE) build
 	$(MAKE) ui-kit-test
