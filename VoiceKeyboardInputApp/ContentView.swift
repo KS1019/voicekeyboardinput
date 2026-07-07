@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import VoiceKeyboardCore
 import VoiceKeyboardModels
 import VoiceKeyboardPresentation
@@ -52,6 +53,15 @@ struct ContentView: View {
                 Label("Add Voice Keyboard in Settings > General > Keyboard > Keyboards.", systemImage: "keyboard")
                 Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
                 Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "mic.circle")
+
+                Button {
+                    openApplicationSettings()
+                } label: {
+                    Label("Open Settings", systemImage: "gearshape")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("settings.openButton")
 
                 Text("If keyboard-process STT is unavailable, Mic opens this app so the app can transcribe and hand the result back through the shared App Group.")
                     .font(.footnote)
@@ -225,6 +235,11 @@ struct ContentView: View {
             documentContextBeforeInput: ""
         )
         commandPreview = CommandPreviewPresentationSnapshot(operations: operations)
+    }
+
+    private func openApplicationSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 }
 
