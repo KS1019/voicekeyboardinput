@@ -31,6 +31,10 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        guard sharedTranscriptStore != nil else {
+            renderSharedDictationUnavailableIfNeeded()
+            return
+        }
         guard !consumeSharedDictationTranscriptIfNeeded() else { return }
         renderCurrentSpeechCapture()
     }
@@ -87,6 +91,13 @@ public final class KeyboardViewController: UIInputViewController {
 
     @objc private func microphoneTapped() {
         if speechCaptureCoordinator.shouldOpenContainingAppForDictation() {
+            guard sharedTranscriptStore != nil else {
+                keyboardRootView.render(
+                    speechCapture: .sharedDictationUnavailable,
+                    announce: true
+                )
+                return
+            }
             openContainingAppForDictation()
             return
         }
@@ -151,6 +162,17 @@ public final class KeyboardViewController: UIInputViewController {
             announce: true
         )
         return true
+    }
+
+    private func renderSharedDictationUnavailableIfNeeded() {
+        guard speechCaptureCoordinator.shouldOpenContainingAppForDictation() else {
+            renderCurrentSpeechCapture()
+            return
+        }
+        keyboardRootView.render(
+            speechCapture: .sharedDictationUnavailable,
+            announce: true
+        )
     }
 
     private func openContainingAppForDictation() {

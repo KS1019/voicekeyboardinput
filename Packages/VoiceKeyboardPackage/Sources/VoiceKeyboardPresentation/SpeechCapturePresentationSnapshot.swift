@@ -32,4 +32,13 @@ public struct SpeechCapturePresentationSnapshot: Equatable, Sendable {
         activeMicrophoneBars: .inactive,
         voiceActivityState: .unavailable
     )
+
+    public static let sharedDictationUnavailable = SpeechCapturePresentationSnapshot(
+        transcriptText: "Shared App Group storage is unavailable.",
+        statusText: "Check App Group signing for the app and keyboard.",
+        microphoneTitle: "App Group unavailable",
+        microphoneTone: .critical,
+        activeMicrophoneBars: .inactive,
+        voiceActivityState: .unavailable
+    )
 }

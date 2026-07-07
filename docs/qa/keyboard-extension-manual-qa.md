@@ -37,6 +37,7 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 - If iOS blocks microphone capture in the keyboard process, tapping Mic opens the containing app through the dictation URL route.
 - The containing app requests microphone and Speech permission, records a short utterance, transcribes it, and saves the transcript to the shared App Group.
 - Return to the host app and show `Voice Keyboard` again; the keyboard consumes the latest shared transcript once and inserts it into the host text field.
+- If App Group signing is missing or mismatched, the keyboard shows `Shared App Group storage is unavailable.` instead of opening the app into a handoff path that cannot return text.
 - If the current OS cannot start either the legacy Speech path or the SpeechAnalyzer path, the keyboard shows speech unavailable rather than falling back silently.
 - The diagnostic log should include permission state, locale, audio session activation, input format, audio engine start, speech recognizer availability, recognition start, and stop reason.
 - Do not treat Simulator success as proof that real-device keyboard STT works.

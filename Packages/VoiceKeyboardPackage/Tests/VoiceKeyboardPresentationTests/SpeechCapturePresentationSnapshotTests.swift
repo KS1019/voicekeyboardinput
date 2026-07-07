@@ -46,4 +46,21 @@ final class SpeechCapturePresentationSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.activeMicrophoneBars, .inactive)
         XCTAssertEqual(snapshot.voiceActivityState, .unavailable)
     }
+
+    func testSharedDictationUnavailableSnapshotDescribesAppGroupSigningIssue() {
+        let snapshot = SpeechCapturePresentationSnapshot.sharedDictationUnavailable
+
+        XCTAssertEqual(
+            snapshot.transcriptText,
+            "Shared App Group storage is unavailable."
+        )
+        XCTAssertEqual(
+            snapshot.statusText,
+            "Check App Group signing for the app and keyboard."
+        )
+        XCTAssertEqual(snapshot.microphoneTitle, "App Group unavailable")
+        XCTAssertEqual(snapshot.microphoneTone, .critical)
+        XCTAssertEqual(snapshot.activeMicrophoneBars, .inactive)
+        XCTAssertEqual(snapshot.voiceActivityState, .unavailable)
+    }
 }
