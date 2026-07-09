@@ -5,6 +5,7 @@ import VoiceKeyboardModels
 
 enum VoiceInputLaunchStatus: Equatable {
     case idle
+    case sessionReady
     case requestingPermission
     case microphoneActive(peakPower: Float?)
     case transcriptShared(String)
@@ -15,6 +16,8 @@ enum VoiceInputLaunchStatus: Equatable {
         switch self {
         case .idle:
             "Ready"
+        case .sessionReady:
+            "Voice Session Ready"
         case .requestingPermission:
             "Requesting Microphone"
         case .microphoneActive:
@@ -31,7 +34,9 @@ enum VoiceInputLaunchStatus: Equatable {
     var message: String {
         switch self {
         case .idle:
-            "Tap Mic in the keyboard to open this app and start the microphone flow."
+            "Preparing a voice session lets the keyboard start dictation without reopening this app while the session is alive."
+        case .sessionReady:
+            "Voice Keyboard can start dictation from the keyboard while this app session is alive."
         case .requestingPermission:
             "Waiting for the iOS microphone permission prompt."
         case let .microphoneActive(peakPower):
@@ -53,12 +58,12 @@ enum VoiceInputLaunchStatus: Equatable {
 @MainActor
 @Observable
 final class VoiceInputLaunchModel {
-    private let microphoneActivator: any MicrophoneActivating
+    private let sessionController: any DictationSessionControlling
 
     var status = VoiceInputLaunchStatus.idle
 
-    init(microphoneActivator: any MicrophoneActivating = AppMicrophoneActivator()) {
-        self.microphoneActivator = microphoneActivator
+    init(sessionController: any DictationSessionControlling = AppBackgroundDictationSessionController()) {
+        self.sessionController = sessionController
     }
 
     func handleOpenURL(_ url: URL) {
@@ -72,13 +77,61 @@ final class VoiceInputLaunchModel {
     func startDictation() async {
         guard status != .requestingPermission else { return }
         status = .requestingPermission
-        status = await microphoneActivator.activate()
+        status = await sessionController.startFromContainingApp()
     }
+
+    func prepareSession() async {
+        guard status == .idle else { return }
+        status = await sessionController.prepareSession()
+    }
+}
+
+@MainActor
+protocol DictationSessionControlling {
+    func prepareSession() async -> VoiceInputLaunchStatus
+    func startFromContainingApp() async -> VoiceInputLaunchStatus
+    func cancelActiveSession() async
 }
 
 @MainActor
 protocol MicrophoneActivating {
     func activate() async -> VoiceInputLaunchStatus
+}
+
+@MainActor
+final class AppBackgroundDictationSessionController: DictationSessionControlling {
+    private let microphoneActivator: any MicrophoneActivating
+    private let sessionStoreProvider: () -> SharedDictationSessionStore?
+
+    init(
+        microphoneActivator: any MicrophoneActivating = AppMicrophoneActivator(),
+        sessionStoreProvider: @escaping () -> SharedDictationSessionStore? = {
+            SharedDictationSessionStore.appGroupStore()
+        }
+    ) {
+        self.microphoneActivator = microphoneActivator
+        self.sessionStoreProvider = sessionStoreProvider
+    }
+
+    func prepareSession() async -> VoiceInputLaunchStatus {
+        guard let sessionStore = sessionStoreProvider() else {
+            return .failed("Shared App Group storage is unavailable.")
+        }
+        sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: UUID().uuidString,
+            lastSeenAt: Date(),
+            sessionState: .armed
+        ))
+        return .sessionReady
+    }
+
+    func startFromContainingApp() async -> VoiceInputLaunchStatus {
+        await microphoneActivator.activate()
+    }
+
+    func cancelActiveSession() async {
+        sessionStoreProvider()?.saveStatus(.cancelled(token: nil))
+    }
 }
 
 struct AppMicrophoneActivator: MicrophoneActivating {

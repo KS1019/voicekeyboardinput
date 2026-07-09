@@ -210,7 +210,7 @@ struct ContentView: View {
             .red
         case .requestingPermission:
             .orange
-        case .idle:
+        case .idle, .sessionReady:
             .blue
         }
     }
@@ -295,7 +295,7 @@ private extension VoiceInputLaunchStatus {
         switch self {
         case .microphoneActive, .transcriptShared, .requestingPermission:
             true
-        case .failed, .idle, .permissionDenied:
+        case .failed, .idle, .sessionReady, .permissionDenied:
             false
         }
     }

@@ -17,5 +17,8 @@ private struct VoiceKeyboardAppRootView: View {
             .onOpenURL { url in
                 voiceInputLaunchModel.handleOpenURL(url)
             }
+            .task {
+                await voiceInputLaunchModel.prepareSession()
+            }
     }
 }

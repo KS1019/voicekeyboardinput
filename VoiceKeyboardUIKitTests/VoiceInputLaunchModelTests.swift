@@ -4,30 +4,38 @@ import XCTest
 @MainActor
 final class VoiceInputLaunchModelTests: XCTestCase {
     func testStartDictationPublishesInjectedProbeResult() async {
-        let activator = MicrophoneActivatorSpy(status: .microphoneActive(peakPower: -18))
-        let model = VoiceInputLaunchModel(microphoneActivator: activator)
+        let controller = DictationSessionControllerSpy(startStatus: .microphoneActive(peakPower: -18))
+        let model = VoiceInputLaunchModel(sessionController: controller)
 
         await model.startDictation()
 
         XCTAssertEqual(model.status, .microphoneActive(peakPower: -18))
-        let callCount = activator.recordedCallCount()
-        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(controller.recordedStartCallCount(), 1)
     }
 
     func testStartDictationURLStartsDictation() async throws {
-        let activator = MicrophoneActivatorSpy(status: .microphoneActive(peakPower: -12))
-        let model = VoiceInputLaunchModel(microphoneActivator: activator)
+        let controller = DictationSessionControllerSpy(startStatus: .microphoneActive(peakPower: -12))
+        let model = VoiceInputLaunchModel(sessionController: controller)
 
         model.handleOpenURL(try XCTUnwrap(URL(string: "voicekeyboard://start-dictation")))
         await waitForStatus(.microphoneActive(peakPower: -12), in: model)
 
-        let callCount = activator.recordedCallCount()
-        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(controller.recordedStartCallCount(), 1)
+    }
+
+    func testPrepareSessionPublishesSessionReady() async {
+        let controller = DictationSessionControllerSpy(prepareStatus: .sessionReady)
+        let model = VoiceInputLaunchModel(sessionController: controller)
+
+        await model.prepareSession()
+
+        XCTAssertEqual(model.status, .sessionReady)
+        XCTAssertEqual(controller.recordedPrepareCallCount(), 1)
     }
 
     func testStartDictationIgnoresOverlappingActivation() async {
-        let activator = SuspendedMicrophoneActivator()
-        let model = VoiceInputLaunchModel(microphoneActivator: activator)
+        let controller = SuspendedDictationSessionController()
+        let model = VoiceInputLaunchModel(sessionController: controller)
 
         let firstStart = Task { await model.startDictation() }
         await waitForStatus(.requestingPermission, in: model)
@@ -37,24 +45,22 @@ final class VoiceInputLaunchModelTests: XCTestCase {
             await Task.yield()
         }
 
-        let callCount = activator.recordedCallCount()
-        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(controller.recordedStartCallCount(), 1)
 
-        activator.finish(with: .microphoneActive(peakPower: -9))
+        controller.finish(with: .microphoneActive(peakPower: -9))
         await firstStart.value
         await secondStart.value
     }
 
     func testUnknownURLDoesNotStartDictation() async throws {
-        let activator = MicrophoneActivatorSpy(status: .microphoneActive(peakPower: -12))
-        let model = VoiceInputLaunchModel(microphoneActivator: activator)
+        let controller = DictationSessionControllerSpy(startStatus: .microphoneActive(peakPower: -12))
+        let model = VoiceInputLaunchModel(sessionController: controller)
 
         model.handleOpenURL(try XCTUnwrap(URL(string: "voicekeyboard://settings")))
         await Task.yield()
 
         XCTAssertEqual(model.status, .idle)
-        let callCount = activator.recordedCallCount()
-        XCTAssertEqual(callCount, 0)
+        XCTAssertEqual(controller.recordedStartCallCount(), 0)
     }
 
     private func waitForStatus(
@@ -71,35 +77,58 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 }
 
 @MainActor
-private final class MicrophoneActivatorSpy: MicrophoneActivating {
-    private(set) var callCount = 0
-    private let status: VoiceInputLaunchStatus
+private final class DictationSessionControllerSpy: DictationSessionControlling {
+    private var prepareCallCount = 0
+    private var startCallCount = 0
+    private let prepareStatus: VoiceInputLaunchStatus
+    private let startStatus: VoiceInputLaunchStatus
 
-    init(status: VoiceInputLaunchStatus) {
-        self.status = status
+    init(
+        prepareStatus: VoiceInputLaunchStatus = .sessionReady,
+        startStatus: VoiceInputLaunchStatus = .microphoneActive(peakPower: nil)
+    ) {
+        self.prepareStatus = prepareStatus
+        self.startStatus = startStatus
     }
 
-    func activate() async -> VoiceInputLaunchStatus {
-        callCount += 1
-        return status
+    func prepareSession() async -> VoiceInputLaunchStatus {
+        prepareCallCount += 1
+        return prepareStatus
     }
 
-    func recordedCallCount() -> Int {
-        callCount
+    func startFromContainingApp() async -> VoiceInputLaunchStatus {
+        startCallCount += 1
+        return startStatus
+    }
+
+    func cancelActiveSession() async {}
+
+    func recordedPrepareCallCount() -> Int {
+        prepareCallCount
+    }
+
+    func recordedStartCallCount() -> Int {
+        startCallCount
     }
 }
 
 @MainActor
-private final class SuspendedMicrophoneActivator: MicrophoneActivating {
+private final class SuspendedDictationSessionController: DictationSessionControlling {
     private var continuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>] = []
-    private var callCount = 0
+    private var startCallCount = 0
 
-    func activate() async -> VoiceInputLaunchStatus {
-        callCount += 1
+    func prepareSession() async -> VoiceInputLaunchStatus {
+        .sessionReady
+    }
+
+    func startFromContainingApp() async -> VoiceInputLaunchStatus {
+        startCallCount += 1
         return await withCheckedContinuation { continuation in
             continuations.append(continuation)
         }
     }
+
+    func cancelActiveSession() async {}
 
     func finish(with status: VoiceInputLaunchStatus) {
         let continuations = continuations
@@ -107,7 +136,7 @@ private final class SuspendedMicrophoneActivator: MicrophoneActivating {
         continuations.forEach { $0.resume(returning: status) }
     }
 
-    func recordedCallCount() -> Int {
-        callCount
+    func recordedStartCallCount() -> Int {
+        startCallCount
     }
 }
