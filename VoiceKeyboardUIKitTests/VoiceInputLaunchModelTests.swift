@@ -61,6 +61,67 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         }
     }
 
+    func testPreparedAppSessionPublishesRecordingStatusWhileStartCommandRuns() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = SuspendedMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        store.saveCommand(SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        ))
+
+        await waitForSessionStatus(in: store) { status in
+            if case .recording = status { return true }
+            return false
+        }
+
+        XCTAssertEqual(activator.recordedCallCount(), 1)
+        activator.finish(with: .transcriptShared("hello"))
+    }
+
+    func testPreparedAppSessionCancelsActiveStartWhenStopCommandArrives() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = CancellableSuspendedMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        store.saveCommand(SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        ))
+        await waitForSessionStatus(in: store) { status in
+            if case .recording = status { return true }
+            return false
+        }
+
+        store.saveCommand(SharedDictationSessionCommand.stop(
+            source: .keyboard,
+            requestedAt: Date()
+        ))
+
+        await waitForSessionStatus(in: store) { status in
+            if case .cancelled = status { return true }
+            return false
+        }
+
+        await waitForCancellation(in: activator)
+        XCTAssertEqual(activator.recordedCancellationCount(), 1)
+    }
+
     func testStartDictationIgnoresOverlappingActivation() async {
         let controller = SuspendedDictationSessionController()
         let model = VoiceInputLaunchModel(sessionController: controller)
@@ -113,6 +174,29 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         }
         XCTAssertEqual(activator.recordedCallCount(), 1, file: file, line: line)
     }
+
+    private func waitForSessionStatus(
+        in store: SharedDictationSessionStore,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        matches: (SharedDictationSessionStatus?) -> Bool
+    ) async {
+        for _ in 0..<20 where !matches(store.status()) {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(matches(store.status()), "Unexpected status: \(String(describing: store.status()))", file: file, line: line)
+    }
+
+    private func waitForCancellation(
+        in activator: CancellableSuspendedMicrophoneActivator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedCancellationCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedCancellationCount(), 1, file: file, line: line)
+    }
 }
 
 @MainActor
@@ -131,6 +215,60 @@ private final class MicrophoneActivatorSpy: MicrophoneActivating {
 
     func recordedCallCount() -> Int {
         callCount
+    }
+}
+
+@MainActor
+private final class SuspendedMicrophoneActivator: MicrophoneActivating {
+    private var continuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>] = []
+    private var callCount = 0
+
+    func activate() async -> VoiceInputLaunchStatus {
+        callCount += 1
+        return await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func finish(with status: VoiceInputLaunchStatus) {
+        let continuations = continuations
+        self.continuations.removeAll()
+        continuations.forEach { $0.resume(returning: status) }
+    }
+
+    func recordedCallCount() -> Int {
+        callCount
+    }
+}
+
+@MainActor
+private final class CancellableSuspendedMicrophoneActivator: MicrophoneActivating {
+    private var continuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>] = []
+    private var callCount = 0
+    private var cancellationCount = 0
+
+    func activate() async -> VoiceInputLaunchStatus {
+        callCount += 1
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                continuations.append(continuation)
+            }
+        } onCancel: {
+            Task { @MainActor in
+                self.cancellationCount += 1
+                self.finish(with: .failed("Cancelled"))
+            }
+        }
+    }
+
+    func finish(with status: VoiceInputLaunchStatus) {
+        let continuations = continuations
+        self.continuations.removeAll()
+        continuations.forEach { $0.resume(returning: status) }
+    }
+
+    func recordedCancellationCount() -> Int {
+        cancellationCount
     }
 }
 

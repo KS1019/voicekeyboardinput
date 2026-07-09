@@ -10,6 +10,7 @@ public final class KeyboardViewController: UIInputViewController {
     private lazy var sharedTranscriptStore = SharedDictationTranscriptStore.appGroupStore()
     private lazy var sharedSessionStore = SharedDictationSessionStore.appGroupStore()
     private var renderTask: Task<Void, Never>?
+    private var sharedDictationPollingTask: Task<Void, Never>?
     private var isRecognitionActive = false
 
     public override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
@@ -28,6 +29,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     deinit {
         renderTask?.cancel()
+        sharedDictationPollingTask?.cancel()
     }
 
     public override func viewWillAppear(_ animated: Bool) {
@@ -91,6 +93,11 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func microphoneTapped() {
+        if sharedSessionStore?.status().acceptsKeyboardStopCommand == true {
+            stopSharedDictationSession()
+            return
+        }
+
         let decision = KeyboardDictationStartDecision.evaluate(
             directKeyboardRecognitionReady: !speechCaptureCoordinator.shouldOpenContainingAppForDictation(),
             hasSessionStore: sharedSessionStore != nil,
@@ -120,6 +127,9 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func startDirectKeyboardRecognition() {
+        sharedDictationPollingTask?.cancel()
+        sharedDictationPollingTask = nil
+
         if isRecognitionActive {
             renderTask?.cancel()
             isRecognitionActive = false
@@ -163,9 +173,65 @@ public final class KeyboardViewController: UIInputViewController {
         let command = SharedDictationSessionCommand.start(source: .keyboard)
         sharedSessionStore.saveCommand(command)
         keyboardRootView.render(
-            speechCapture: .sharedDictationStartRequested,
+            speechCapture: .sharedDictationSessionStatus(.commandPending(
+                token: command.token,
+                requestedAt: command.requestedAt
+            )),
             announce: true
         )
+        monitorSharedDictationSession(command: command)
+    }
+
+    private func stopSharedDictationSession() {
+        guard let sharedSessionStore else {
+            keyboardRootView.render(
+                speechCapture: .sharedDictationUnavailable,
+                announce: true
+            )
+            return
+        }
+        let command = SharedDictationSessionCommand.stop(source: .keyboard)
+        sharedSessionStore.saveCommand(command)
+        keyboardRootView.render(
+            speechCapture: .sharedDictationStopping,
+            announce: true
+        )
+        monitorSharedDictationSession(command: command)
+    }
+
+    private func monitorSharedDictationSession(command: SharedDictationSessionCommand) {
+        sharedDictationPollingTask?.cancel()
+        sharedDictationPollingTask = Task { [weak self] in
+            let deadline = Date().addingTimeInterval(16)
+
+            while !Task.isCancelled {
+                guard let self else { return }
+
+                if consumeSharedDictationTranscriptIfNeeded() {
+                    return
+                }
+
+                if let status = sharedSessionStore?.status() {
+                    keyboardRootView.render(
+                        speechCapture: .sharedDictationSessionStatus(status),
+                        announce: false
+                    )
+                    if status.stopsKeyboardPolling {
+                        return
+                    }
+                }
+
+                if Date() >= deadline {
+                    keyboardRootView.render(
+                        speechCapture: .sharedDictationTimedOut,
+                        announce: true
+                    )
+                    return
+                }
+
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
     }
 
     private func apply(_ actions: [KeyboardTextInsertionAction]) {
@@ -191,6 +257,8 @@ public final class KeyboardViewController: UIInputViewController {
         }
 
         textDocumentProxy.insertText(transcript.text)
+        sharedDictationPollingTask?.cancel()
+        sharedDictationPollingTask = nil
         keyboardRootView.render(
             speechCapture: .keyboardSpeechCapture(.inserted(transcript.text)),
             announce: true
@@ -234,15 +302,6 @@ public final class KeyboardViewController: UIInputViewController {
 }
 
 private extension SpeechCapturePresentationSnapshot {
-    static let sharedDictationStartRequested = SpeechCapturePresentationSnapshot(
-        transcriptText: "Listening request sent.",
-        statusText: "Voice Keyboard Input is starting dictation.",
-        microphoneTitle: "Starting",
-        microphoneTone: .warning,
-        activeMicrophoneBars: .checking,
-        voiceActivityState: .processing
-    )
-
     static let containingAppOpenFailed = SpeechCapturePresentationSnapshot(
         transcriptText: "Open Voice Keyboard Input to start voice input.",
         statusText: "Could not open the app from this keyboard.",
@@ -251,4 +310,38 @@ private extension SpeechCapturePresentationSnapshot {
         activeMicrophoneBars: .inactive,
         voiceActivityState: .idle
     )
+
+    static let sharedDictationTimedOut = SpeechCapturePresentationSnapshot(
+        transcriptText: "Voice input timed out.",
+        statusText: "Open Voice Keyboard Input and try again.",
+        microphoneTitle: "Open app",
+        microphoneTone: .critical,
+        activeMicrophoneBars: .inactive,
+        voiceActivityState: .idle
+    )
+
+    static let sharedDictationStopping = SpeechCapturePresentationSnapshot(
+        transcriptText: "Stopping voice input...",
+        statusText: "Stopping voice input...",
+        microphoneTitle: "Speak",
+        microphoneTone: .warning,
+        activeMicrophoneBars: .inactive,
+        voiceActivityState: .processing
+    )
+}
+
+private extension SharedDictationSessionStatus {
+    var stopsKeyboardPolling: Bool {
+        switch self {
+        case .failed, .cancelled:
+            true
+        case .idle,
+             .commandPending,
+             .commandAcknowledged,
+             .recording,
+             .transcribing,
+             .transcriptReady:
+            false
+        }
+    }
 }

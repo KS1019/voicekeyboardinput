@@ -103,6 +103,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private let microphoneActivator: any MicrophoneActivating
     private let sessionStoreProvider: () -> SharedDictationSessionStore?
     private var commandMonitorTask: Task<Void, Never>?
+    private var activeStartTask: Task<Void, Never>?
     private var lastClaimedCommandToken: String?
 
     init(
@@ -135,6 +136,8 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     func cancelActiveSession() async {
         commandMonitorTask?.cancel()
         commandMonitorTask = nil
+        activeStartTask?.cancel()
+        activeStartTask = nil
         sessionStoreProvider()?.saveStatus(.cancelled(token: nil))
     }
 
@@ -159,24 +162,47 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
 
         switch command.kind {
         case .start:
-            sessionStore.saveStatus(.commandAcknowledged(
-                token: command.token,
-                acknowledgedAt: Date()
-            ))
-            sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
-                token: command.token,
-                lastSeenAt: Date(),
-                sessionState: .recording
-            ))
-            let result = await microphoneActivator.activate()
-            saveCompletionStatus(for: command.token, result: result, in: sessionStore)
+            startDictation(for: command, in: sessionStore)
         case .stop, .cancel:
+            activeStartTask?.cancel()
+            activeStartTask = nil
             sessionStore.saveStatus(.cancelled(token: command.token))
             sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
                 token: command.token,
                 lastSeenAt: Date(),
                 sessionState: .armed
             ))
+        }
+    }
+
+    private func startDictation(
+        for command: SharedDictationSessionCommand,
+        in sessionStore: SharedDictationSessionStore
+    ) {
+        activeStartTask?.cancel()
+
+        let startedAt = Date()
+        sessionStore.saveStatus(.commandAcknowledged(
+            token: command.token,
+            acknowledgedAt: startedAt
+        ))
+        sessionStore.saveStatus(.recording(
+            token: command.token,
+            startedAt: startedAt,
+            timeoutSeconds: 8
+        ))
+        sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: command.token,
+            lastSeenAt: startedAt,
+            sessionState: .recording
+        ))
+
+        activeStartTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await microphoneActivator.activate()
+            guard !Task.isCancelled else { return }
+            saveCompletionStatus(for: command.token, result: result, in: sessionStore)
+            activeStartTask = nil
         }
     }
 

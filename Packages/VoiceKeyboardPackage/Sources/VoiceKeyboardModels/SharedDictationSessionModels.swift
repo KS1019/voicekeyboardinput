@@ -90,6 +90,23 @@ public enum SharedDictationSessionStatus: Codable, Equatable, Sendable {
     case cancelled(token: String?)
 }
 
+public extension SharedDictationSessionStatus {
+    var acceptsKeyboardStopCommand: Bool {
+        switch self {
+        case .commandPending,
+             .commandAcknowledged,
+             .recording,
+             .transcribing:
+            true
+        case .idle,
+             .transcriptReady,
+             .failed,
+             .cancelled:
+            false
+        }
+    }
+}
+
 public struct SharedDictationAppHeartbeat: Codable, Equatable, Sendable {
     public enum SessionState: String, Codable, Sendable {
         case unavailable
