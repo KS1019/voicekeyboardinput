@@ -102,6 +102,8 @@ protocol MicrophoneActivating {
 final class AppBackgroundDictationSessionController: DictationSessionControlling {
     private let microphoneActivator: any MicrophoneActivating
     private let sessionStoreProvider: () -> SharedDictationSessionStore?
+    private var commandMonitorTask: Task<Void, Never>?
+    private var lastClaimedCommandToken: String?
 
     init(
         microphoneActivator: any MicrophoneActivating = AppMicrophoneActivator(),
@@ -122,6 +124,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             lastSeenAt: Date(),
             sessionState: .armed
         ))
+        startCommandMonitor()
         return .sessionReady
     }
 
@@ -130,7 +133,79 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     func cancelActiveSession() async {
+        commandMonitorTask?.cancel()
+        commandMonitorTask = nil
         sessionStoreProvider()?.saveStatus(.cancelled(token: nil))
+    }
+
+    private func startCommandMonitor() {
+        guard commandMonitorTask == nil else { return }
+        commandMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.consumeCommandIfNeeded()
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    private func consumeCommandIfNeeded() async {
+        guard let sessionStore = sessionStoreProvider() else { return }
+        guard let command = sessionStore.claimCommand(
+            afterLastClaimedToken: lastClaimedCommandToken
+        ) else {
+            return
+        }
+        lastClaimedCommandToken = command.token
+
+        switch command.kind {
+        case .start:
+            sessionStore.saveStatus(.commandAcknowledged(
+                token: command.token,
+                acknowledgedAt: Date()
+            ))
+            sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
+                token: command.token,
+                lastSeenAt: Date(),
+                sessionState: .recording
+            ))
+            let result = await microphoneActivator.activate()
+            saveCompletionStatus(for: command.token, result: result, in: sessionStore)
+        case .stop, .cancel:
+            sessionStore.saveStatus(.cancelled(token: command.token))
+            sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
+                token: command.token,
+                lastSeenAt: Date(),
+                sessionState: .armed
+            ))
+        }
+    }
+
+    private func saveCompletionStatus(
+        for token: String,
+        result: VoiceInputLaunchStatus,
+        in sessionStore: SharedDictationSessionStore
+    ) {
+        switch result {
+        case .transcriptShared:
+            sessionStore.saveStatus(.transcriptReady(token: token))
+        case .permissionDenied:
+            sessionStore.saveStatus(.failed(
+                token: token,
+                message: "Microphone permission is denied."
+            ))
+        case let .failed(message):
+            sessionStore.saveStatus(.failed(token: token, message: message))
+        case .idle, .sessionReady, .requestingPermission, .microphoneActive:
+            sessionStore.saveStatus(.commandAcknowledged(
+                token: token,
+                acknowledgedAt: Date()
+            ))
+        }
+        sessionStore.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: token,
+            lastSeenAt: Date(),
+            sessionState: .armed
+        ))
     }
 }
 

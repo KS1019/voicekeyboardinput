@@ -8,6 +8,7 @@ public final class KeyboardViewController: UIInputViewController {
     private let keyboardRootView = KeyboardRootView()
     private let speechCaptureCoordinator = KeyboardSpeechCaptureCoordinator()
     private lazy var sharedTranscriptStore = SharedDictationTranscriptStore.appGroupStore()
+    private lazy var sharedSessionStore = SharedDictationSessionStore.appGroupStore()
     private var renderTask: Task<Void, Never>?
     private var isRecognitionActive = false
 
@@ -90,7 +91,18 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func microphoneTapped() {
-        if speechCaptureCoordinator.shouldOpenContainingAppForDictation() {
+        let decision = KeyboardDictationStartDecision.evaluate(
+            directKeyboardRecognitionReady: !speechCaptureCoordinator.shouldOpenContainingAppForDictation(),
+            hasSessionStore: sharedSessionStore != nil,
+            appHeartbeatIsFresh: sharedSessionStore?.heartbeat()?.isFresh(maxAge: 5) == true
+        )
+
+        switch decision {
+        case .startDirectKeyboardRecognition:
+            startDirectKeyboardRecognition()
+        case .writeSharedStartCommand:
+            startSharedDictationSession()
+        case .openContainingApp:
             guard sharedTranscriptStore != nil else {
                 keyboardRootView.render(
                     speechCapture: .sharedDictationUnavailable,
@@ -99,9 +111,15 @@ public final class KeyboardViewController: UIInputViewController {
                 return
             }
             openContainingAppForDictation()
-            return
+        case .showSharedStorageUnavailable:
+            keyboardRootView.render(
+                speechCapture: .sharedDictationUnavailable,
+                announce: true
+            )
         }
+    }
 
+    private func startDirectKeyboardRecognition() {
         if isRecognitionActive {
             renderTask?.cancel()
             isRecognitionActive = false
@@ -132,6 +150,22 @@ public final class KeyboardViewController: UIInputViewController {
                 apply(event.actions)
             }
         }
+    }
+
+    private func startSharedDictationSession() {
+        guard let sharedSessionStore else {
+            keyboardRootView.render(
+                speechCapture: .sharedDictationUnavailable,
+                announce: true
+            )
+            return
+        }
+        let command = SharedDictationSessionCommand.start(source: .keyboard)
+        sharedSessionStore.saveCommand(command)
+        keyboardRootView.render(
+            speechCapture: .sharedDictationStartRequested,
+            announce: true
+        )
     }
 
     private func apply(_ actions: [KeyboardTextInsertionAction]) {
@@ -200,6 +234,15 @@ public final class KeyboardViewController: UIInputViewController {
 }
 
 private extension SpeechCapturePresentationSnapshot {
+    static let sharedDictationStartRequested = SpeechCapturePresentationSnapshot(
+        transcriptText: "Listening request sent.",
+        statusText: "Voice Keyboard Input is starting dictation.",
+        microphoneTitle: "Starting",
+        microphoneTone: .warning,
+        activeMicrophoneBars: .checking,
+        voiceActivityState: .processing
+    )
+
     static let containingAppOpenFailed = SpeechCapturePresentationSnapshot(
         transcriptText: "Open Voice Keyboard Input to start voice input.",
         statusText: "Could not open the app from this keyboard.",

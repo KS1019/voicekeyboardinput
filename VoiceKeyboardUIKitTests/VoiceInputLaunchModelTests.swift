@@ -1,4 +1,5 @@
 @testable import VoiceKeyboardInput
+import VoiceKeyboardModels
 import XCTest
 
 @MainActor
@@ -31,6 +32,33 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         XCTAssertEqual(model.status, .sessionReady)
         XCTAssertEqual(controller.recordedPrepareCallCount(), 1)
+    }
+
+    func testPreparedAppSessionConsumesSharedStartCommand() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = MicrophoneActivatorSpy(status: .transcriptShared("hello"))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        let prepareStatus = await controller.prepareSession()
+        store.saveCommand(SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        ))
+
+        await waitForStartCall(in: activator)
+
+        XCTAssertEqual(prepareStatus, .sessionReady)
+        XCTAssertEqual(activator.recordedCallCount(), 1)
+        if case .transcriptReady = store.status() {
+        } else {
+            XCTFail("Expected transcriptReady status, got \(store.status())")
+        }
     }
 
     func testStartDictationIgnoresOverlappingActivation() async {
@@ -73,6 +101,36 @@ final class VoiceInputLaunchModelTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(model.status, status, file: file, line: line)
+    }
+
+    private func waitForStartCall(
+        in activator: MicrophoneActivatorSpy,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedCallCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedCallCount(), 1, file: file, line: line)
+    }
+}
+
+@MainActor
+private final class MicrophoneActivatorSpy: MicrophoneActivating {
+    private var callCount = 0
+    private let status: VoiceInputLaunchStatus
+
+    init(status: VoiceInputLaunchStatus) {
+        self.status = status
+    }
+
+    func activate() async -> VoiceInputLaunchStatus {
+        callCount += 1
+        return status
+    }
+
+    func recordedCallCount() -> Int {
+        callCount
     }
 }
 
