@@ -12,6 +12,7 @@ public struct SharedDictationSessionCommand: Codable, Equatable, Sendable {
         case containingApp
     }
 
+    public let sessionID: String
     public let token: String
     public let kind: Kind
     public let source: Source
@@ -23,8 +24,10 @@ public struct SharedDictationSessionCommand: Codable, Equatable, Sendable {
         kind: Kind,
         source: Source,
         requestedAt: Date,
-        expiresAt: Date
+        expiresAt: Date,
+        sessionID: String? = nil
     ) {
+        self.sessionID = sessionID ?? UUID().uuidString
         self.token = token
         self.kind = kind
         self.source = source
@@ -35,18 +38,21 @@ public struct SharedDictationSessionCommand: Codable, Equatable, Sendable {
     public static func start(
         source: Source,
         requestedAt: Date = Date(),
-        expiryInterval: TimeInterval = 10
+        expiryInterval: TimeInterval = 10,
+        sessionID: String = UUID().uuidString
     ) -> SharedDictationSessionCommand {
         SharedDictationSessionCommand(
             token: UUID().uuidString,
             kind: .start,
             source: source,
             requestedAt: requestedAt,
-            expiresAt: requestedAt.addingTimeInterval(expiryInterval)
+            expiresAt: requestedAt.addingTimeInterval(expiryInterval),
+            sessionID: sessionID
         )
     }
 
     public static func stop(
+        sessionID: String,
         source: Source,
         requestedAt: Date = Date(),
         expiryInterval: TimeInterval = 10
@@ -56,11 +62,26 @@ public struct SharedDictationSessionCommand: Codable, Equatable, Sendable {
             kind: .stop,
             source: source,
             requestedAt: requestedAt,
-            expiresAt: requestedAt.addingTimeInterval(expiryInterval)
+            expiresAt: requestedAt.addingTimeInterval(expiryInterval),
+            sessionID: sessionID
+        )
+    }
+
+    public static func stop(
+        source: Source,
+        requestedAt: Date = Date(),
+        expiryInterval: TimeInterval = 10
+    ) -> SharedDictationSessionCommand {
+        stop(
+            sessionID: UUID().uuidString,
+            source: source,
+            requestedAt: requestedAt,
+            expiryInterval: expiryInterval
         )
     }
 
     public static func cancel(
+        sessionID: String,
         source: Source,
         requestedAt: Date = Date(),
         expiryInterval: TimeInterval = 10
@@ -70,8 +91,42 @@ public struct SharedDictationSessionCommand: Codable, Equatable, Sendable {
             kind: .cancel,
             source: source,
             requestedAt: requestedAt,
-            expiresAt: requestedAt.addingTimeInterval(expiryInterval)
+            expiresAt: requestedAt.addingTimeInterval(expiryInterval),
+            sessionID: sessionID
         )
+    }
+
+    public static func cancel(
+        source: Source,
+        requestedAt: Date = Date(),
+        expiryInterval: TimeInterval = 10
+    ) -> SharedDictationSessionCommand {
+        cancel(
+            sessionID: UUID().uuidString,
+            source: source,
+            requestedAt: requestedAt,
+            expiryInterval: expiryInterval
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case token
+        case kind
+        case source
+        case requestedAt
+        case expiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let token = try container.decode(String.self, forKey: .token)
+        self.sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID) ?? token
+        self.token = token
+        self.kind = try container.decode(Kind.self, forKey: .kind)
+        self.source = try container.decode(Source.self, forKey: .source)
+        self.requestedAt = try container.decode(Date.self, forKey: .requestedAt)
+        self.expiresAt = try container.decode(Date.self, forKey: .expiresAt)
     }
 
     public func isExpired(at date: Date = Date()) -> Bool {

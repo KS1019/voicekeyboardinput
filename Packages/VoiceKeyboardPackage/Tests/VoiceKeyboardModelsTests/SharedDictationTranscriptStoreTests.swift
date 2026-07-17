@@ -41,6 +41,30 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         XCTAssertNil(secondConsumedTranscript)
     }
 
+    func testTranscriptForAnotherSessionIsNotAccepted() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-a",
+            commandToken: "command-a",
+            text: "only session a",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_003)
+        ))
+        store.save(transcript)
+
+        XCTAssertNil(store.consumeLatestTranscript(
+            forSessionID: "session-b",
+            afterLastConsumedToken: nil
+        ))
+        XCTAssertEqual(
+            store.consumeLatestTranscript(
+                forSessionID: "session-a",
+                afterLastConsumedToken: nil
+            ),
+            transcript
+        )
+    }
+
     func testClaimMarksTranscriptConsumedBeforeCallerInsertsIt() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)

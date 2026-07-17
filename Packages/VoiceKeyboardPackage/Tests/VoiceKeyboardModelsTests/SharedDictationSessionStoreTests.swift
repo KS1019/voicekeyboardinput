@@ -66,6 +66,36 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         }
     }
 
+    func testSavingCommandDoesNotOverwriteAppOwnedStatus() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let status = SharedDictationSessionStatus.recording(
+            token: "app-command",
+            startedAt: Date(timeIntervalSince1970: 20),
+            timeoutSeconds: 8
+        )
+        let command = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date(timeIntervalSince1970: 21)
+        )
+
+        store.saveStatus(status)
+        store.saveCommand(command)
+
+        XCTAssertEqual(store.status(), status)
+    }
+
+    func testStopCommandTargetsTheStartSession() throws {
+        let start = SharedDictationSessionCommand.start(source: .keyboard)
+        let stop = SharedDictationSessionCommand.stop(
+            sessionID: start.sessionID,
+            source: .keyboard
+        )
+
+        XCTAssertEqual(stop.sessionID, start.sessionID)
+        XCTAssertNotEqual(stop.token, start.token)
+    }
+
     func testHeartbeatRoundTripsThroughDefaults() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)

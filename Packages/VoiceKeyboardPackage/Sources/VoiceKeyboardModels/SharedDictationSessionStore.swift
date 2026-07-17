@@ -24,7 +24,6 @@ public final class SharedDictationSessionStore {
 
     public func saveCommand(_ command: SharedDictationSessionCommand) {
         save(command, forKey: Key.command)
-        saveStatus(.commandPending(token: command.token, requestedAt: command.requestedAt))
     }
 
     public func latestCommand() -> SharedDictationSessionCommand? {
