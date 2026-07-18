@@ -5,34 +5,79 @@ import VoiceKeyboardInterfaces
 import VoiceKeyboardModels
 
 actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
+    private final class LegacyAudioTapGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isActive = true
+
+        func invalidate() {
+            lock.lock()
+            isActive = false
+            lock.unlock()
+        }
+
+        func append(
+            _ buffer: AVAudioPCMBuffer,
+            to request: SFSpeechAudioBufferRecognitionRequest
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard isActive else { return }
+            request.append(buffer)
+        }
+    }
+
+    private struct ActiveRun {
+        let generation: UInt64
+        var engine: AVAudioEngine?
+        var tapInstalled = false
+        var sessionActive = false
+        var analyzer: SpeechAnalyzer?
+        var analyzerTask: Task<Void, Never>?
+        var recognitionTasks: [Task<Void, Never>] = []
+        var inputContinuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
+        var legacyRequest: SFSpeechAudioBufferRecognitionRequest?
+        var legacyTask: SFSpeechRecognitionTask?
+        var legacyTapGate: LegacyAudioTapGate?
+        var stopping = false
+    }
+
     private let diagnostics: KeyboardSpeechRecognitionDiagnostics
-    private var engine: AVAudioEngine?
-    private var analyzer: SpeechAnalyzer?
-    private var inputContinuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
-    private var analyzerTask: Task<Void, Never>?
-    private var legacyRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var legacyTask: SFSpeechRecognitionTask?
+    private var nextGeneration: UInt64 = 0
+    private var activeRun: ActiveRun?
+    private var cleanupTasks: [UInt64: Task<Void, Never>] = [:]
 
     init(diagnostics: KeyboardSpeechRecognitionDiagnostics = KeyboardSpeechRecognitionDiagnostics()) {
         self.diagnostics = diagnostics
     }
 
     func start(locale: VoiceKeyboardLocale) async throws(SpeechRecognitionError) -> SpeechRecognitionUpdateStream {
+        guard activeRun == nil else {
+            throw .recognitionStartFailed("Speech recognition is already active")
+        }
+        nextGeneration &+= 1
+        let generation = nextGeneration
+        activeRun = ActiveRun(generation: generation)
         diagnostics.event("start", metadata: ["locale": locale.identifier])
         let strategy = KeyboardSpeechRecognitionRuntime.strategy(
             forOperatingSystemMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion
         )
         diagnostics.event("strategy", metadata: ["value": "\(strategy)"])
-        switch strategy {
-        case .legacyAudioBuffer:
-            return try await startLegacyAudioBufferRecognition(locale: locale)
-        case .speechAnalyzer:
-            return try await startSpeechAnalyzerRecognition(locale: locale)
+        do {
+            switch strategy {
+            case .legacyAudioBuffer:
+                return try await startLegacyAudioBufferRecognition(locale: locale, generation: generation)
+            case .speechAnalyzer:
+                return try await startSpeechAnalyzerRecognition(locale: locale, generation: generation)
+            }
+        } catch {
+            await requestCleanup(generation: generation)
+            throw error
         }
     }
 
     private func startSpeechAnalyzerRecognition(
-        locale: VoiceKeyboardLocale
+        locale: VoiceKeyboardLocale,
+        generation: UInt64
     ) async throws(SpeechRecognitionError) -> SpeechRecognitionUpdateStream {
         guard #available(iOS 27, *) else {
             diagnostics.failure("availability", error: .speechRecognizerUnavailable)
@@ -40,6 +85,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         try await ensureMicrophonePermission()
+        guard isCurrent(generation) else { throw .cancelled }
 
         guard SpeechTranscriber.isAvailable else {
             diagnostics.failure("availability", error: .speechRecognizerUnavailable)
@@ -56,12 +102,14 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         let transcriber = SpeechTranscriber(locale: supportedLocale, preset: .progressiveTranscription)
         let modules: [any SpeechModule] = [transcriber]
         let analyzer = SpeechAnalyzer(modules: modules)
-        self.analyzer = analyzer
+        guard isCurrent(generation) else { throw .cancelled }
+        activeRun?.analyzer = analyzer
 
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.record, mode: .measurement)
             try session.setActive(true)
+            activeRun?.sessionActive = true
             diagnostics.event("audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -70,11 +118,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         let engine = AVAudioEngine()
+        activeRun?.engine = engine
         let inputNode = engine.inputNode
         let naturalFormat = inputNode.outputFormat(forBus: 0)
         guard naturalFormat.channelCount > 0, naturalFormat.sampleRate > 0 else {
             diagnostics.failure("audio-input", error: .audioInputUnavailable)
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw .audioInputUnavailable
         }
 
@@ -85,23 +133,23 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
 
         do {
             try await analyzer.prepareToAnalyze(in: naturalFormat)
+            guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
         } catch {
             let mapped = SpeechRecognitionError.recognitionStartFailed(String(describing: error))
             diagnostics.failure("prepare", error: mapped)
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw mapped
         }
 
         let inputStream = AsyncThrowingStream<AnalyzerInput, Error> { continuation in
-            self.inputContinuation = continuation
+            Task { self.setInputContinuation(continuation, generation: generation) }
         }
         let converter: AnalyzerInputConverter
         do {
             converter = try await AnalyzerInputConverter.converter(compatibleWith: modules)
+            guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
         } catch {
             let mapped = SpeechRecognitionError.recognitionStartFailed(String(describing: error))
             diagnostics.failure("converter", error: mapped)
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw mapped
         }
 
@@ -111,42 +159,43 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 let inputs = try converter.convert(buffer, at: time)
                 Task {
                     for input in inputs {
-                        await self.yield(input)
+                        await self.yield(input, generation: generation)
                     }
                 }
             } catch {
                 let description = String(describing: error)
                 Task {
-                    await self.finishInput(throwing: SpeechRecognitionError.recognitionFailed(description))
+                    await self.finishInput(throwing: SpeechRecognitionError.recognitionFailed(description), generation: generation)
                 }
             }
         }
+        activeRun?.tapInstalled = true
+
+        guard isCurrent(generation) else { throw .cancelled }
 
         do {
             engine.prepare()
             try engine.start()
             diagnostics.event("audio-engine-started")
         } catch {
-            inputNode.removeTap(onBus: 0)
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             let mapped = SpeechRecognitionError.audioEngineStartFailed(String(describing: error))
             diagnostics.failure("audio-engine", error: mapped)
             throw mapped
         }
 
-        self.engine = engine
-        analyzerTask = Task {
+        activeRun?.analyzerTask = Task {
             do {
                 try await analyzer.start(inputSequence: inputStream)
             } catch {
-                await self.finishInput(throwing: error)
+                self.finishInput(throwing: error, generation: generation)
             }
         }
 
         return SpeechRecognitionUpdateStream { continuation in
-            Task {
+            let resultTask = Task {
                 do {
                     for try await result in transcriber.results {
+                        guard self.isCurrent(generation) else { return }
                         let transcript = String(result.text.characters)
                         continuation.yield(
                             SpeechRecognitionUpdate(
@@ -158,17 +207,22 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     }
                     continuation.finish()
                 } catch {
+                    guard self.isCurrent(generation) else { return }
                     continuation.finish(throwing: SpeechRecognitionError.recognitionFailed(String(describing: error)))
                 }
             }
+            Task { await self.addRecognitionTask(resultTask, generation: generation) }
         }
     }
 
     private func startLegacyAudioBufferRecognition(
-        locale: VoiceKeyboardLocale
+        locale: VoiceKeyboardLocale,
+        generation: UInt64
     ) async throws(SpeechRecognitionError) -> SpeechRecognitionUpdateStream {
         try await ensureMicrophonePermission()
+        guard isCurrent(generation) else { throw .cancelled }
         try await ensureSpeechRecognitionAuthorization()
+        guard isCurrent(generation) else { throw .cancelled }
 
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale.identifier)) else {
             diagnostics.failure("legacy-recognizer", error: .speechRecognizerUnavailable)
@@ -181,9 +235,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         let session = AVAudioSession.sharedInstance()
+        guard isCurrent(generation) else { throw .cancelled }
         do {
             try session.setCategory(.record, mode: .measurement)
             try session.setActive(true)
+            activeRun?.sessionActive = true
             diagnostics.event("legacy-audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -192,11 +248,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         let engine = AVAudioEngine()
+        activeRun?.engine = engine
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
             diagnostics.failure("legacy-audio-input", error: .audioInputUnavailable)
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw .audioInputUnavailable
         }
 
@@ -213,80 +269,149 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             request.requiresOnDeviceRecognition = true
         }
 
-        legacyRequest = request
+        activeRun?.legacyRequest = request
+        let tapGate = LegacyAudioTapGate()
+        activeRun?.legacyTapGate = tapGate
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            request.append(buffer)
+            tapGate.append(buffer, to: request)
         }
+        activeRun?.tapInstalled = true
 
         do {
             engine.prepare()
             try engine.start()
             diagnostics.event("legacy-audio-engine-started")
         } catch {
-            inputNode.removeTap(onBus: 0)
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
             let mapped = SpeechRecognitionError.audioEngineStartFailed(String(describing: error))
             diagnostics.failure("legacy-audio-engine", error: mapped)
             throw mapped
         }
 
-        self.engine = engine
         return SpeechRecognitionUpdateStream { continuation in
             let task = recognizer.recognitionTask(with: request) { result, error in
                 if let result {
-                    continuation.yield(
-                        SpeechRecognitionUpdate(
-                            transcript: result.bestTranscription.formattedString,
-                            isFinal: result.isFinal,
-                            inputLevel: nil
+                    Task {
+                        guard self.isCurrent(generation) else { return }
+                        continuation.yield(
+                            SpeechRecognitionUpdate(
+                                transcript: result.bestTranscription.formattedString,
+                                isFinal: result.isFinal,
+                                inputLevel: nil
+                            )
                         )
-                    )
-                    if result.isFinal {
-                        continuation.finish()
+                        if result.isFinal, self.isCurrent(generation) {
+                            continuation.finish()
+                        }
                     }
                 }
 
                 if let error {
-                    continuation.finish(
-                        throwing: SpeechRecognitionError.recognitionFailed(String(describing: error))
-                    )
+                    Task {
+                        guard self.isCurrent(generation) else { return }
+                        continuation.finish(
+                            throwing: SpeechRecognitionError.recognitionFailed(String(describing: error))
+                        )
+                    }
                 }
             }
 
             Task {
-                await self.setLegacyTask(task)
+                self.setLegacyTask(task, generation: generation)
             }
         }
     }
 
     func stop() async {
         diagnostics.event("stop")
-        analyzerTask?.cancel()
-        analyzerTask = nil
-        legacyTask?.cancel()
-        legacyTask = nil
-        legacyRequest?.endAudio()
-        legacyRequest = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        await analyzer?.cancelAndFinishNow()
-        analyzer = nil
-        inputContinuation?.finish()
-        inputContinuation = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        guard let generation = activeRun?.generation else { return }
+        await requestCleanup(generation: generation)
     }
 
-    private func yield(_ input: AnalyzerInput) {
-        inputContinuation?.yield(input)
+    private func requestCleanup(generation: UInt64) async {
+        if let cleanupTask = cleanupTasks[generation] {
+            await cleanupTask.value
+            return
+        }
+
+        let cleanupTask = Task { [weak self] () -> Void in
+            guard let self else { return }
+            await self.cleanup(generation: generation)
+        }
+        cleanupTasks[generation] = cleanupTask
+        await cleanupTask.value
+        cleanupTasks[generation] = nil
     }
 
-    private func finishInput(throwing error: Error) {
-        inputContinuation?.finish(throwing: error)
+    private func cleanup(generation: UInt64) async {
+        guard var run = activeRun, run.generation == generation, !run.stopping else { return }
+        run.stopping = true
+        activeRun = run
+
+        // Invalidate callbacks before releasing any resource.
+        run.inputContinuation?.finish()
+        run.inputContinuation = nil
+        run.analyzerTask?.cancel()
+        run.analyzerTask = nil
+        run.recognitionTasks.forEach { $0.cancel() }
+        run.recognitionTasks.removeAll()
+        run.legacyTask?.cancel()
+        run.legacyTask = nil
+        run.legacyTapGate?.invalidate()
+        run.legacyTapGate = nil
+        run.legacyRequest?.endAudio()
+        run.legacyRequest = nil
+        if run.tapInstalled {
+            run.engine?.inputNode.removeTap(onBus: 0)
+        }
+        run.engine?.stop()
+        run.engine = nil
+        await run.analyzer?.cancelAndFinishNow()
+        run.analyzer = nil
+        if run.sessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+        activeRun = nil
     }
 
-    private func setLegacyTask(_ task: SFSpeechRecognitionTask) {
-        legacyTask = task
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        activeRun?.generation == generation && activeRun?.stopping == false
+    }
+
+    private func setInputContinuation(
+        _ continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation,
+        generation: UInt64
+    ) {
+        guard isCurrent(generation) else {
+            continuation.finish()
+            return
+        }
+        activeRun?.inputContinuation = continuation
+    }
+
+    private func yield(_ input: AnalyzerInput, generation: UInt64) {
+        guard isCurrent(generation) else { return }
+        activeRun?.inputContinuation?.yield(input)
+    }
+
+    private func finishInput(throwing error: Error, generation: UInt64) {
+        guard isCurrent(generation) else { return }
+        activeRun?.inputContinuation?.finish(throwing: error)
+    }
+
+    private func setLegacyTask(_ task: SFSpeechRecognitionTask, generation: UInt64) {
+        guard isCurrent(generation) else {
+            task.cancel()
+            return
+        }
+        activeRun?.legacyTask = task
+    }
+
+    private func addRecognitionTask(_ task: Task<Void, Never>, generation: UInt64) {
+        guard isCurrent(generation) else {
+            task.cancel()
+            return
+        }
+        activeRun?.recognitionTasks.append(task)
     }
 
     private func ensureMicrophonePermission() async throws(SpeechRecognitionError) {

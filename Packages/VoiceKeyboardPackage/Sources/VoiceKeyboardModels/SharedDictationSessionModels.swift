@@ -187,6 +187,7 @@ public struct SharedDictationAppHeartbeat: Codable, Equatable, Sendable {
 
     public func isFresh(at date: Date = Date(), maxAge: TimeInterval) -> Bool {
         guard sessionState != .unavailable else { return false }
-        return date.timeIntervalSince(lastSeenAt) <= maxAge
+        let age = date.timeIntervalSince(lastSeenAt)
+        return age >= 0 && age <= maxAge
     }
 }

@@ -8,6 +8,7 @@ struct KeyboardSpeechCaptureCoordinator {
     private let capabilityChecker: any CapabilityChecking
     private let readinessService: KeyboardSpeechCaptureReadinessService
     private let recognitionSession: KeyboardSpeechRecognitionSession
+    private let speechService: any SpeechRecognitionService
 
     init(
         capabilityChecker: any CapabilityChecking = KeyboardAudioCapabilityChecker(),
@@ -21,6 +22,7 @@ struct KeyboardSpeechCaptureCoordinator {
             audioProbe: audioProbe,
             stateMachine: stateMachine
         )
+        self.speechService = speechService
         recognitionSession = KeyboardSpeechRecognitionSession(
             speechService: speechService,
             pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: Locale.current.identifier))
@@ -60,5 +62,9 @@ struct KeyboardSpeechCaptureCoordinator {
             locale: locale,
             documentContextBeforeInput: documentContextBeforeInput
         )
+    }
+
+    func stopRecognition() async {
+        await speechService.stop()
     }
 }

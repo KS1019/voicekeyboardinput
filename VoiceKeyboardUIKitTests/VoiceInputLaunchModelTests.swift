@@ -46,10 +46,11 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         )
 
         let prepareStatus = await controller.prepareSession()
-        store.saveCommand(SharedDictationSessionCommand.start(
+        let startCommand = SharedDictationSessionCommand.start(
             source: .keyboard,
             requestedAt: Date()
-        ))
+        )
+        store.saveCommand(startCommand)
 
         await waitForStartCall(in: activator)
 
@@ -73,10 +74,11 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         )
 
         _ = await controller.prepareSession()
-        store.saveCommand(SharedDictationSessionCommand.start(
+        let startCommand = SharedDictationSessionCommand.start(
             source: .keyboard,
             requestedAt: Date()
-        ))
+        )
+        store.saveCommand(startCommand)
 
         await waitForSessionStatus(in: store) { status in
             if case .recording = status { return true }
@@ -85,6 +87,32 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         XCTAssertEqual(activator.recordedCallCount(), 1)
         activator.finish(with: .transcriptShared("hello"))
+    }
+
+    func testContainingAppStartIsNotReprocessedByKeyboardCommandMonitor() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = SuspendedMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        let startTask = Task { await controller.startFromContainingApp() }
+        await waitForStartCall(in: activator)
+        try await Task.sleep(for: .milliseconds(350))
+
+        if case .recording = store.status() {
+        } else {
+            XCTFail("Containing-app recording was overwritten by command monitoring: \(store.status())")
+        }
+
+        activator.finish(with: .transcriptShared("hello"))
+        let result = await startTask.value
+        XCTAssertEqual(result, .transcriptShared("hello"))
     }
 
     func testPreparedAppSessionCancelsActiveStartWhenStopCommandArrives() async throws {
@@ -99,16 +127,18 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         )
 
         _ = await controller.prepareSession()
-        store.saveCommand(SharedDictationSessionCommand.start(
+        let startCommand = SharedDictationSessionCommand.start(
             source: .keyboard,
             requestedAt: Date()
-        ))
+        )
+        store.saveCommand(startCommand)
         await waitForSessionStatus(in: store) { status in
             if case .recording = status { return true }
             return false
         }
 
         store.saveCommand(SharedDictationSessionCommand.stop(
+            sessionID: startCommand.sessionID,
             source: .keyboard,
             requestedAt: Date()
         ))
@@ -120,6 +150,36 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         await waitForCancellation(in: activator)
         XCTAssertEqual(activator.recordedCancellationCount(), 1)
+    }
+
+    func testManualStartDoesNotOverlapActiveSharedStartCommand() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = SuspendedMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        store.saveCommand(SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        ))
+        await waitForStartCall(in: activator)
+
+        let manualStart = Task { await controller.startFromContainingApp() }
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(activator.recordedCallCount(), 1)
+
+        activator.finish(with: .transcriptShared("hello"))
+        let manualResult = await manualStart.value
+        XCTAssertEqual(manualResult, .failed("Voice input is already in progress."))
     }
 
     func testStartDictationIgnoresOverlappingActivation() async {
@@ -139,6 +199,37 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         controller.finish(with: .microphoneActive(peakPower: -9))
         await firstStart.value
         await secondStart.value
+    }
+
+    func testDictationRunCancellingTimeoutDoesNotCompleteLater() async throws {
+        let run = AppSpeechDictationRun.testRun(maximumDuration: 0.02)
+        let waitingTask = Task { try await run.testWaitForCompletion() }
+
+        await run.testWaitUntilCompletionReady()
+        run.testStartTimeout()
+        run.testCancelTimeout()
+        try await Task.sleep(for: .milliseconds(60))
+
+        XCTAssertFalse(waitingTask.isCancelled)
+        run.testComplete(.success("late-safe"))
+        let result = try await waitingTask.value
+        XCTAssertEqual(result, "late-safe")
+    }
+
+    func testDictationRunLateFinalCallbackAfterCancellationCompletesAtMostOnce() async throws {
+        let run = AppSpeechDictationRun.testRun(maximumDuration: 1)
+        let waitingTask = Task { try await run.testWaitForCompletion() }
+
+        await run.testWaitUntilCompletionReady()
+        run.testCancel()
+        run.testComplete(.success("late-final"))
+
+        do {
+            _ = try await waitingTask.value
+            XCTFail("Cancellation should win over the late final callback")
+        } catch is CancellationError {
+            // Expected.
+        }
     }
 
     func testUnknownURLDoesNotStartDictation() async throws {
@@ -166,6 +257,17 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
     private func waitForStartCall(
         in activator: MicrophoneActivatorSpy,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedCallCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedCallCount(), 1, file: file, line: line)
+    }
+
+    private func waitForStartCall(
+        in activator: SuspendedMicrophoneActivator,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {

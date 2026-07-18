@@ -36,7 +36,7 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         documentContextBeforeInput: String?
     ) -> AsyncStream<KeyboardSpeechRecognitionEvent> {
         AsyncStream { continuation in
-            let stopController = SpeechRecognitionStopController()
+            let stopGate = SpeechRecognitionStopGate()
             let task = Task {
                 continuation.yield(KeyboardSpeechRecognitionEvent(state: .listening))
                 do {
@@ -58,18 +58,18 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                             continuation.yield(KeyboardSpeechRecognitionEvent(state: .transcribing(update)))
                         }
                     }
-                    await stopController.stopIfNeeded(speechService)
+                    await stopGate.stop(speechService)
                     continuation.finish()
                 } catch let error as SpeechRecognitionError {
-                    await stopController.stopIfNeeded(speechService)
+                    await stopGate.stop(speechService)
                     continuation.yield(KeyboardSpeechRecognitionEvent(state: .recognitionFailed(error)))
                     continuation.finish()
                 } catch is CancellationError {
-                    await stopController.stopIfNeeded(speechService)
+                    await stopGate.stop(speechService)
                     continuation.yield(KeyboardSpeechRecognitionEvent(state: .recognitionFailed(.cancelled)))
                     continuation.finish()
                 } catch {
-                    await stopController.stopIfNeeded(speechService)
+                    await stopGate.stop(speechService)
                     continuation.yield(
                         KeyboardSpeechRecognitionEvent(
                             state: .recognitionFailed(.recognitionFailed(String(describing: error)))
@@ -81,7 +81,7 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
             continuation.onTermination = { _ in
                 task.cancel()
                 Task {
-                    await stopController.stopIfNeeded(speechService)
+                    await stopGate.stop(speechService)
                 }
             }
         }
@@ -155,12 +155,19 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
     }
 }
 
-private actor SpeechRecognitionStopController {
-    private var didStop = false
+private actor SpeechRecognitionStopGate {
+    private var stopTask: Task<Void, Never>?
 
-    func stopIfNeeded(_ speechService: any SpeechRecognitionService) async {
-        guard !didStop else { return }
-        didStop = true
-        await speechService.stop()
+    func stop(_ speechService: any SpeechRecognitionService) async {
+        if let stopTask {
+            await stopTask.value
+            return
+        }
+
+        let stopTask = Task.detached {
+            await speechService.stop()
+        }
+        self.stopTask = stopTask
+        await stopTask.value
     }
 }

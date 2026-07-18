@@ -161,6 +161,7 @@ public final class SharedDictationTranscriptStore {
     private func saveRecord(_ transcript: SharedDictationTranscript) {
         guard let data = try? encoder.encode(transcript) else { return }
         defaults.set(data, forKey: Key.transcriptRecord)
+        defaults.synchronize()
     }
 
     private func loadRecord() -> SharedDictationTranscript? {

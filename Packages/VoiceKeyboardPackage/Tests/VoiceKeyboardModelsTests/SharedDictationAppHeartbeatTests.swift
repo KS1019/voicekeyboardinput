@@ -32,4 +32,17 @@ final class SharedDictationAppHeartbeatTests: XCTestCase {
             maxAge: 5
         ))
     }
+
+    func testFutureHeartbeatIsNotFresh() {
+        let heartbeat = SharedDictationAppHeartbeat(
+            token: "app-session",
+            lastSeenAt: Date(timeIntervalSince1970: 110),
+            sessionState: .armed
+        )
+
+        XCTAssertFalse(heartbeat.isFresh(
+            at: Date(timeIntervalSince1970: 100),
+            maxAge: 5
+        ))
+    }
 }

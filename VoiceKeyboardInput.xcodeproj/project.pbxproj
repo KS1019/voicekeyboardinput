@@ -94,7 +94,7 @@
 		202396909E03B9F6D7F9B97C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		20DF6CEB98D29105405D8AD2 /* KeyboardRootViewPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootViewPreview.swift; sourceTree = "<group>"; };
 		284539418006C6BC0E82E233 /* VoiceInputLaunchModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputLaunchModel.swift; sourceTree = "<group>"; };
-		28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = VoiceKeyboardExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = VoiceKeyboardExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		35E2893701F3C5692A33ED66 /* KeyboardSpeechRecognitionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSpeechRecognitionService.swift; sourceTree = "<group>"; };
 		4BD7AB6375CF09FE52E7AF16 /* AppSpeechDictationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSpeechDictationService.swift; sourceTree = "<group>"; };
 		511A94BF8DEED82E5D264C13 /* KeyboardSpeechCaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSpeechCaptureCoordinator.swift; sourceTree = "<group>"; };
@@ -118,7 +118,7 @@
 		E668C0FD03896C6082C211D8 /* VoiceKeyboardInputApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardInputApp.swift; sourceTree = "<group>"; };
 		E70BC36DDD467772F31DD3F2 /* CapabilityIndicatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilityIndicatorView.swift; sourceTree = "<group>"; };
 		F1EB4E021CA9301314BBC924 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VoiceKeyboardInput.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceKeyboardInput.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -508,13 +508,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 47JGA6NAP2;
 				INFOPLIST_FILE = VoiceKeyboardInputApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -613,6 +616,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements;
+				DEVELOPMENT_TEAM = 47JGA6NAP2;
 				INFOPLIST_FILE = VoiceKeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -709,6 +713,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements;
+				DEVELOPMENT_TEAM = 47JGA6NAP2;
 				INFOPLIST_FILE = VoiceKeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -758,13 +763,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 47JGA6NAP2;
 				INFOPLIST_FILE = VoiceKeyboardInputApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

@@ -47,10 +47,39 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         let expectedStates: [KeyboardSpeechCaptureState] = [.listening]
         XCTAssertEqual(events.map(\.state), expectedStates)
         let stopWasCalled = await service.waitForStopCall(timeoutNanoseconds: 500_000_000)
-        if !stopWasCalled {
-            await service.stop()
-        }
         XCTAssertTrue(stopWasCalled)
+        await service.releaseStop()
+        let stopCompleted = await service.waitForStopCompletion(timeoutNanoseconds: 500_000_000)
+        XCTAssertTrue(stopCompleted)
+    }
+
+    func testCancellationAndStreamTerminationJoinOneAwaitedStop() async {
+        let service = FakeSpeechRecognitionService(startSuspendsUntilStopped: true)
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let consumer = Task {
+            await collectFirst(1, from: session.events(
+                locale: VoiceKeyboardLocale(identifier: "en-US"),
+                documentContextBeforeInput: ""
+            ))
+        }
+
+        _ = await consumer.value
+        let stopStarted = await service.waitForStopStarted(timeoutNanoseconds: 500_000_000)
+        XCTAssertTrue(stopStarted)
+        let firstStopCallCount = await service.serviceStopCallCount()
+        XCTAssertEqual(firstStopCallCount, 1)
+        let completedBeforeRelease = await service.waitForStopCompletion(timeoutNanoseconds: 50_000_000)
+        XCTAssertFalse(completedBeforeRelease)
+
+        await service.releaseStop()
+        let stopCompleted = await service.waitForStopCompletion(timeoutNanoseconds: 500_000_000)
+        XCTAssertTrue(stopCompleted)
+        let finalStopCallCount = await service.serviceStopCallCount()
+        XCTAssertEqual(finalStopCallCount, 1)
     }
 
     func testFinalCommandTranscriptDoesNotClaimTextInsertion() async {
@@ -126,6 +155,22 @@ private struct FakeSpeechRecognitionService: SpeechRecognitionService {
     func waitForStopCall(timeoutNanoseconds: UInt64) async -> Bool {
         await controller.waitForStopCall(timeoutNanoseconds: timeoutNanoseconds)
     }
+
+    func serviceStopCallCount() async -> Int {
+        await controller.currentStopCallCount()
+    }
+
+    func waitForStopStarted(timeoutNanoseconds: UInt64) async -> Bool {
+        await controller.waitForStopStarted(timeoutNanoseconds: timeoutNanoseconds)
+    }
+
+    func releaseStop() async {
+        await controller.releaseStop()
+    }
+
+    func waitForStopCompletion(timeoutNanoseconds: UInt64) async -> Bool {
+        await controller.waitForStopCompletion(timeoutNanoseconds: timeoutNanoseconds)
+    }
 }
 
 private actor FakeSpeechRecognitionServiceController {
@@ -134,6 +179,9 @@ private actor FakeSpeechRecognitionServiceController {
     private let startSuspendsUntilStopped: Bool
     private var continuation: SpeechRecognitionUpdateStream.Continuation?
     private var stopCallCount = 0
+    private var stopStarted = false
+    private var stopCompleted = false
+    private var releaseStopContinuation: CheckedContinuation<Void, Never>?
 
     init(
         initialUpdates: [SpeechRecognitionUpdate],
@@ -167,10 +215,23 @@ private actor FakeSpeechRecognitionServiceController {
         }
     }
 
-    func stop() {
+    func stop() async {
         stopCallCount += 1
+        stopStarted = true
         continuation?.finish()
         continuation = nil
+        guard startSuspendsUntilStopped else {
+            stopCompleted = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if stopCompleted {
+                continuation.resume()
+            } else {
+                releaseStopContinuation = continuation
+            }
+        }
+        stopCompleted = true
     }
 
     func waitForStopCall(timeoutNanoseconds: UInt64) async -> Bool {
@@ -182,6 +243,37 @@ private actor FakeSpeechRecognitionServiceController {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         return stopCallCount > 0
+    }
+
+    func currentStopCallCount() -> Int {
+        stopCallCount
+    }
+
+    func waitForStopStarted(timeoutNanoseconds: UInt64) async -> Bool {
+        let deadline = ContinuousClock.now + .nanoseconds(Int64(timeoutNanoseconds))
+        while ContinuousClock.now < deadline {
+            if stopStarted {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return stopStarted
+    }
+
+    func releaseStop() {
+        releaseStopContinuation?.resume()
+        releaseStopContinuation = nil
+    }
+
+    func waitForStopCompletion(timeoutNanoseconds: UInt64) async -> Bool {
+        let deadline = ContinuousClock.now + .nanoseconds(Int64(timeoutNanoseconds))
+        while ContinuousClock.now < deadline {
+            if stopCompleted {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return stopCompleted
     }
 }
 
