@@ -29,7 +29,6 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
             try session.setActive(true)
             sessionIsActive = true
-            try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
             defer {
                 tapGate.invalidate()
                 if tapIsInstalled {
@@ -40,6 +39,11 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
                     try? session.setActive(false, options: .notifyOthersOnDeactivation)
                 }
             }
+            try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
+            try await KeyboardAudioSessionRouting.waitForStableInput(
+                session: session,
+                engine: engine
+            )
 
             guard session.isInputAvailable else {
                 return Self.result(false, duration: duration, peakPower: nil)

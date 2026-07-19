@@ -52,13 +52,17 @@ final class AppSpeechDictationRun {
         private var isActive = true
         private var inFlightCallbacks = 0
 
-        func invalidate() {
+        @discardableResult
+        func invalidate(timeout: TimeInterval = 1) -> Bool {
             condition.lock()
             isActive = false
+            let deadline = Date().addingTimeInterval(timeout)
             while inFlightCallbacks > 0 {
-                condition.wait()
+                guard condition.wait(until: deadline) else { break }
             }
+            let didDrain = inFlightCallbacks == 0
             condition.unlock()
+            return didDrain
         }
 
         func append(
@@ -161,6 +165,10 @@ final class AppSpeechDictationRun {
         }
         do {
             try await AppAudioSessionRouting.selectPreferredInputIfAvailable(session)
+            try await AppAudioSessionRouting.waitForStableInput(
+                session: session,
+                engine: engine
+            )
         } catch {
             await cleanup()
             throw AppSpeechDictationError.audioConfigurationChanged
@@ -396,7 +404,11 @@ final class AppSpeechDictationRun {
                     let wonCompletion = gate.finish()
                     guard isCurrent && wonCompletion else {
                         if activated {
-                            deactivateLateAudioSession(session)
+                            if deactivateLateAudioSession(
+                                session,
+                                coordinator: coordinator,
+                                operationToken: operationToken
+                            ) { return }
                         }
                         coordinator.finish(operationToken)
                         return
@@ -432,7 +444,11 @@ final class AppSpeechDictationRun {
                     let isCurrent = coordinator.isCurrent(operationToken)
                     let wonCompletion = gate.finish()
                     guard isCurrent && wonCompletion else {
-                        deactivateLateAudioSession(session)
+                        if deactivateLateAudioSession(
+                            session,
+                            coordinator: coordinator,
+                            operationToken: operationToken
+                        ) { return }
                         coordinator.finish(operationToken)
                         return
                     }
@@ -553,14 +569,24 @@ final class AppSpeechDictationRun {
 #endif
 }
 
-private func deactivateLateAudioSession(_ session: AVAudioSession) {
+@discardableResult
+private func deactivateLateAudioSession(
+    _ session: AVAudioSession,
+    coordinator: AppAudioSessionOperationCoordinator,
+    operationToken: UInt64
+) -> Bool {
+    guard coordinator.claimLateDeactivation(operationToken) else { return false }
     if #available(iOS 27.0, *) {
-        session.deactivate(options: .notifyOthersOnDeactivation) { _, _ in }
+        session.deactivate(options: .notifyOthersOnDeactivation) { _, _ in
+            coordinator.finish(operationToken)
+        }
     } else {
         DispatchQueue.global(qos: .utility).async {
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            coordinator.finish(operationToken)
         }
     }
+    return true
 }
 
 final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
@@ -569,6 +595,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
     private let lock = NSLock()
     private var nextToken: UInt64 = 0
     private var currentToken: UInt64?
+    private var invalidatedTokens: Set<UInt64> = []
 
     func begin() -> UInt64? {
         lock.lock()
@@ -576,7 +603,6 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         guard currentToken == nil else { return nil }
         nextToken &+= 1
         currentToken = nextToken
-        isInvalidated = false
         return nextToken
     }
 
@@ -593,15 +619,15 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
     func isCurrent(_ token: UInt64) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return currentToken == token && !isInvalidated
+        return currentToken == token && !invalidatedTokens.contains(token)
     }
 
     func finish(_ token: UInt64) {
         lock.lock()
         if currentToken == token {
             currentToken = nil
-            isInvalidated = false
         }
+        invalidatedTokens.remove(token)
         lock.unlock()
     }
 
@@ -609,10 +635,16 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         lock.lock()
         if currentToken == token {
             currentToken = nil
-            isInvalidated = false
+            invalidatedTokens.insert(token)
         }
         lock.unlock()
     }
 
-    private var isInvalidated = false
+    func claimLateDeactivation(_ token: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard invalidatedTokens.contains(token), currentToken == nil else { return false }
+        currentToken = token
+        return true
+    }
 }

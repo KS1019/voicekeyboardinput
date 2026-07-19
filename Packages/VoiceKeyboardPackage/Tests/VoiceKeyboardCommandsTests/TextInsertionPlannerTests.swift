@@ -136,6 +136,32 @@ final class TextInsertionPlannerTests: XCTestCase {
         XCTAssertEqual(operations, [.insertText("hello")])
     }
 
+    func testInitialTextSpacingDoesNotAddSpaceAfterUnicodeOpeningDelimiters() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.text("hello")])
+
+        for delimiter in ["“", "‘", "（", "「"] {
+            XCTAssertEqual(
+                planner.plan(transcript, documentContextBeforeInput: "prefix\(delimiter)"),
+                [.insertText("hello")],
+                delimiter
+            )
+        }
+    }
+
+    func testOpeningCommandDoesNotDuplicateExistingWhitespace() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [
+            .command(.insertText("(")),
+            .command(.insertText("\""))
+        ])
+
+        XCTAssertEqual(
+            planner.plan(transcript, documentContextBeforeInput: "hello "),
+            [.insertText("("), .insertText("\"")]
+        )
+    }
+
     func testInitialTextSpacingDoesNotAddSpaceAfterJapanesePunctuation() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [.text("後")])

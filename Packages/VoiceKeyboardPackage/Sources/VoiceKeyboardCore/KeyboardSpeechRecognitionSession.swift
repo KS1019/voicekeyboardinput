@@ -42,13 +42,16 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                 continuation.yield(KeyboardSpeechRecognitionEvent(state: .listening))
                 do {
                     let updates = try await speechService.start(locale: locale)
+                    var virtualDocumentContext = documentContextBeforeInput ?? ""
                     for try await update in updates {
                         guard !Task.isCancelled else { break }
                         if update.isFinal {
                             let actions = actions(
                                 transcript: update.transcript,
-                                documentContextBeforeInput: documentContextBeforeInput
+                                documentContextBeforeInput: virtualDocumentContext,
+                                locale: locale
                             )
+                            virtualDocumentContext = applying(actions, to: virtualDocumentContext)
                             continuation.yield(
                                 KeyboardSpeechRecognitionEvent(
                                     state: eventState(for: update, actions: actions),
@@ -90,11 +93,13 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
 
     private func actions(
         transcript: String,
-        documentContextBeforeInput: String?
+        documentContextBeforeInput: String?,
+        locale: VoiceKeyboardLocale
     ) -> [KeyboardTextInsertionAction] {
         let mappedActions = pipeline.operations(
             for: transcript,
-            documentContextBeforeInput: documentContextBeforeInput
+            documentContextBeforeInput: documentContextBeforeInput,
+            locale: locale
         ).map { operation -> KeyboardTextInsertionAction in
             switch operation {
             case .insertText(let value):
@@ -106,6 +111,22 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
             }
         }
         return coalescedInsertActions(from: mappedActions)
+    }
+
+    private func applying(
+        _ actions: [KeyboardTextInsertionAction],
+        to context: String
+    ) -> String {
+        actions.reduce(into: context) { context, action in
+            switch action {
+            case .insertText(let value):
+                context.append(value)
+            case .deleteBackward(let count):
+                context = String(context.dropLast(min(count.value, context.count)))
+            case .showUnsupportedCommand:
+                break
+            }
+        }
     }
 
     private func eventState(

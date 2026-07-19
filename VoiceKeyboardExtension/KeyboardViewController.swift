@@ -194,10 +194,14 @@ public final class KeyboardViewController: UIInputViewController {
 
         recognitionTask = Task { [weak self] in
             guard let self else { return }
+            var hasTerminalPresentation = false
             defer {
                 if self.lifecycleEpoch == epoch {
                     self.isRecognitionActive = false
                     self.recognitionTask = nil
+                    if !self.isRecognitionStopping, !hasTerminalPresentation {
+                        self.renderCurrentSpeechCapture(announce: true)
+                    }
                 }
             }
 
@@ -207,6 +211,12 @@ public final class KeyboardViewController: UIInputViewController {
             ) {
                 guard !Task.isCancelled else { return }
                 guard lifecycleEpoch == epoch, isRecognitionActive else { return }
+                switch event.state {
+                case .inserted, .unsupportedCommand, .recognitionFailed:
+                    hasTerminalPresentation = true
+                default:
+                    break
+                }
                 keyboardRootView.render(
                     speechCapture: .keyboardSpeechCapture(event.state),
                     announce: true

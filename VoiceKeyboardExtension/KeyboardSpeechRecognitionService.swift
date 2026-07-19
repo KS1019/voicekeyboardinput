@@ -10,13 +10,17 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         private var isActive = true
         private var inFlightCallbacks = 0
 
-        func invalidate() {
+        @discardableResult
+        func invalidate(timeout: TimeInterval = 1) -> Bool {
             condition.lock()
             isActive = false
+            let deadline = Date().addingTimeInterval(timeout)
             while inFlightCallbacks > 0 {
-                condition.wait()
+                guard condition.wait(until: deadline) else { break }
             }
+            let didDrain = inFlightCallbacks == 0
             condition.unlock()
+            return didDrain
         }
 
         func append(
@@ -60,13 +64,17 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         private var isActive = true
         private var inFlightCallbacks = 0
 
-        func invalidate() {
+        @discardableResult
+        func invalidate(timeout: TimeInterval = 1) -> Bool {
             condition.lock()
             isActive = false
+            let deadline = Date().addingTimeInterval(timeout)
             while inFlightCallbacks > 0 {
-                condition.wait()
+                guard condition.wait(until: deadline) else { break }
             }
+            let didDrain = inFlightCallbacks == 0
             condition.unlock()
+            return didDrain
         }
 
         func perform<T>(_ operation: () throws -> T) rethrows -> T? {
@@ -176,12 +184,18 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         guard isCurrent(generation) else { throw .cancelled }
         activeRun?.analyzer = analyzer
 
+        let engine = AVAudioEngine()
+        activeRun?.engine = engine
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
             try session.setActive(true)
             activeRun?.sessionActive = true
             try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
+            try await KeyboardAudioSessionRouting.waitForStableInput(
+                session: session,
+                engine: engine
+            )
             diagnostics.event("audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -189,8 +203,6 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             throw mapped
         }
 
-        let engine = AVAudioEngine()
-        activeRun?.engine = engine
         let inputNode = engine.inputNode
         let naturalFormat = inputNode.outputFormat(forBus: 0)
         guard naturalFormat.channelCount > 0, naturalFormat.sampleRate > 0 else {
@@ -227,6 +239,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             throw mapped
         }
 
+        installAudioObservers(session: session, engine: engine, generation: generation)
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: naturalFormat) { [weak self] buffer, time in
             guard let self else { return }
             do {
@@ -250,8 +263,6 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activeRun?.tapInstalled = true
 
         guard isCurrent(generation) else { throw .cancelled }
-        installAudioObservers(session: session, engine: engine, generation: generation)
-
         do {
             engine.prepare()
             try engine.start()
@@ -317,6 +328,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             throw .speechRecognizerUnavailable
         }
 
+        let engine = AVAudioEngine()
+        activeRun?.engine = engine
         let session = AVAudioSession.sharedInstance()
         guard isCurrent(generation) else { throw .cancelled }
         do {
@@ -324,6 +337,10 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             try session.setActive(true)
             activeRun?.sessionActive = true
             try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
+            try await KeyboardAudioSessionRouting.waitForStableInput(
+                session: session,
+                engine: engine
+            )
             diagnostics.event("legacy-audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -331,8 +348,6 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             throw mapped
         }
 
-        let engine = AVAudioEngine()
-        activeRun?.engine = engine
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
@@ -356,12 +371,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activeRun?.legacyRequest = request
         let tapGate = LegacyAudioTapGate()
         activeRun?.legacyTapGate = tapGate
+        installAudioObservers(session: session, engine: engine, generation: generation)
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
             tapGate.append(buffer, to: request)
         }
         activeRun?.tapInstalled = true
-
-        installAudioObservers(session: session, engine: engine, generation: generation)
 
         do {
             engine.prepare()

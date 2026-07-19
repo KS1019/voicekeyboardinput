@@ -56,7 +56,7 @@ package struct TextInsertionPlanner: Sendable {
         if last == "\"" {
             return !isOpeningQuoteContext(String(context.dropLast()))
         }
-        return !last.isWhitespace && last != "(" && !last.isJapanesePunctuation
+        return !last.isWhitespace && !last.isOpeningDelimiter && !last.isJapanesePunctuation
     }
 
     private func shouldAddSpaceBetween(previous: Character?, next: Character?) -> Bool {
@@ -82,7 +82,8 @@ package struct TextInsertionPlanner: Sendable {
     ) -> Bool {
         guard value == "(" || opensQuote,
               let previous = context.last else { return false }
-        return shouldAddSpaceBetween(previous: previous, next: value.first)
+        return !previous.isWhitespace
+            && shouldAddSpaceBetween(previous: previous, next: value.first)
             && !previous.isOpeningDelimiter
     }
 
@@ -137,8 +138,21 @@ private extension Character {
     }
 
     var isOpeningDelimiter: Bool {
-        self == "(" || self == "[" || self == "{" || self == "（" || self == "［" || self == "｛"
-            || self == "【" || self == "〔" || self == "〈" || self == "《" || self == "「" || self == "『"
+        self == "("
+            || self == "["
+            || self == "{"
+            || self == "\""
+            || self == "“"
+            || self == "‘"
+            || self == "（"
+            || self == "［"
+            || self == "｛"
+            || self == "【"
+            || self == "〔"
+            || self == "〈"
+            || self == "《"
+            || self == "「"
+            || self == "『"
     }
 
     var isJapanesePunctuation: Bool {

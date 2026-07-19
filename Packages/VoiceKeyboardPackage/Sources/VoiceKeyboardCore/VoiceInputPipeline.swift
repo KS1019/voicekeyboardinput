@@ -18,9 +18,11 @@ public struct VoiceInputPipeline: Sendable {
 
     public func operations(
         for transcript: String,
-        documentContextBeforeInput: String?
+        documentContextBeforeInput: String?,
+        locale: VoiceKeyboardLocale? = nil
     ) -> [TextOperation] {
-        commandPipeline.preview(
+        let commandPipeline = locale.map(LiteralTranscriptCommandPipeline.init(locale:)) ?? self.commandPipeline
+        return commandPipeline.preview(
             for: transcript,
             documentContextBeforeInput: documentContextBeforeInput
         ).operations

@@ -104,6 +104,67 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         XCTAssertEqual(events.last?.actions, expectedActions)
     }
 
+    func testFinalSpeechAnalyzerSegmentsUseTheUpdatedVirtualContext() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "hello", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "world", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.dropFirst().map(\.actions), [
+            [.insertText("hello")],
+            [.insertText(" world")]
+        ])
+    }
+
+    func testFinalCommandSegmentsUpdateTheVirtualContext() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "hello", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "delete word", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "world", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.dropFirst().map(\.actions), [
+            [.insertText("hello")],
+            [.deleteBackward(count: TextDeletionCount(5)!)],
+            [.insertText("world")]
+        ])
+    }
+
+    func testEventsUseRequestedLocaleForCommandParsing() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "こんにちは読点世界", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "ja-JP"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [.insertText("こんにちは、世界")])
+    }
+
     func testUnsupportedCommandRemainsVisibleAsAnActionAndState() async {
         let finalUpdate = SpeechRecognitionUpdate(transcript: "command copy", isFinal: true)
         let service = FakeSpeechRecognitionService(initialUpdates: [finalUpdate])

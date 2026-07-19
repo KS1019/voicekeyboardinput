@@ -40,6 +40,10 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
             sessionIsActive = true
             try await AppAudioSessionRouting.selectPreferredInputIfAvailable(session)
+            try await AppAudioSessionRouting.waitForStableInput(
+                session: session,
+                engine: engine
+            )
 
             let inputNode = engine.inputNode
             let format = inputNode.outputFormat(forBus: 0)
