@@ -122,6 +122,7 @@ final class AppSpeechDictationRun {
     private var task: SFSpeechRecognitionTask?
     private var timeoutTask: Task<Void, Never>?
     private var continuation: CheckedContinuation<String, Error>?
+    private var pendingError: Error?
     private var latestTranscript = ""
     private var didFinish = false
     private var didStart = false
@@ -132,6 +133,7 @@ final class AppSpeechDictationRun {
     private var engineConfigurationObserver: NSObjectProtocol?
     private var mediaServicesLostObserver: NSObjectProtocol?
     private var mediaServicesResetObserver: NSObjectProtocol?
+    private var isPreparingAudio = false
 
     init(locale: Locale, maximumDuration: TimeInterval) {
         self.locale = locale
@@ -174,10 +176,17 @@ final class AppSpeechDictationRun {
             throw AppSpeechDictationError.audioConfigurationChanged
         }
 
+        isPreparingAudio = true
+        installAudioSessionObservers()
+        if let pendingError {
+            await cleanup()
+            throw pendingError
+        }
+
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
-            await deactivateAudioSession(session)
+            await cleanup()
             throw AppSpeechDictationError.audioInputUnavailable
         }
 
@@ -208,8 +217,14 @@ final class AppSpeechDictationRun {
                 inputNode.removeTap(onBus: 0)
                 tapIsInstalled = false
             }
-            await deactivateAudioSession(session)
+            await cleanup()
             throw AppSpeechDictationError.audioEngineStartFailed
+        }
+
+        isPreparingAudio = false
+        if let pendingError {
+            await cleanup()
+            throw pendingError
         }
 
         guard !Task.isCancelled else {
@@ -220,11 +235,15 @@ final class AppSpeechDictationRun {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
+                if let pendingError {
+                    self.pendingError = nil
+                    self.complete(.failure(pendingError))
+                    return
+                }
                 guard !Task.isCancelled else {
                     self.complete(.failure(CancellationError()))
                     return
                 }
-                installAudioSessionObservers()
                 timeoutTask = Task { [weak self] in
                     guard let self else { return }
                     do {
@@ -274,6 +293,12 @@ final class AppSpeechDictationRun {
 
     private func complete(_ result: Result<String, Error>) {
         guard !didFinish else { return }
+        guard continuation != nil else {
+            if case let .failure(error) = result {
+                pendingError = error
+            }
+            return
+        }
         didFinish = true
         let continuation = continuation
         self.continuation = nil
@@ -311,10 +336,16 @@ final class AppSpeechDictationRun {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] notification in
-            guard let reasonValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue),
-                  reason == .oldDeviceUnavailable || reason == .noSuitableRouteForCategory,
-                  AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty else { return }
+            let routeIsUnavailable = AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty
+            let isPreparingAudio = self?.isPreparingAudio == true
+            let reasonRequiresFailure: Bool
+            if let reasonValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) {
+                reasonRequiresFailure = reason == .oldDeviceUnavailable || reason == .noSuitableRouteForCategory
+            } else {
+                reasonRequiresFailure = false
+            }
+            guard isPreparingAudio || (reasonRequiresFailure && routeIsUnavailable) else { return }
             Task { @MainActor in
                 self?.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
             }
@@ -349,6 +380,8 @@ final class AppSpeechDictationRun {
     }
 
     private func cleanup() async {
+        isPreparingAudio = false
+        pendingError = nil
         timeoutTask?.cancel()
         timeoutTask = nil
         task?.cancel()
