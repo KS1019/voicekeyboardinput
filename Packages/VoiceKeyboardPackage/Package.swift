@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "VoiceKeyboardModels", targets: ["VoiceKeyboardModels"]),
         .library(name: "VoiceKeyboardPresentation", targets: ["VoiceKeyboardPresentation"]),
         .library(name: "VoiceKeyboardInterfaces", targets: ["VoiceKeyboardInterfaces"]),
+        .library(name: "VoiceKeyboardCommandPipeline", targets: ["VoiceKeyboardCommandPipeline"]),
         .library(name: "VoiceKeyboardCore", targets: ["VoiceKeyboardCore"])
     ],
     targets: [
@@ -30,6 +31,13 @@ let package = Package(
         .target(
             name: "VoiceKeyboardCommands",
             dependencies: ["VoiceKeyboardModels"]
+        ),
+        .target(
+            name: "VoiceKeyboardCommandPipeline",
+            dependencies: [
+                "VoiceKeyboardModels",
+                "VoiceKeyboardCommands"
+            ]
         ),
         .target(
             name: "VoiceKeyboardInterfaces",
@@ -63,6 +71,13 @@ let package = Package(
             dependencies: [
                 "VoiceKeyboardModels",
                 "VoiceKeyboardCommands"
+            ]
+        ),
+        .testTarget(
+            name: "VoiceKeyboardCommandPipelineTests",
+            dependencies: [
+                "VoiceKeyboardCommandPipeline",
+                "VoiceKeyboardModels"
             ]
         ),
         .testTarget(
