@@ -135,11 +135,15 @@ dependency-policy-check:
 	status=0; rg --quiet $(FORBIDDEN_EXTENSION_APIS) $(EXTENSION_SAFE_PATHS) || status=$$?; test $$status -eq 1
 	status=0; rg --quiet $(FORBIDDEN_MAC_APP_IMPORTS) $(MAC_APP_SWIFT_DIRS) || status=$$?; test $$status -eq 1
 	menu_bar_block="$$(mktemp)"; \
-		trap 'rm -f "$$menu_bar_block"' EXIT; \
+		ui_kit_test_block="$$(mktemp)"; \
+		trap 'rm -f "$$menu_bar_block" "$$ui_kit_test_block"' EXIT; \
 		awk 'BEGIN { capture = 0 } /^  VoiceKeyboardMenuBar:/ { capture = 1 } /^  VoiceKeyboardMenuBarTests:/ { capture = 0 } capture { print }' project.yml > "$$menu_bar_block"; \
+		awk 'BEGIN { capture = 0 } /^  VoiceKeyboardUIKitTests:/ { capture = 1 } /^  VoiceKeyboardInputPreviewTests:/ { capture = 0 } capture { print }' project.yml > "$$ui_kit_test_block"; \
 		test "$$(rg -o 'product: [A-Za-z0-9]+' "$$menu_bar_block" | sed 's/product: //' | sort | tr '\n' ' ' | sed 's/ $$//')" = "$$(printf '%s\n' $(MENU_BAR_ALLOWED_PACKAGE_PRODUCTS) | sort | tr '\n' ' ' | sed 's/ $$//')"; \
 		test "$$(rg -c 'product:' "$$menu_bar_block")" = "2"; \
-		status=0; rg --quiet $(MENU_BAR_FORBIDDEN_PROJECT_BLOCK_TOKENS) "$$menu_bar_block" || status=$$?; test $$status -eq 1
+		status=0; rg --quiet $(MENU_BAR_FORBIDDEN_PROJECT_BLOCK_TOKENS) "$$menu_bar_block" || status=$$?; test $$status -eq 1; \
+		test "$$(rg -c 'product: VoiceKeyboardSharedStorage' "$$ui_kit_test_block")" = "1"; \
+		test "$$(rg -c 'link: false' "$$ui_kit_test_block")" = "1"
 
 .PHONY: keyboard-permission-policy-check
 keyboard-permission-policy-check:
