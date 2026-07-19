@@ -125,6 +125,14 @@
 		F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VoiceKeyboardInput.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = VoiceKeyboardMenuBar;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		5212B12B0BE64F6A0AD43290 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
@@ -247,14 +255,6 @@
 			path = VoiceKeyboardUIKit;
 			sourceTree = "<group>";
 		};
-		D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */ = {
-			isa = PBXGroup;
-			children = (
-				3C231EC1ED3178FAB1CCA242 /* Info.plist */,
-			);
-			path = VoiceKeyboardMenuBar;
-			sourceTree = "<group>";
-		};
 		DE211F1BB560983B56ACC8C4 /* VoiceKeyboardUIKitTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -331,6 +331,9 @@
 			buildRules = (
 			);
 			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */,
 			);
 			name = VoiceKeyboardMenuBar;
 			packageProductDependencies = (
