@@ -6,7 +6,10 @@ let package = Package(
     // Domain modules stay portable; app and extension targets enforce iOS 26.
     platforms: [
         .iOS(.v16),
-        .macOS(.v13)
+        .macOS(.v13),
+        .visionOS(.v1),
+        .tvOS(.v16),
+        .watchOS(.v9)
     ],
     products: [
         .library(name: "VoiceKeyboardModels", targets: ["VoiceKeyboardModels"]),

@@ -1,6 +1,4 @@
 @testable import VoiceKeyboardMenuBar
-import VoiceKeyboardCommandPipeline
-import VoiceKeyboardModels
 import XCTest
 
 final class MenuBarDebugTextTests: XCTestCase {

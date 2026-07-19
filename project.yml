@@ -59,7 +59,11 @@ targets:
           - group.com.ks1019.voicekeyboardinput
     settings:
       base:
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 47JGA6NAP2
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput
+        PROVISIONING_PROFILE_SPECIFIER: ""
 
   VoiceKeyboardExtension:
     type: app-extension
@@ -105,6 +109,8 @@ targets:
           - group.com.ks1019.voicekeyboardinput
     settings:
       base:
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 47JGA6NAP2
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.keyboard
         APPLICATION_EXTENSION_API_ONLY: YES
 
@@ -136,10 +142,6 @@ targets:
       - VoiceKeyboardMenuBarTests
     dependencies:
       - target: VoiceKeyboardMenuBar
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardCommandPipeline
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardModels
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.menubartests
