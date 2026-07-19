@@ -21,6 +21,24 @@ final class VoiceInputPipelineTests: XCTestCase {
         ])
     }
 
+    func testCorePipelineOperationsMatchLiteralCommandPipelinePreview() {
+        let pipeline = VoiceInputPipeline(
+            locale: VoiceKeyboardLocale(identifier: "en-US")
+        )
+
+        XCTAssertEqual(
+            pipeline.operations(
+                for: "hello comma world",
+                documentContextBeforeInput: "prefix"
+            ),
+            [
+                .insertText(" hello"),
+                .insertText(","),
+                .insertText(" world")
+            ]
+        )
+    }
+
     func testPipelineCleansInsertedText() async throws {
         let pipeline = VoiceInputPipeline(
             locale: VoiceKeyboardLocale(identifier: "en-US"),

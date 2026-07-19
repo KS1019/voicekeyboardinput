@@ -36,7 +36,7 @@
 		BDFA298A77FF05845AC3B359 /* VoiceActivityMeterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */; };
 		C0A88DBA15728CC3694C2FEE /* KeyboardRootViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */; };
 		C0E7AFF1A4E851CE1D95CDD8 /* AppSpeechDictationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD7AB6375CF09FE52E7AF16 /* AppSpeechDictationService.swift */; };
-		C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardCore in Frameworks */ = {isa = PBXBuildFile; productRef = DA684A24AA3DC3311F7A2723 /* VoiceKeyboardCore */; };
+		C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardCommandPipeline in Frameworks */ = {isa = PBXBuildFile; productRef = CB00A63C89651DE419CC4B91 /* VoiceKeyboardCommandPipeline */; };
 		E48C4B4D8A4BFCE3205331F1 /* KeyboardAudioInputProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05180E43C6C8DE7232F93096 /* KeyboardAudioInputProbe.swift */; };
 		E8470A6DD4BF648039EBBA0C /* KeyboardRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */; };
 		F5DFCB4CF55FDE06A1C11F66 /* KeyboardSpeechRecognitionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E2893701F3C5692A33ED66 /* KeyboardSpeechRecognitionService.swift */; };
@@ -147,7 +147,7 @@
 			files = (
 				1EAEDECF46F339B06204F4C1 /* VoiceKeyboardModels in Frameworks */,
 				B509603735CECD961B5BFD77 /* VoiceKeyboardInterfaces in Frameworks */,
-				C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardCore in Frameworks */,
+				C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardCommandPipeline in Frameworks */,
 				49B8F15398B8F4DEB6F48E0B /* VoiceKeyboardPresentation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -315,7 +315,7 @@
 			packageProductDependencies = (
 				97A49A68D0E59F4A40298C00 /* VoiceKeyboardModels */,
 				7DB9C02A1F53C172FF702C19 /* VoiceKeyboardInterfaces */,
-				DA684A24AA3DC3311F7A2723 /* VoiceKeyboardCore */,
+				CB00A63C89651DE419CC4B91 /* VoiceKeyboardCommandPipeline */,
 				DB43C5971A85B4C594676C15 /* VoiceKeyboardPresentation */,
 			);
 			productName = VoiceKeyboardInput;
@@ -885,9 +885,9 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardModels;
 		};
-		DA684A24AA3DC3311F7A2723 /* VoiceKeyboardCore */ = {
+		CB00A63C89651DE419CC4B91 /* VoiceKeyboardCommandPipeline */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = VoiceKeyboardCore;
+			productName = VoiceKeyboardCommandPipeline;
 		};
 		DB43C5971A85B4C594676C15 /* VoiceKeyboardPresentation */ = {
 			isa = XCSwiftPackageProductDependency;

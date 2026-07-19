@@ -1,6 +1,6 @@
 import SwiftUI
 import UIKit
-import VoiceKeyboardCore
+import VoiceKeyboardCommandPipeline
 import VoiceKeyboardModels
 import VoiceKeyboardPresentation
 
@@ -11,7 +11,9 @@ struct ContentView: View {
     @State private var showsDeveloperDetails = false
     private let voiceInputLaunchModel: VoiceInputLaunchModel
 
-    private let pipeline = VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: Locale.current.identifier))
+    private let pipeline = LiteralTranscriptCommandPipeline(
+        locale: VoiceKeyboardLocale(identifier: Locale.current.identifier)
+    )
 
     init(voiceInputLaunchModel: VoiceInputLaunchModel = VoiceInputLaunchModel()) {
         self.voiceInputLaunchModel = voiceInputLaunchModel
@@ -230,11 +232,13 @@ struct ContentView: View {
     }
 
     private func previewSampleTranscript() {
-        let operations = pipeline.operations(
+        let preview = pipeline.preview(
             for: sampleTranscript,
             documentContextBeforeInput: ""
         )
-        commandPreview = CommandPreviewPresentationSnapshot(operations: operations)
+        commandPreview = CommandPreviewPresentationSnapshot(
+            operations: preview.operations
+        )
     }
 
     private func openApplicationSettings() {

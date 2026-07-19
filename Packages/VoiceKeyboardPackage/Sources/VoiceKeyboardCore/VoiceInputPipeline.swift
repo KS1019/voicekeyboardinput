@@ -1,10 +1,9 @@
-import VoiceKeyboardCommands
+import VoiceKeyboardCommandPipeline
 import VoiceKeyboardInterfaces
 import VoiceKeyboardModels
 
 public struct VoiceInputPipeline: Sendable {
-    private let parser: VoiceCommandParser
-    private let planner: TextInsertionPlanner
+    private let commandPipeline: LiteralTranscriptCommandPipeline
     private let cleanupService: (any TextCleanupService)?
     private let locale: VoiceKeyboardLocale
 
@@ -13,8 +12,7 @@ public struct VoiceInputPipeline: Sendable {
         cleanupService: (any TextCleanupService)? = nil
     ) {
         self.locale = locale
-        self.parser = VoiceCommandParser(locale: locale)
-        self.planner = TextInsertionPlanner()
+        self.commandPipeline = LiteralTranscriptCommandPipeline(locale: locale)
         self.cleanupService = cleanupService
     }
 
@@ -22,8 +20,10 @@ public struct VoiceInputPipeline: Sendable {
         for transcript: String,
         documentContextBeforeInput: String?
     ) -> [TextOperation] {
-        let parsed = parser.parse(transcript)
-        return planner.plan(parsed, documentContextBeforeInput: documentContextBeforeInput)
+        commandPipeline.preview(
+            for: transcript,
+            documentContextBeforeInput: documentContextBeforeInput
+        ).operations
     }
 
     /// Prepares insertable text for a transcript that contains only insertion operations.

@@ -48,7 +48,7 @@ let package = Package(
             name: "VoiceKeyboardCore",
             dependencies: [
                 "VoiceKeyboardModels",
-                "VoiceKeyboardCommands",
+                "VoiceKeyboardCommandPipeline",
                 "VoiceKeyboardInterfaces"
             ],
             exclude: ["VoiceKeyboardCore.docc"]

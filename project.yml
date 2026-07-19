@@ -28,7 +28,7 @@ targets:
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardInterfaces
       - package: VoiceKeyboardPackage
-        product: VoiceKeyboardCore
+        product: VoiceKeyboardCommandPipeline
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardPresentation
       - target: VoiceKeyboardExtension
