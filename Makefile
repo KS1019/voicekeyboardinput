@@ -1,6 +1,7 @@
 DERIVED_DATA := .build/XcodeDerivedData
 PACKAGE_DIR := Packages/VoiceKeyboardPackage
 PACKAGE_SWIFT_DIRS := $(PACKAGE_DIR)/Sources $(PACKAGE_DIR)/Tests
+MAC_APP_SWIFT_DIRS := VoiceKeyboardMenuBar
 PREVIEW_DESTINATION ?= platform=iOS Simulator,name=iPhone 17
 SIMULATOR_DEVICE ?= booted
 APP_BUNDLE_ID := com.ks1019.voicekeyboardinput
@@ -16,9 +17,12 @@ XCODEBUILD := env CLANG_MODULE_CACHE_PATH=/private/tmp/voicekeyboard-clang-cache
 XCODEGEN ?= $(or $(shell command -v xcodegen 2>/dev/null),$(wildcard /opt/homebrew/bin/xcodegen),$(wildcard /usr/local/bin/xcodegen),xcodegen)
 DEPENDENCY_POLICY_PATHS := project.yml VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved Packages/VoiceKeyboardPackage VoiceKeyboardInputApp VoiceKeyboardExtension VoiceKeyboardUIKit
 FORBIDDEN_PACKAGE_IMPORTS := '^[[:space:]]*import[[:space:]]+(AuralKit|UIKit|AVFoundation|Speech|FoundationModels)\b'
+FORBIDDEN_MAC_APP_IMPORTS := '^[[:space:]]*import[[:space:]]+(AVFAudio|AVFoundation|Speech|UIKit|FoundationModels)\b'
 EXTENSION_SAFE_PATHS := VoiceKeyboardExtension VoiceKeyboardUIKit
 FORBIDDEN_EXTENSION_APIS := 'UIApplication[.]shared|^[[:space:]]*import[[:space:]]+FoundationModels\b'
 APP_GROUP_ID := group.com.ks1019.voicekeyboardinput
+MENU_BAR_ALLOWED_PACKAGE_PRODUCTS := VoiceKeyboardCommandPipeline VoiceKeyboardModels
+MENU_BAR_FORBIDDEN_PROJECT_BLOCK_TOKENS := 'VoiceKeyboard(Core|SharedStorage|Presentation|Interfaces)|group[.]com[.]ks1019[.]voicekeyboardinput|com[.]apple[.]security[.]application-groups|NSMicrophoneUsageDescription|NSSpeechRecognitionUsageDescription|AVFAudio|AVFoundation|Speech|FoundationModels|UIKit'
 
 .PHONY: generate
 generate:
@@ -45,6 +49,14 @@ mac-build: generate
 	$(XCODEBUILD) build \
 		-scheme $(MAC_SCHEME) \
 		-destination 'generic/platform=macOS' \
+		-derivedDataPath $(DERIVED_DATA) \
+		CODE_SIGNING_ALLOWED=NO
+
+.PHONY: mac-test
+mac-test: generate
+	$(XCODEBUILD) test \
+		-scheme $(MAC_SCHEME) \
+		-destination 'platform=macOS' \
 		-derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO
 
@@ -121,6 +133,13 @@ dependency-policy-check:
 	status=0; rg --quiet 'AuralKit' $(DEPENDENCY_POLICY_PATHS) || status=$$?; test $$status -eq 1
 	status=0; rg --quiet $(FORBIDDEN_PACKAGE_IMPORTS) $(PACKAGE_SWIFT_DIRS) || status=$$?; test $$status -eq 1
 	status=0; rg --quiet $(FORBIDDEN_EXTENSION_APIS) $(EXTENSION_SAFE_PATHS) || status=$$?; test $$status -eq 1
+	status=0; rg --quiet $(FORBIDDEN_MAC_APP_IMPORTS) $(MAC_APP_SWIFT_DIRS) || status=$$?; test $$status -eq 1
+	menu_bar_block="$$(mktemp)"; \
+		trap 'rm -f "$$menu_bar_block"' EXIT; \
+		awk 'BEGIN { capture = 0 } /^  VoiceKeyboardMenuBar:/ { capture = 1 } /^  VoiceKeyboardMenuBarTests:/ { capture = 0 } capture { print }' project.yml > "$$menu_bar_block"; \
+		test "$$(rg -o 'product: [A-Za-z0-9]+' "$$menu_bar_block" | sed 's/product: //' | sort | tr '\n' ' ' | sed 's/ $$//')" = "$$(printf '%s\n' $(MENU_BAR_ALLOWED_PACKAGE_PRODUCTS) | sort | tr '\n' ' ' | sed 's/ $$//')"; \
+		test "$$(rg -c 'product:' "$$menu_bar_block")" = "2"; \
+		status=0; rg --quiet $(MENU_BAR_FORBIDDEN_PROJECT_BLOCK_TOKENS) "$$menu_bar_block" || status=$$?; test $$status -eq 1
 
 .PHONY: keyboard-permission-policy-check
 keyboard-permission-policy-check:
@@ -138,6 +157,7 @@ verify:
 	$(MAKE) generated-check
 	$(MAKE) build
 	$(MAKE) mac-build
+	$(MAKE) mac-test
 	$(MAKE) ui-kit-test
 	$(MAKE) app-ui-test
 	$(MAKE) preview-layout-test

@@ -263,6 +263,35 @@ final class TextInsertionPlannerTests: XCTestCase {
         XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(4))])
     }
 
+    func testPlansDeleteSentenceIncludingTrailingClosingDelimiters() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        XCTAssertEqual(
+            planner.plan(
+                transcript,
+                documentContextBeforeInput: "One. \"Two.\""
+            ),
+            [.deleteBackward(count: deleteCount(7))]
+        )
+
+        XCTAssertEqual(
+            planner.plan(
+                transcript,
+                documentContextBeforeInput: "One. (Two.)"
+            ),
+            [.deleteBackward(count: deleteCount(7))]
+        )
+
+        XCTAssertEqual(
+            planner.plan(
+                transcript,
+                documentContextBeforeInput: "一。「二。」"
+            ),
+            [.deleteBackward(count: deleteCount(4))]
+        )
+    }
+
     func testSkipsDeleteCommandsWithZeroCount() {
         let planner = TextInsertionPlanner()
 

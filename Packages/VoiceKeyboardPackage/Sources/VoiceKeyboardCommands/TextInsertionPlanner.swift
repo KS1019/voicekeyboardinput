@@ -96,7 +96,10 @@ package struct TextInsertionPlanner: Sendable {
         var count = 0
         var hasSeenSentenceBody = false
 
-        for character in trimmed.reversed() {
+        let trailingClosingDelimiterCount = trimmed.reversed().prefix { $0.isSentenceClosingDelimiter }.count
+        count += trailingClosingDelimiterCount
+
+        for character in trimmed.dropLast(trailingClosingDelimiterCount).reversed() {
             if sentenceTerminators.contains(character), hasSeenSentenceBody {
                 break
             }
@@ -111,6 +114,10 @@ package struct TextInsertionPlanner: Sendable {
 }
 
 private extension Character {
+    var isSentenceClosingDelimiter: Bool {
+        self == "\"" || self == ")" || self == "]" || self == "}" || self == "」" || self == "』"
+    }
+
     var isJapanesePunctuation: Bool {
         self == "、" || self == "。" || self == "？" || self == "！"
     }
