@@ -15,8 +15,9 @@ extension while sharing the platform-neutral package modules.
 - A menu bar-only SwiftUI scene using `MenuBarExtra` with the window style.
 - A transcript editor, document-context editor, locale selector, and preview action.
 - A preview showing both parsed transcript elements and planned text operations.
-- A public `VoiceKeyboardCommands` package product so command parsing and planning
-  can be consumed directly by the macOS tester and independently tested.
+- A public `VoiceKeyboardCommandPipeline` package product that exposes only the
+  literal-transcript preview facade; parser and planner implementation types
+  remain internal to `VoiceKeyboardCommands`.
 - Package tests covering the public command API and the existing iOS pipeline.
 - Build and test commands for both the package and the macOS target.
 
@@ -39,10 +40,34 @@ adapters until a separate macOS audio requirement is established.
 
 `VoiceKeyboardModels` remains platform-neutral and contains value types such as
 `TextOperation` and `VoiceKeyboardLocale`. `VoiceKeyboardCommands` owns the
-transcript language and exposes `VoiceCommand`, `TranscriptElement`,
-`ParsedTranscript`, `VoiceCommandParser`, and `TextInsertionPlanner` as public
-APIs. `VoiceKeyboardCore` remains the orchestration layer and keeps
-`VoiceInputPipeline` as the stable facade used by iOS and macOS clients.
+transcript language and keeps `VoiceCommand`, `TranscriptElement`,
+`ParsedTranscript`, `VoiceCommandParser`, and `TextInsertionPlanner` as package
+implementation types. `VoiceKeyboardCommandPipeline` is the small public
+cross-platform facade for literal transcript previews. `VoiceKeyboardCore`
+remains the iOS speech-session orchestration layer and uses the command pipeline
+internally for keyboard actions.
+
+The public facade is intentionally small:
+
+```swift
+public struct LiteralTranscriptCommandPipeline: Sendable {
+    public init(locale: VoiceKeyboardLocale)
+    public func preview(
+        for transcript: String,
+        documentContextBeforeInput: String?
+    ) -> LiteralTranscriptPreview
+}
+
+public struct LiteralTranscriptPreview: Equatable, Sendable {
+    public let elements: [LiteralTranscriptElement]
+    public let operations: [TextOperation]
+}
+```
+
+The facade maps the internal parser representation to public
+`LiteralTranscriptElement` and `LiteralTranscriptCommand` values. This lets the
+menu bar UI display parsed commands without making the parser's implementation
+types part of the package's external contract.
 
 The package keeps its existing iOS and macOS minimums (`iOS 16`, `macOS 13`),
 but removes platform declarations for surfaces that this product does not build
@@ -54,12 +79,13 @@ or verify. The actual iOS app and extension continue to enforce iOS 26 in
 The new `VoiceKeyboardMenuBar` target contains only SwiftUI/AppKit-free UI and
 the menu bar app entry point. It depends on:
 
-- `VoiceKeyboardCore` for the end-to-end transcript-to-operation facade.
-- `VoiceKeyboardCommands` for rendering the parsed command elements.
+- `VoiceKeyboardCommandPipeline` for the literal transcript preview facade.
 - `VoiceKeyboardModels` for locale and text-operation value types.
 
-It has no entitlements, no App Group, no iOS frameworks, and no audio or speech
-adapter. `LSUIElement` keeps the utility in the menu bar without a Dock icon.
+It does not depend on `VoiceKeyboardCore`, `VoiceKeyboardCommands`, the iOS
+containing app, or the keyboard extension. It has no entitlements, no App Group,
+no iOS frameworks, and no audio or speech adapter. `LSUIElement` keeps the
+utility in the menu bar without a Dock icon.
 
 ## User flow
 
@@ -68,8 +94,9 @@ adapter. `LSUIElement` keeps the utility in the menu bar without a Dock icon.
 3. The user edits the transcript, optional text immediately before insertion, and
    the language (`English` or `日本語`).
 4. The user clicks `Preview`.
-5. The app parses the literal transcript with `VoiceCommandParser`, plans text
-   operations with `TextInsertionPlanner`, and displays both results.
+5. The app parses the literal transcript with
+   `LiteralTranscriptCommandPipeline` and displays both parsed elements and
+   planned text operations.
 6. The user can revise the literal transcript and repeat without recording audio.
 
 The UI treats empty input as a valid no-op preview. It displays delete counts and
@@ -80,7 +107,8 @@ mistaken for text that will be inserted.
 
 - The preview action is synchronous and deterministic; it does not create a
   task, audio session, notification observer, or shared-state writer.
-- The selected locale is passed to the same parser used by `VoiceInputPipeline`.
+- The selected locale is passed to the same command facade used by
+  `VoiceInputPipeline`.
 - The document context is passed to the planner so spacing and deletion behavior
   matches keyboard insertion semantics.
 - The menu bar scene is the only scene. There is no hidden long-running service
@@ -106,4 +134,3 @@ mistaken for text that will be inserted.
 - `MenuBarExtra`: https://developer.apple.com/documentation/swiftui/menubarextra
 - `MenuBarExtraStyle.window`:
   https://developer.apple.com/documentation/swiftui/menubarextrastyle/window
-
