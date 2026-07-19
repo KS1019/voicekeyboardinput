@@ -23,6 +23,14 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             return didDrain
         }
 
+        func waitUntilDrained() {
+            condition.lock()
+            while inFlightCallbacks > 0 {
+                condition.wait()
+            }
+            condition.unlock()
+        }
+
         func append(
             _ buffer: AVAudioPCMBuffer,
             to request: SFSpeechAudioBufferRecognitionRequest
@@ -43,6 +51,23 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 condition.unlock()
             }
             request.append(buffer)
+        }
+    }
+
+    private final class DeferredLegacyRequestCleanup: @unchecked Sendable {
+        private let gate: LegacyAudioTapGate
+        private let request: SFSpeechAudioBufferRecognitionRequest
+
+        init(gate: LegacyAudioTapGate, request: SFSpeechAudioBufferRecognitionRequest) {
+            self.gate = gate
+            self.request = request
+        }
+
+        func schedule() {
+            DispatchQueue.global(qos: .utility).async { [self] in
+                gate.waitUntilDrained()
+                request.endAudio()
+            }
         }
     }
 
@@ -105,6 +130,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         var analyzer: SpeechAnalyzer?
         var analyzerTask: Task<Void, Never>?
         var analyzerTapGate: AnalyzerAudioTapGate?
+        var pendingUpdate: SpeechRecognitionUpdate?
         var recognitionTasks: [Task<Void, Never>] = []
         var inputContinuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
         var outputContinuations: [SpeechRecognitionUpdateStream.Continuation] = []
@@ -274,8 +300,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
         activeRun?.analyzerTask = Task {
             do {
+                // SpeechAnalyzer.start begins analysis and returns before the
+                // input sequence is exhausted. The result stream owns the
+                // lifetime of this run; cleanup is driven by stop(), an
+                // output-stream failure, or an audio observer failure.
                 try await analyzer.start(inputSequence: inputStream)
-                await self.requestCleanup(generation: generation)
             } catch {
                 self.failCurrentRun(
                     .recognitionFailed(String(describing: error)),
@@ -291,14 +320,17 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     for try await result in transcriber.results {
                         guard self.isCurrent(generation) else { return }
                         let transcript = String(result.text.characters)
+                        let update = SpeechRecognitionUpdate(
+                            transcript: transcript,
+                            isFinal: result.isFinal,
+                            inputLevel: nil
+                        )
+                        await self.record(update, generation: generation)
                         continuation.yield(
-                            SpeechRecognitionUpdate(
-                                transcript: transcript,
-                                isFinal: result.isFinal,
-                                inputLevel: nil
-                            )
+                            update
                         )
                     }
+                    await self.flushPendingUpdate(generation: generation)
                     continuation.finish()
                 } catch {
                     guard self.isCurrent(generation) else { return }
@@ -392,13 +424,13 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 if let result {
                     Task {
                         guard self.isCurrent(generation) else { return }
-                        continuation.yield(
-                            SpeechRecognitionUpdate(
-                                transcript: result.bestTranscription.formattedString,
-                                isFinal: result.isFinal,
-                                inputLevel: nil
-                            )
+                        let update = SpeechRecognitionUpdate(
+                            transcript: result.bestTranscription.formattedString,
+                            isFinal: result.isFinal,
+                            inputLevel: nil
                         )
+                        await self.record(update, generation: generation)
+                        continuation.yield(update)
                         if result.isFinal, self.isCurrent(generation) {
                             continuation.finish()
                         }
@@ -427,6 +459,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activePermissionCancellation = nil
         activePermissionCancellationToken = nil
         guard let generation = activeRun?.generation else { return }
+        flushPendingUpdate(generation: generation)
         await requestCleanup(generation: generation)
     }
 
@@ -463,9 +496,22 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         run.analyzerTapGate = nil
         run.legacyTask?.cancel()
         run.legacyTask = nil
-        run.legacyTapGate?.invalidate()
-        run.legacyTapGate = nil
-        run.legacyRequest?.endAudio()
+        if let legacyTapGate = run.legacyTapGate {
+            let didDrain = legacyTapGate.invalidate()
+            run.legacyTapGate = nil
+            if let legacyRequest = run.legacyRequest {
+                if didDrain {
+                    legacyRequest.endAudio()
+                } else {
+                    DeferredLegacyRequestCleanup(
+                        gate: legacyTapGate,
+                        request: legacyRequest
+                    ).schedule()
+                }
+            }
+        } else {
+            run.legacyRequest?.endAudio()
+        }
         run.legacyRequest = nil
         run.audioObservers.forEach { NotificationCenter.default.removeObserver($0) }
         run.audioObservers.removeAll()
@@ -593,6 +639,25 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activeRun?.inputContinuation?.finish(throwing: error)
         activeRun?.outputContinuations.forEach { $0.finish(throwing: error) }
         Task { await requestCleanup(generation: generation) }
+    }
+
+    private func record(_ update: SpeechRecognitionUpdate, generation: UInt64) {
+        guard isCurrent(generation) else { return }
+        activeRun?.pendingUpdate = update.isFinal ? nil : update
+    }
+
+    private func flushPendingUpdate(generation: UInt64) {
+        guard var run = activeRun,
+              run.generation == generation,
+              let pendingUpdate = run.pendingUpdate else { return }
+        run.pendingUpdate = nil
+        activeRun = run
+        let finalUpdate = SpeechRecognitionUpdate(
+            transcript: pendingUpdate.transcript,
+            isFinal: true,
+            inputLevel: pendingUpdate.inputLevel?.value
+        )
+        run.outputContinuations.forEach { $0.yield(finalUpdate) }
     }
 
     private func isCurrent(_ generation: UInt64) -> Bool {

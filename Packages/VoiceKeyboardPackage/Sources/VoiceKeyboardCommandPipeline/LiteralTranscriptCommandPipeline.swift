@@ -50,6 +50,10 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
         )
     }
 
+    public func hasIncompleteCommandPrefix(for transcript: String) -> Bool {
+        parser.hasIncompleteCommandPrefix(transcript)
+    }
+
     private static func mapElement(
         _ element: TranscriptElement
     ) -> LiteralTranscriptElement {

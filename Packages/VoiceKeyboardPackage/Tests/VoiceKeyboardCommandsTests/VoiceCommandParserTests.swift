@@ -38,6 +38,15 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
+    func testRecognizesIncompleteMultiWordCommandPrefixes() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertTrue(parser.hasIncompleteCommandPrefix("delete"))
+        XCTAssertTrue(parser.hasIncompleteCommandPrefix("hello new"))
+        XCTAssertFalse(parser.hasIncompleteCommandPrefix("delete word"))
+        XCTAssertFalse(parser.hasIncompleteCommandPrefix("hello world"))
+    }
+
     func testParsesUnsupportedShortcutCommands() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 

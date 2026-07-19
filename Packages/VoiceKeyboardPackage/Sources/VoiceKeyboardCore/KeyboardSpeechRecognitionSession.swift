@@ -43,14 +43,37 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                 do {
                     let updates = try await speechService.start(locale: locale)
                     var virtualDocumentContext = documentContextBeforeInput ?? ""
+                    var pendingFinalTranscript = ""
                     for try await update in updates {
                         guard !Task.isCancelled else { break }
                         if update.isFinal {
+                            pendingFinalTranscript = appendingTranscriptSegment(
+                                update.transcript,
+                                to: pendingFinalTranscript
+                            )
+                            if pipeline.hasIncompleteCommandPrefix(
+                                for: pendingFinalTranscript,
+                                locale: locale
+                            ) {
+                                continuation.yield(
+                                    KeyboardSpeechRecognitionEvent(
+                                        state: .transcribing(
+                                            SpeechRecognitionUpdate(
+                                                transcript: pendingFinalTranscript,
+                                                isFinal: false,
+                                                inputLevel: update.inputLevel?.value
+                                            )
+                                        )
+                                    )
+                                )
+                                continue
+                            }
                             let actions = actions(
-                                transcript: update.transcript,
+                                transcript: pendingFinalTranscript,
                                 documentContextBeforeInput: virtualDocumentContext,
                                 locale: locale
                             )
+                            pendingFinalTranscript = ""
                             virtualDocumentContext = applying(actions, to: virtualDocumentContext)
                             continuation.yield(
                                 KeyboardSpeechRecognitionEvent(
@@ -61,6 +84,24 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                         } else {
                             continuation.yield(KeyboardSpeechRecognitionEvent(state: .transcribing(update)))
                         }
+                    }
+                    if !Task.isCancelled, !pendingFinalTranscript.isEmpty {
+                        let finalUpdate = SpeechRecognitionUpdate(
+                            transcript: pendingFinalTranscript,
+                            isFinal: true
+                        )
+                        let actions = actions(
+                            transcript: pendingFinalTranscript,
+                            documentContextBeforeInput: virtualDocumentContext,
+                            locale: locale
+                        )
+                        virtualDocumentContext = applying(actions, to: virtualDocumentContext)
+                        continuation.yield(
+                            KeyboardSpeechRecognitionEvent(
+                                state: eventState(for: finalUpdate, actions: actions),
+                                actions: actions
+                            )
+                        )
                     }
                     await stopGate.stop(speechService)
                     continuation.finish()
@@ -127,6 +168,21 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                 break
             }
         }
+    }
+
+    private func appendingTranscriptSegment(
+        _ segment: String,
+        to transcript: String
+    ) -> String {
+        guard !segment.isEmpty else { return transcript }
+        guard !transcript.isEmpty else { return segment }
+        guard let last = transcript.last, let first = segment.first else {
+            return transcript + segment
+        }
+        if last.isWhitespace || first.isWhitespace {
+            return transcript + segment
+        }
+        return transcript + " " + segment
     }
 
     private func eventState(

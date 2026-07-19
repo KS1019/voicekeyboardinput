@@ -28,6 +28,14 @@ public struct VoiceInputPipeline: Sendable {
         ).operations
     }
 
+    public func hasIncompleteCommandPrefix(
+        for transcript: String,
+        locale: VoiceKeyboardLocale? = nil
+    ) -> Bool {
+        let commandPipeline = locale.map { LiteralTranscriptCommandPipeline(locale: $0) } ?? self.commandPipeline
+        return commandPipeline.hasIncompleteCommandPrefix(for: transcript)
+    }
+
     /// Prepares insertable text for a transcript that contains only insertion operations.
     ///
     /// Transcripts that include delete or unsupported-command operations return `.editingOperations`

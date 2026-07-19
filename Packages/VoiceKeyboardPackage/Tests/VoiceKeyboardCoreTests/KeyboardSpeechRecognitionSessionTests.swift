@@ -148,6 +148,29 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         ])
     }
 
+    func testSplitFinalSegmentsAreRecombinedForMultiWordCommands() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "hello", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "delete", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "word", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: "hello world"
+        ))
+
+        XCTAssertEqual(events.dropFirst().map(\.actions), [
+            [.insertText(" hello")],
+            [],
+            [.deleteBackward(count: TextDeletionCount(5)!)]
+        ])
+    }
+
     func testEventsUseRequestedLocaleForCommandParsing() async {
         let service = FakeSpeechRecognitionService(initialUpdates: [
             SpeechRecognitionUpdate(transcript: "こんにちは読点世界", isFinal: true)

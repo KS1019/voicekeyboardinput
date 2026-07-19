@@ -65,6 +65,14 @@ final class AppSpeechDictationRun {
             return didDrain
         }
 
+        func waitUntilDrained() {
+            condition.lock()
+            while inFlightCallbacks > 0 {
+                condition.wait()
+            }
+            condition.unlock()
+        }
+
         func append(
             _ buffer: AVAudioPCMBuffer,
             to request: SFSpeechAudioBufferRecognitionRequest
@@ -85,6 +93,23 @@ final class AppSpeechDictationRun {
                 condition.unlock()
             }
             request.append(buffer)
+        }
+    }
+
+    private final class DeferredAudioRequestCleanup: @unchecked Sendable {
+        private let gate: AudioTapGate
+        private let request: SFSpeechAudioBufferRecognitionRequest
+
+        init(gate: AudioTapGate, request: SFSpeechAudioBufferRecognitionRequest) {
+            self.gate = gate
+            self.request = request
+        }
+
+        func schedule() {
+            DispatchQueue.global(qos: .utility).async { [self] in
+                gate.waitUntilDrained()
+                request.endAudio()
+            }
         }
     }
 
@@ -209,14 +234,6 @@ final class AppSpeechDictationRun {
             engine.prepare()
             try engine.start()
         } catch {
-            audioTapGate?.invalidate()
-            audioTapGate = nil
-            request.endAudio()
-            self.request = nil
-            if tapIsInstalled {
-                inputNode.removeTap(onBus: 0)
-                tapIsInstalled = false
-            }
             await cleanup()
             throw AppSpeechDictationError.audioEngineStartFailed
         }
@@ -406,9 +423,22 @@ final class AppSpeechDictationRun {
             NotificationCenter.default.removeObserver(mediaServicesResetObserver)
             self.mediaServicesResetObserver = nil
         }
-        audioTapGate?.invalidate()
-        audioTapGate = nil
-        request?.endAudio()
+        if let audioTapGate {
+            let didDrain = audioTapGate.invalidate()
+            self.audioTapGate = nil
+            if let request {
+                if didDrain {
+                    request.endAudio()
+                } else {
+                    DeferredAudioRequestCleanup(
+                        gate: audioTapGate,
+                        request: request
+                    ).schedule()
+                }
+            }
+        } else {
+            request?.endAudio()
+        }
         request = nil
         if tapIsInstalled {
             engine.inputNode.removeTap(onBus: 0)

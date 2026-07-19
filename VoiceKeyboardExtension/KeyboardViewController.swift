@@ -171,8 +171,6 @@ public final class KeyboardViewController: UIInputViewController {
 
         if isRecognitionActive {
             isRecognitionStopping = true
-            recognitionTask?.cancel()
-            isRecognitionActive = false
             let coordinator = speechCaptureCoordinator
             let epoch = lifecycleEpoch
             Task { [weak self] in
@@ -212,13 +210,13 @@ public final class KeyboardViewController: UIInputViewController {
                 guard !Task.isCancelled else { return }
                 guard lifecycleEpoch == epoch, isRecognitionActive else { return }
                 switch event.state {
-                case .inserted, .unsupportedCommand, .recognitionFailed:
+                case .recognitionFailed:
                     hasTerminalPresentation = true
                 default:
                     break
                 }
                 keyboardRootView.render(
-                    speechCapture: .keyboardSpeechCapture(event.state),
+                    speechCapture: activeSpeechCaptureSnapshot(for: event.state),
                     announce: true
                 )
                 apply(event.actions, epoch: epoch)
@@ -352,7 +350,7 @@ public final class KeyboardViewController: UIInputViewController {
         _ actions: [KeyboardTextInsertionAction],
         epoch: UInt64
     ) {
-        guard isRecognitionActive, !isRecognitionStopping else { return }
+        guard isRecognitionActive else { return }
         guard lifecycleEpoch == epoch else { return }
         for action in actions {
             switch action {
@@ -365,6 +363,26 @@ public final class KeyboardViewController: UIInputViewController {
             case .showUnsupportedCommand:
                 break
             }
+        }
+    }
+
+    private func activeSpeechCaptureSnapshot(
+        for state: KeyboardSpeechCaptureState
+    ) -> SpeechCapturePresentationSnapshot {
+        let snapshot = SpeechCapturePresentationSnapshot.keyboardSpeechCapture(state)
+        guard isRecognitionActive else { return snapshot }
+        switch state {
+        case .inserted, .unsupportedCommand:
+            return SpeechCapturePresentationSnapshot(
+                transcriptText: snapshot.transcriptText,
+                statusText: snapshot.statusText,
+                microphoneTitle: "Stop",
+                microphoneTone: snapshot.microphoneTone,
+                activeMicrophoneBars: .ready,
+                voiceActivityState: .listening(level: nil)
+            )
+        default:
+            return snapshot
         }
     }
 

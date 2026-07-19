@@ -59,6 +59,24 @@ package struct VoiceCommandParser: Sendable {
         return ParsedTranscript(elements: elements)
     }
 
+    package func hasIncompleteCommandPrefix(_ transcript: String) -> Bool {
+        let words = transcript
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        let maximumSuffixLength = min(maxPhraseLength - 1, words.count)
+        guard maximumSuffixLength > 0 else { return false }
+
+        for length in 1...maximumSuffixLength {
+            let suffix = words.suffix(length).joined(separator: " ").lowercased()
+            if commandMap.keys.contains(where: { phrase in
+                phrase.hasPrefix(suffix + " ")
+            }) {
+                return true
+            }
+        }
+        return false
+    }
+
     private func parseUnspacedJapaneseSegment(_ segment: String) -> [TranscriptElement] {
         var remaining = segment[...]
         var pendingText = ""
