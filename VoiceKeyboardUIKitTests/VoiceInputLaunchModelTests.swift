@@ -89,6 +89,109 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         activator.finish(with: .transcriptShared("hello"))
     }
 
+    func testPrepareSessionCancelsPendingCommandFromPreviousProcess() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = MicrophoneActivatorSpy(status: .transcriptShared("unexpected"))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+        let staleCommand = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date().addingTimeInterval(-20)
+        )
+        store.saveCommand(staleCommand)
+
+        let result = await controller.prepareSession()
+        try await Task.sleep(for: .milliseconds(350))
+
+        XCTAssertEqual(result, .sessionReady)
+        XCTAssertEqual(activator.recordedCallCount(), 0)
+        XCTAssertEqual(store.status(), .cancelled(token: staleCommand.token))
+    }
+
+    func testPrepareSessionRecoversFreshCommandWhenStatusWriteWasInterrupted() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = MicrophoneActivatorSpy(status: .transcriptShared("recovered"))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+        let command = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        )
+        store.saveCommand(command)
+        store.saveStatus(.idle)
+
+        _ = await controller.prepareSession()
+        await waitForStartCall(in: activator)
+
+        XCTAssertEqual(activator.recordedCallCount(), 1)
+        XCTAssertEqual(store.status(), .transcriptReady(token: command.token))
+    }
+
+    func testStopCommandCancelsPendingStartBeforeAppClaimsIt() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = MicrophoneActivatorSpy(status: .transcriptShared("unexpected"))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        let startCommand = SharedDictationSessionCommand.start(source: .keyboard)
+        store.saveCommand(startCommand)
+        let stopCommand = SharedDictationSessionCommand.stop(
+            sessionID: startCommand.sessionID,
+            source: .keyboard
+        )
+        store.saveCommand(stopCommand)
+
+        await waitForSessionStatus(in: store) { status in
+            status == .cancelled(token: stopCommand.token)
+        }
+
+        XCTAssertEqual(activator.recordedCallCount(), 0)
+    }
+
+    func testPrepareSessionClaimsStopCommandAfterRestart() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let oldStart = SharedDictationSessionCommand.start(source: .keyboard)
+        let stop = SharedDictationSessionCommand.stop(
+            sessionID: oldStart.sessionID,
+            source: .keyboard
+        )
+        store.saveStatus(.recording(
+            token: oldStart.token,
+            startedAt: Date().addingTimeInterval(-1),
+            timeoutSeconds: 8
+        ))
+        store.saveCommand(stop)
+
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: MicrophoneActivatorSpy(status: .transcriptShared("unexpected")),
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        await waitForSessionStatus(in: store) { status in
+            status == .cancelled(token: stop.token)
+        }
+    }
+
     func testContainingAppStartIsNotReprocessedByKeyboardCommandMonitor() async throws {
         let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -150,6 +253,73 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         await waitForCancellation(in: activator)
         XCTAssertEqual(activator.recordedCancellationCount(), 1)
+    }
+
+    func testContainingAppStartIsCancelledBySessionCancellation() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = CancellableSuspendedMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        let startTask = Task { await controller.startFromContainingApp() }
+        await waitForStartCall(in: activator)
+
+        await controller.cancelActiveSession()
+        await waitForCancellation(in: activator)
+
+        let result = await startTask.value
+        XCTAssertEqual(result, .failed("Cancelled"))
+    }
+
+    func testCancelledStartCannotClearNewerStartState() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = NonCooperativeSuspendedMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+
+        _ = await controller.prepareSession()
+        let firstCommand = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        )
+        store.saveCommand(firstCommand)
+        await waitForStartCall(in: activator, expectedCount: 1)
+
+        store.saveCommand(SharedDictationSessionCommand.stop(
+            sessionID: firstCommand.sessionID,
+            source: .keyboard,
+            requestedAt: Date()
+        ))
+        await waitForSessionStatus(in: store) { status in
+            if case .cancelled = status { return true }
+            return false
+        }
+        activator.finish(at: 0, with: .failed("Cancelled"))
+
+        let secondCommand = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        )
+        store.saveCommand(secondCommand)
+        await waitForStartCall(in: activator, expectedCount: 2)
+
+        activator.finish(at: 1, with: .transcriptShared("newer"))
+
+        await waitForSessionStatus(in: store) { status in
+            if case .transcriptReady(token: secondCommand.token) = status { return true }
+            return false
+        }
     }
 
     func testManualStartDoesNotOverlapActiveSharedStartCommand() async throws {
@@ -277,6 +447,29 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(activator.recordedCallCount(), 1, file: file, line: line)
     }
 
+    private func waitForStartCall(
+        in activator: CancellableSuspendedMicrophoneActivator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedCallCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedCallCount(), 1, file: file, line: line)
+    }
+
+    private func waitForStartCall(
+        in activator: NonCooperativeSuspendedMicrophoneActivator,
+        expectedCount: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedCallCount() < expectedCount {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedCallCount(), expectedCount, file: file, line: line)
+    }
+
     private func waitForSessionStatus(
         in store: SharedDictationSessionStore,
         file: StaticString = #filePath,
@@ -371,6 +564,33 @@ private final class CancellableSuspendedMicrophoneActivator: MicrophoneActivatin
 
     func recordedCancellationCount() -> Int {
         cancellationCount
+    }
+
+    func recordedCallCount() -> Int {
+        callCount
+    }
+}
+
+@MainActor
+private final class NonCooperativeSuspendedMicrophoneActivator: MicrophoneActivating {
+    private var continuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>?] = []
+    private var callCount = 0
+
+    func activate() async -> VoiceInputLaunchStatus {
+        callCount += 1
+        return await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func finish(at index: Int, with status: VoiceInputLaunchStatus) {
+        guard continuations.indices.contains(index), let continuation = continuations[index] else { return }
+        continuations[index] = nil
+        continuation.resume(returning: status)
+    }
+
+    func recordedCallCount() -> Int {
+        callCount
     }
 }
 

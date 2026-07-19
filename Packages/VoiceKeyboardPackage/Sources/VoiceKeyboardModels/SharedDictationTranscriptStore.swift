@@ -12,6 +12,10 @@ public struct SharedDictationTranscript: Codable, Equatable, Sendable {
         commandToken
     }
 
+    public func isExpired(at date: Date = Date()) -> Bool {
+        date >= expiresAt
+    }
+
     public init?(text: String, createdAt: Date = Date()) {
         self.init(
             sessionID: "",
@@ -91,34 +95,48 @@ public final class SharedDictationTranscriptStore {
     }
 
     public func consumeLatestTranscript(
-        afterLastConsumedToken lastConsumedToken: String?
+        afterLastConsumedToken lastConsumedToken: String?,
+        now: Date = Date()
     ) -> SharedDictationTranscript? {
-        loadMatchingTranscript(forSessionID: nil, afterLastConsumedToken: lastConsumedToken)
+        loadMatchingTranscript(
+            forSessionID: nil,
+            afterLastConsumedToken: lastConsumedToken,
+            now: now
+        )
     }
 
     public func consumeLatestTranscript(
         forSessionID sessionID: String,
-        afterLastConsumedToken lastConsumedToken: String?
+        afterLastConsumedToken lastConsumedToken: String?,
+        now: Date = Date()
     ) -> SharedDictationTranscript? {
-        loadMatchingTranscript(forSessionID: sessionID, afterLastConsumedToken: lastConsumedToken)
+        loadMatchingTranscript(
+            forSessionID: sessionID,
+            afterLastConsumedToken: lastConsumedToken,
+            now: now
+        )
     }
 
     private func loadMatchingTranscript(
         forSessionID sessionID: String?,
-        afterLastConsumedToken lastConsumedToken: String?
+        afterLastConsumedToken lastConsumedToken: String?,
+        now: Date
     ) -> SharedDictationTranscript? {
         guard let transcript = latestTranscript(),
               sessionID == nil || transcript.sessionID == sessionID,
-              !transcript.isConsumed else { return nil }
+              !transcript.isConsumed,
+              !transcript.isExpired(at: now) else { return nil }
         guard transcript.token != lastConsumedToken else { return nil }
         return transcript
     }
 
     public func claimLatestTranscript(
-        afterLastConsumedToken lastConsumedToken: String?
+        afterLastConsumedToken lastConsumedToken: String?,
+        now: Date = Date()
     ) -> SharedDictationTranscript? {
         guard let transcript = consumeLatestTranscript(
-            afterLastConsumedToken: lastConsumedToken
+            afterLastConsumedToken: lastConsumedToken,
+            now: now
         ) else {
             return nil
         }
@@ -128,11 +146,13 @@ public final class SharedDictationTranscriptStore {
 
     public func claimLatestTranscript(
         forSessionID sessionID: String,
-        afterLastConsumedToken lastConsumedToken: String?
+        afterLastConsumedToken lastConsumedToken: String?,
+        now: Date = Date()
     ) -> SharedDictationTranscript? {
         guard let transcript = consumeLatestTranscript(
             forSessionID: sessionID,
-            afterLastConsumedToken: lastConsumedToken
+            afterLastConsumedToken: lastConsumedToken,
+            now: now
         ) else {
             return nil
         }
@@ -161,7 +181,6 @@ public final class SharedDictationTranscriptStore {
     private func saveRecord(_ transcript: SharedDictationTranscript) {
         guard let data = try? encoder.encode(transcript) else { return }
         defaults.set(data, forKey: Key.transcriptRecord)
-        defaults.synchronize()
     }
 
     private func loadRecord() -> SharedDictationTranscript? {

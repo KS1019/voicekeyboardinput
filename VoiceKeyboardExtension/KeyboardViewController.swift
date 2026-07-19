@@ -41,11 +41,16 @@ public final class KeyboardViewController: UIInputViewController {
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         lifecycleEpoch &+= 1
+        if isRecognitionStopping {
+            finishRecognitionStopAfterAppearance()
+            return
+        }
         guard sharedTranscriptStore != nil else {
             renderSharedDictationUnavailableIfNeeded()
             return
         }
         guard !consumeSharedDictationTranscriptIfNeeded() else { return }
+        resumeSharedDictationPollingIfNeeded()
         renderCurrentSpeechCapture()
     }
 
@@ -64,10 +69,14 @@ public final class KeyboardViewController: UIInputViewController {
         sharedDictationPollingTask?.cancel()
         sharedDictationPollingTask = nil
         let coordinator = speechCaptureCoordinator
+        let epoch = lifecycleEpoch
         Task { [weak self] in
             await coordinator.stopRecognition()
-            guard let self, self.isViewLoaded else { return }
+            guard let self,
+                  self.isViewLoaded,
+                  self.lifecycleEpoch == epoch else { return }
             self.isRecognitionStopping = false
+            self.resumeSharedDictationPollingIfNeeded()
         }
     }
 
@@ -246,7 +255,8 @@ public final class KeyboardViewController: UIInputViewController {
         }
         let command = SharedDictationSessionCommand.stop(
             sessionID: sessionID,
-            source: .keyboard
+            source: .keyboard,
+            expiryInterval: 20
         )
         sharedSessionStore.saveCommand(command)
         keyboardRootView.render(
@@ -276,6 +286,15 @@ public final class KeyboardViewController: UIInputViewController {
                         try? await Task.sleep(for: .milliseconds(250))
                         continue
                     }
+                    if command.kind == .start,
+                       command.isExpired(),
+                       status.isActiveDictationStatus {
+                        keyboardRootView.render(
+                            speechCapture: .sharedDictationTimedOut,
+                            announce: true
+                        )
+                        return
+                    }
                     keyboardRootView.render(
                         speechCapture: .sharedDictationSessionStatus(status),
                         announce: false
@@ -295,6 +314,26 @@ public final class KeyboardViewController: UIInputViewController {
 
                 try? await Task.sleep(for: .milliseconds(250))
             }
+        }
+    }
+
+    private func resumeSharedDictationPollingIfNeeded() {
+        guard !isRecognitionStopping,
+              sharedDictationPollingTask == nil,
+              let command = matchingActiveStartCommand() else { return }
+        monitorSharedDictationSession(command: command)
+    }
+
+    private func finishRecognitionStopAfterAppearance() {
+        let coordinator = speechCaptureCoordinator
+        let epoch = lifecycleEpoch
+        Task { [weak self] in
+            await coordinator.stopRecognition()
+            guard let self, self.lifecycleEpoch == epoch else { return }
+            self.isRecognitionStopping = false
+            guard !self.consumeSharedDictationTranscriptIfNeeded() else { return }
+            self.resumeSharedDictationPollingIfNeeded()
+            self.renderCurrentSpeechCapture()
         }
     }
 
@@ -329,10 +368,20 @@ public final class KeyboardViewController: UIInputViewController {
               statusToken == command.token else {
             return false
         }
+        if let epoch, lifecycleEpoch != epoch { return false }
         guard let latestTranscript = sharedTranscriptStore.latestTranscript(
             forSessionID: command.sessionID
         ), latestTranscript.commandToken == command.token else {
             return false
+        }
+        guard !latestTranscript.isExpired() else {
+            sharedDictationPollingTask?.cancel()
+            sharedDictationPollingTask = nil
+            keyboardRootView.render(
+                speechCapture: .sharedDictationTimedOut,
+                announce: true
+            )
+            return true
         }
         let lastConsumedToken = sharedTranscriptStore.lastConsumedToken()
         guard let transcript = sharedTranscriptStore.claimLatestTranscript(
@@ -342,7 +391,6 @@ public final class KeyboardViewController: UIInputViewController {
             return false
         }
 
-        if let epoch, lifecycleEpoch != epoch { return false }
         textDocumentProxy.insertText(transcript.text)
         activeSharedSessionID = nil
         activeSharedCommandToken = nil
@@ -356,11 +404,41 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func matchingReadyStartCommand() -> SharedDictationSessionCommand? {
-        guard let sharedSessionStore,
-              let latestCommand = sharedSessionStore.latestCommand(),
+        guard let command = matchingActiveStartCommand() else { return nil }
+        guard let status = sharedSessionStore?.status(),
+              case .transcriptReady = status else { return nil }
+        return command
+    }
+
+    private func matchingActiveStartCommand() -> SharedDictationSessionCommand? {
+        guard let sharedSessionStore else { return nil }
+        let status = sharedSessionStore.status()
+        guard let latestCommand = sharedSessionStore.latestCommand(),
               latestCommand.kind == .start,
-              let statusToken = sharedSessionStore.status().commandToken,
-              statusToken == latestCommand.token else {
+              latestCommand.source == .keyboard,
+              !latestCommand.isExpired() else {
+            return nil
+        }
+        if case .idle = status {
+            activeSharedSessionID = latestCommand.sessionID
+            activeSharedCommandToken = latestCommand.token
+            return latestCommand
+        }
+        guard status.commandToken == latestCommand.token else { return nil }
+        switch status {
+        case .commandPending,
+             .commandAcknowledged,
+             .recording,
+             .transcribing:
+            guard !latestCommand.isExpired() else { return nil }
+        case .transcriptReady:
+            // The transcript has its own expiry window, checked when it is
+            // claimed. Keep polling long enough to insert a valid result
+            // even if the original start command has expired.
+            break
+        case .idle,
+             .failed,
+             .cancelled:
             return nil
         }
         activeSharedSessionID = latestCommand.sessionID
@@ -468,6 +546,21 @@ private extension SharedDictationSessionStatus {
              .recording,
              .transcribing,
              .transcriptReady:
+            false
+        }
+    }
+
+    var isActiveDictationStatus: Bool {
+        switch self {
+        case .commandPending,
+             .commandAcknowledged,
+             .recording,
+             .transcribing:
+            true
+        case .idle,
+             .transcriptReady,
+             .failed,
+             .cancelled:
             false
         }
     }

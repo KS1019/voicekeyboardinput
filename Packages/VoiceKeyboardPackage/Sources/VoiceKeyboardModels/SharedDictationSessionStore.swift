@@ -59,7 +59,6 @@ public final class SharedDictationSessionStore {
     private func save<Value: Encodable>(_ value: Value, forKey key: String) {
         guard let data = try? encoder.encode(value) else { return }
         defaults.set(data, forKey: key)
-        defaults.synchronize()
     }
 
     private func load<Value: Decodable>(_ type: Value.Type, forKey key: String) -> Value? {

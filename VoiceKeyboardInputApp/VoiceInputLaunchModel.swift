@@ -106,7 +106,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private let microphoneActivator: any MicrophoneActivating
     private let sessionStoreProvider: () -> SharedDictationSessionStore?
     private var commandMonitorTask: Task<Void, Never>?
-    private var activeStartTask: Task<Void, Never>?
+    private var activeStartTask: Task<VoiceInputLaunchStatus, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var heartbeatToken: String?
     private var heartbeatState: SharedDictationAppHeartbeat.SessionState = .armed
@@ -132,7 +132,36 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         recoverStaleSession(in: sessionStore)
         heartbeatToken = UUID().uuidString
         heartbeatState = .armed
-        lastClaimedCommandToken = nil
+        // A fresh pending command may have been written just before this app
+        // launched. Older acknowledged/recording commands are one-shot and
+        // must not be replayed by the new process.
+        let currentStatus = sessionStore.status()
+        if case let .commandPending(token, _) = currentStatus,
+           let pendingCommand = sessionStore.latestCommand(),
+           pendingCommand.token == token,
+           !pendingCommand.isExpired() {
+            lastClaimedCommandToken = nil
+        } else if let latestCommand = sessionStore.latestCommand(),
+                  latestCommand.kind == .start,
+                  latestCommand.source == .keyboard,
+                  !latestCommand.isExpired(),
+                  currentStatus.commandToken != latestCommand.token {
+            // Command and status are separate App Group records. If the
+            // extension or app is terminated between those writes, recover a
+            // fresh keyboard command instead of suppressing it as already
+            // claimed.
+            lastClaimedCommandToken = nil
+        } else if let latestCommand = sessionStore.latestCommand(),
+                  (latestCommand.kind == .stop || latestCommand.kind == .cancel),
+                  latestCommand.source == .keyboard,
+                  !latestCommand.isExpired() {
+            // A stop may have been written while the app was terminated.
+            // Claim it after stale-session recovery so the keyboard sees a
+            // terminal status for the stop token instead of timing out.
+            lastClaimedCommandToken = nil
+        } else {
+            lastClaimedCommandToken = sessionStore.latestCommand()?.token
+        }
         writeHeartbeat(in: sessionStore)
         startHeartbeatTask()
         startCommandMonitor()
@@ -164,20 +193,29 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         ))
         heartbeatState = .recording
         writeHeartbeat(in: sessionStore)
-        defer {
-            isMicrophoneActivationActive = false
-        }
-        let result = await activateMicrophone(
-            sessionID: command.sessionID,
-            commandToken: command.token
-        )
-        guard !Task.isCancelled,
-              activeSessionID == command.sessionID,
-              activeCommandToken == command.token else {
+
+        let activationTask = Task { [weak self] () -> VoiceInputLaunchStatus in
+            guard let self else { return .failed("Voice input controller was released.") }
+            defer { self.clearActivationIfOwned(by: command) }
+            guard !Task.isCancelled else { return .failed("Cancelled") }
+            let result = await self.activateMicrophone(
+                sessionID: command.sessionID,
+                commandToken: command.token
+            )
+            guard !Task.isCancelled,
+                  self.activeSessionID == command.sessionID,
+                  self.activeCommandToken == command.token else {
+                return result
+            }
+            self.saveCompletionStatus(for: command, result: result, in: sessionStore)
             return result
         }
-        saveCompletionStatus(for: command, result: result, in: sessionStore)
-        return result
+        activeStartTask = activationTask
+        return await withTaskCancellationHandler {
+            await activationTask.value
+        } onCancel: {
+            activationTask.cancel()
+        }
     }
 
     func cancelActiveSession() async {
@@ -185,15 +223,20 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         commandMonitorTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        activeStartTask?.cancel()
+        let activationTask = activeStartTask
         activeStartTask = nil
+        activationTask?.cancel()
         if let activeCommandToken {
             sessionStoreProvider()?.saveStatus(.cancelled(token: activeCommandToken))
         }
         activeSessionID = nil
         activeCommandToken = nil
+        isMicrophoneActivationActive = false
         heartbeatState = .unavailable
         writeHeartbeat()
+        if let activationTask {
+            _ = await activationTask.value
+        }
     }
 
     private func startCommandMonitor() {
@@ -220,15 +263,29 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         case .start:
             startDictation(for: command, in: sessionStore)
         case .stop, .cancel:
-            guard activeSessionID == command.sessionID else { return }
-            activeStartTask?.cancel()
+            guard activeSessionID == command.sessionID else {
+                guard activeSessionID == nil else { return }
+                // A stop can arrive while the containing app has not yet
+                // claimed the pending start. Complete the mailbox state so
+                // the keyboard's stop monitor does not wait on the replaced
+                // start token until its deadline.
+                sessionStore.saveStatus(.cancelled(token: command.token))
+                heartbeatState = .armed
+                writeHeartbeat(in: sessionStore)
+                return
+            }
+            let activationTask = activeStartTask
             activeStartTask = nil
+            activationTask?.cancel()
             isMicrophoneActivationActive = false
             activeSessionID = nil
             activeCommandToken = nil
             sessionStore.saveStatus(.cancelled(token: command.token))
             heartbeatState = .armed
             writeHeartbeat(in: sessionStore)
+            if let activationTask {
+                _ = await activationTask.value
+            }
         }
     }
 
@@ -264,19 +321,18 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
 
         isMicrophoneActivationActive = true
         activeStartTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                isMicrophoneActivationActive = false
-                activeStartTask = nil
-            }
-            let result = await activateMicrophone(
+            guard let self else { return .failed("Voice input controller was released.") }
+            defer { self.clearActivationIfOwned(by: command) }
+            guard !Task.isCancelled else { return .failed("Cancelled") }
+            let result = await self.activateMicrophone(
                 sessionID: command.sessionID,
                 commandToken: command.token
             )
-            guard !Task.isCancelled else { return }
-            guard activeSessionID == command.sessionID,
-                  activeCommandToken == command.token else { return }
-            saveCompletionStatus(for: command, result: result, in: sessionStore)
+            guard !Task.isCancelled else { return result }
+            guard self.activeSessionID == command.sessionID,
+                  self.activeCommandToken == command.token else { return result }
+            self.saveCompletionStatus(for: command, result: result, in: sessionStore)
+            return result
         }
     }
 
@@ -301,10 +357,20 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 acknowledgedAt: Date()
             ))
         }
+        if activeCommandToken == command.token {
+            activeStartTask = nil
+        }
         activeSessionID = nil
         activeCommandToken = nil
+        isMicrophoneActivationActive = false
         heartbeatState = .armed
         writeHeartbeat(in: sessionStore)
+    }
+
+    private func clearActivationIfOwned(by command: SharedDictationSessionCommand) {
+        guard activeCommandToken == command.token else { return }
+        isMicrophoneActivationActive = false
+        activeStartTask = nil
     }
 
     private func activateMicrophone(
@@ -352,11 +418,17 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         case let .transcribing(token):
             sessionStore.saveStatus(.cancelled(token: token))
         case .idle,
-             .commandPending,
              .transcriptReady,
              .failed,
              .cancelled:
             break
+        case let .commandPending(token, _):
+            guard let command = sessionStore.latestCommand(),
+                  command.token == token,
+                  !command.isExpired() else {
+                sessionStore.saveStatus(.cancelled(token: token))
+                return
+            }
         }
     }
 }
@@ -421,27 +493,112 @@ struct AppMicrophoneActivator: MicrophoneActivating, SessionAwareMicrophoneActiv
     }
 
     private func requestRecordPermission() async -> Bool {
-        await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { isGranted in
-                continuation.resume(returning: isGranted)
+        guard !Task.isCancelled else { return false }
+        let gate = AppPermissionRequestGate(cancelledValue: false)
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                gate.install(continuation)
+                guard !Task.isCancelled else {
+                    gate.cancel()
+                    return
+                }
+                AVAudioApplication.requestRecordPermission { isGranted in
+                    gate.finish(isGranted)
+                }
             }
-        }
+        }, onCancel: {
+            gate.cancel()
+        })
     }
 
     private func requestSpeechRecognitionAuthorization() async -> Bool {
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized:
-            true
+            return true
         case .notDetermined:
-            await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { status in
-                    continuation.resume(returning: status == .authorized)
+            guard !Task.isCancelled else { return false }
+            let gate = AppPermissionRequestGate(cancelledValue: false)
+            return await withTaskCancellationHandler(operation: {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    gate.install(continuation)
+                    guard !Task.isCancelled else {
+                        gate.cancel()
+                        return
+                    }
+                    SFSpeechRecognizer.requestAuthorization { status in
+                        gate.finish(status == .authorized)
+                    }
                 }
-            }
+            }, onCancel: {
+                gate.cancel()
+            })
         case .denied, .restricted:
-            false
+            return false
         @unknown default:
-            false
+            return false
+        }
+    }
+}
+
+private final class AppPermissionRequestGate<Value: Sendable>: @unchecked Sendable {
+    private let cancelledValue: Value
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Never>?
+    private var isFinished = false
+    private var finishedValue: Value?
+
+    init(cancelledValue: Value) {
+        self.cancelledValue = cancelledValue
+    }
+
+    func install(_ continuation: CheckedContinuation<Value, Never>) {
+        var immediateValue: Value?
+        lock.lock()
+        if isFinished {
+            immediateValue = finishedValue ?? cancelledValue
+        } else {
+            self.continuation = continuation
+        }
+        lock.unlock()
+
+        if let immediateValue {
+            continuation.resume(returning: immediateValue)
+        }
+    }
+
+    func finish(_ value: Value) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        finishedValue = value
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+
+    func cancel() {
+        finish(cancelledValue)
+    }
+}
+
+private extension SharedDictationSessionStatus {
+    var commandToken: String? {
+        switch self {
+        case .idle:
+            nil
+        case let .commandPending(token, _),
+             let .commandAcknowledged(token, _),
+             let .recording(token, _, _),
+             let .transcribing(token),
+             let .transcriptReady(token):
+            token
+        case let .failed(token, _),
+             let .cancelled(token):
+            token
         }
     }
 }

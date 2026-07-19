@@ -14,6 +14,7 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         store.saveCommand(command)
 
         XCTAssertEqual(store.latestCommand(), command)
+        XCTAssertEqual(store.status(), .idle)
         XCTAssertEqual(
             store.claimCommand(
                 afterLastClaimedToken: nil,

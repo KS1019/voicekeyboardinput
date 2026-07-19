@@ -9,19 +9,38 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         let engine = AVAudioEngine()
         var sessionIsActive = false
         var tapIsInstalled = false
+        let tapGate = AudioInputProbeTapGate()
+        let coordinator = AppAudioSessionOperationCoordinator.shared
+        guard let operationToken = coordinator.begin() else {
+            throw .unavailableInCurrentProcess
+        }
+
+        defer {
+            tapGate.invalidate()
+            if tapIsInstalled {
+                engine.inputNode.removeTap(onBus: 0)
+            }
+            engine.stop()
+            if sessionIsActive, coordinator.isCurrent(operationToken) {
+                // Keep the same ownership token through deactivation so a
+                // new speech run cannot start between these two operations.
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            }
+            coordinator.finish(operationToken)
+        }
 
         do {
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
+            try session.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.allowBluetoothHFP, .duckOthers, .defaultToSpeaker]
+            )
+            guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
             try session.setActive(true)
+            guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
             sessionIsActive = true
-            defer {
-                if tapIsInstalled {
-                    engine.inputNode.removeTap(onBus: 0)
-                }
-                engine.stop()
-                if sessionIsActive {
-                    try? session.setActive(false, options: .notifyOthersOnDeactivation)
-                }
+            if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
+                try? session.setPreferredInput(bluetoothInput)
             }
 
             let inputNode = engine.inputNode
@@ -37,13 +56,23 @@ struct AppAudioInputProbe: AudioCaptureProbing {
 
             let peakTracker = AudioInputPeakTracker()
             inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-                peakTracker.observe(buffer)
+                tapGate.observe(buffer, using: peakTracker)
             }
             tapIsInstalled = true
 
             engine.prepare()
             try engine.start()
             try await Task.sleep(for: .seconds(duration.seconds))
+
+            guard session.isInputAvailable,
+                  !session.currentRoute.inputs.isEmpty,
+                  engine.isRunning else {
+                return Self.result(
+                    microphoneCaptureAvailable: false,
+                    duration: duration,
+                    peakPower: await peakTracker.peakPower
+                )
+            }
 
             return Self.result(
                 microphoneCaptureAvailable: true,
@@ -70,6 +99,24 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             preconditionFailure("Invalid audio input probe result")
         }
         return result
+    }
+}
+
+private final class AudioInputProbeTapGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isActive = true
+
+    func invalidate() {
+        lock.lock()
+        isActive = false
+        lock.unlock()
+    }
+
+    func observe(_ buffer: AVAudioPCMBuffer, using tracker: AudioInputPeakTracker) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isActive else { return }
+        tracker.observe(buffer)
     }
 }
 

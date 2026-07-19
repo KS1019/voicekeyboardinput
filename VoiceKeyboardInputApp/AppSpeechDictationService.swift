@@ -4,16 +4,20 @@ import Speech
 
 enum AppSpeechDictationError: LocalizedError {
     case recognizerUnavailable
+    case alreadyStarted
     case audioInputUnavailable
     case audioEngineStartFailed
     case emptyTranscript
     case audioInterrupted
     case audioRouteLost
+    case audioConfigurationChanged
 
     var errorDescription: String? {
         switch self {
         case .recognizerUnavailable:
             "Speech recognition is unavailable for the current locale."
+        case .alreadyStarted:
+            "This speech recognition run has already started."
         case .audioInputUnavailable:
             "Audio input is unavailable in the containing app."
         case .audioEngineStartFailed:
@@ -24,6 +28,8 @@ enum AppSpeechDictationError: LocalizedError {
             "Audio input was interrupted."
         case .audioRouteLost:
             "Audio input is no longer available."
+        case .audioConfigurationChanged:
+            "Audio input changed while recording. Please try again."
         }
     }
 }
@@ -41,6 +47,54 @@ final class AppSpeechDictationService {
 
 @MainActor
 final class AppSpeechDictationRun {
+    private final class AudioTapGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isActive = true
+
+        func invalidate() {
+            lock.lock()
+            isActive = false
+            lock.unlock()
+        }
+
+        func append(
+            _ buffer: AVAudioPCMBuffer,
+            to request: SFSpeechAudioBufferRecognitionRequest
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard isActive else { return }
+            request.append(buffer)
+        }
+    }
+
+    private final class AudioSessionCompletionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isFinished = false
+
+        func finish() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isFinished else { return false }
+            isFinished = true
+            return true
+        }
+    }
+
+    private enum AudioSessionOperationError: LocalizedError {
+        case timedOut
+        case busy
+
+        var errorDescription: String? {
+            switch self {
+            case .timedOut:
+                "Audio session operation timed out."
+            case .busy:
+                "Audio session is busy with another operation."
+            }
+        }
+    }
+
     private let locale: Locale
     private let maximumDuration: TimeInterval
     private let engine = AVAudioEngine()
@@ -50,9 +104,14 @@ final class AppSpeechDictationRun {
     private var continuation: CheckedContinuation<String, Error>?
     private var latestTranscript = ""
     private var didFinish = false
+    private var didStart = false
     private var tapIsInstalled = false
+    private var audioTapGate: AudioTapGate?
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
+    private var engineConfigurationObserver: NSObjectProtocol?
+    private var mediaServicesLostObserver: NSObjectProtocol?
+    private var mediaServicesResetObserver: NSObjectProtocol?
 
     init(locale: Locale, maximumDuration: TimeInterval) {
         self.locale = locale
@@ -60,13 +119,33 @@ final class AppSpeechDictationRun {
     }
 
     func start() async throws -> String {
+        guard !didStart else {
+            throw AppSpeechDictationError.alreadyStarted
+        }
+        didStart = true
         guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
             throw AppSpeechDictationError.recognizerUnavailable
         }
 
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
-        try await activateAudioSession(session)
+        try session.setCategory(
+            .playAndRecord,
+            mode: .measurement,
+            options: [.allowBluetoothHFP, .duckOthers, .defaultToSpeaker]
+        )
+        do {
+            try await activateAudioSession(session)
+        } catch {
+            await deactivateAudioSession(session)
+            throw error
+        }
+        guard !Task.isCancelled else {
+            await cleanup()
+            throw CancellationError()
+        }
+        if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
+            try? session.setPreferredInput(bluetoothInput)
+        }
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -82,9 +161,11 @@ final class AppSpeechDictationRun {
             request.requiresOnDeviceRecognition = true
         }
         self.request = request
+        let tapGate = AudioTapGate()
+        audioTapGate = tapGate
 
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            request.append(buffer)
+            tapGate.append(buffer, to: request)
         }
         tapIsInstalled = true
 
@@ -92,6 +173,10 @@ final class AppSpeechDictationRun {
             engine.prepare()
             try engine.start()
         } catch {
+            audioTapGate?.invalidate()
+            audioTapGate = nil
+            request.endAudio()
+            self.request = nil
             if tapIsInstalled {
                 inputNode.removeTap(onBus: 0)
                 tapIsInstalled = false
@@ -100,7 +185,10 @@ final class AppSpeechDictationRun {
             throw AppSpeechDictationError.audioEngineStartFailed
         }
 
-        installAudioSessionObservers()
+        guard !Task.isCancelled else {
+            await cleanup()
+            throw CancellationError()
+        }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -109,6 +197,7 @@ final class AppSpeechDictationRun {
                     self.complete(.failure(CancellationError()))
                     return
                 }
+                installAudioSessionObservers()
                 timeoutTask = Task { [weak self] in
                     guard let self else { return }
                     do {
@@ -200,7 +289,34 @@ final class AppSpeechDictationRun {
                   reason == .oldDeviceUnavailable || reason == .noSuitableRouteForCategory,
                   AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty else { return }
             Task { @MainActor in
-                self?.complete(.failure(AppSpeechDictationError.audioRouteLost))
+                self?.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
+            }
+        }
+        engineConfigurationObserver = notificationCenter.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
+            }
+        }
+        mediaServicesLostObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.mediaServicesWereLostNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
+            }
+        }
+        mediaServicesResetObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
             }
         }
     }
@@ -218,6 +334,20 @@ final class AppSpeechDictationRun {
             NotificationCenter.default.removeObserver(routeChangeObserver)
             self.routeChangeObserver = nil
         }
+        if let engineConfigurationObserver {
+            NotificationCenter.default.removeObserver(engineConfigurationObserver)
+            self.engineConfigurationObserver = nil
+        }
+        if let mediaServicesLostObserver {
+            NotificationCenter.default.removeObserver(mediaServicesLostObserver)
+            self.mediaServicesLostObserver = nil
+        }
+        if let mediaServicesResetObserver {
+            NotificationCenter.default.removeObserver(mediaServicesResetObserver)
+            self.mediaServicesResetObserver = nil
+        }
+        audioTapGate?.invalidate()
+        audioTapGate = nil
         request?.endAudio()
         request = nil
         if tapIsInstalled {
@@ -229,9 +359,29 @@ final class AppSpeechDictationRun {
     }
 
     private func activateAudioSession(_ session: AVAudioSession) async throws {
+        let coordinator = AppAudioSessionOperationCoordinator.shared
+        guard let operationToken = coordinator.begin() else {
+            throw AudioSessionOperationError.busy
+        }
         if #available(iOS 27.0, *) {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let gate = AudioSessionCompletionGate()
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    guard gate.finish() else { return }
+                    coordinator.invalidate(operationToken)
+                    continuation.resume(throwing: AudioSessionOperationError.timedOut)
+                }
                 session.activate(options: []) { activated, error in
+                    guard coordinator.isCurrent(operationToken) else {
+                        coordinator.finish(operationToken)
+                        return
+                    }
+                    guard gate.finish() else {
+                        coordinator.finish(operationToken)
+                        return
+                    }
+                    coordinator.finish(operationToken)
                     if let error {
                         continuation.resume(throwing: error)
                     } else if activated {
@@ -245,11 +395,32 @@ final class AppSpeechDictationRun {
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = AudioSessionCompletionGate()
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                guard gate.finish() else { return }
+                coordinator.invalidate(operationToken)
+                continuation.resume(throwing: AudioSessionOperationError.timedOut)
+            }
             DispatchQueue.global(qos: .userInitiated).async {
+                guard coordinator.isCurrent(operationToken) else {
+                    coordinator.finish(operationToken)
+                    return
+                }
                 do {
                     try session.setActive(true)
+                    guard coordinator.isCurrent(operationToken), gate.finish() else {
+                        coordinator.finish(operationToken)
+                        return
+                    }
+                    coordinator.finish(operationToken)
                     continuation.resume()
                 } catch {
+                    guard coordinator.isCurrent(operationToken), gate.finish() else {
+                        coordinator.finish(operationToken)
+                        return
+                    }
+                    coordinator.finish(operationToken)
                     continuation.resume(throwing: error)
                 }
             }
@@ -257,9 +428,23 @@ final class AppSpeechDictationRun {
     }
 
     private func deactivateAudioSession(_ session: AVAudioSession) async {
+        let coordinator = AppAudioSessionOperationCoordinator.shared
+        guard let operationToken = coordinator.begin() else { return }
         if #available(iOS 27.0, *) {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let gate = AudioSessionCompletionGate()
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    guard gate.finish() else { return }
+                    coordinator.invalidate(operationToken)
+                    continuation.resume()
+                }
                 session.deactivate(options: .notifyOthersOnDeactivation) { _, _ in
+                    guard gate.finish() else {
+                        coordinator.finish(operationToken)
+                        return
+                    }
+                    coordinator.finish(operationToken)
                     continuation.resume()
                 }
             }
@@ -267,8 +452,24 @@ final class AppSpeechDictationRun {
         }
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let gate = AudioSessionCompletionGate()
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                guard gate.finish() else { return }
+                coordinator.invalidate(operationToken)
+                continuation.resume()
+            }
             DispatchQueue.global(qos: .utility).async {
+                guard coordinator.isCurrent(operationToken) else {
+                    coordinator.finish(operationToken)
+                    return
+                }
                 try? session.setActive(false, options: .notifyOthersOnDeactivation)
+                guard coordinator.isCurrent(operationToken), gate.finish() else {
+                    coordinator.finish(operationToken)
+                    return
+                }
+                coordinator.finish(operationToken)
                 continuation.resume()
             }
         }
@@ -327,4 +528,47 @@ final class AppSpeechDictationRun {
         cancel()
     }
 #endif
+}
+
+final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
+    static let shared = AppAudioSessionOperationCoordinator()
+
+    private let lock = NSLock()
+    private var nextToken: UInt64 = 0
+    private var currentToken: UInt64?
+
+    func begin() -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard currentToken == nil else { return nil }
+        nextToken &+= 1
+        currentToken = nextToken
+        isInvalidated = false
+        return nextToken
+    }
+
+    func isCurrent(_ token: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentToken == token && !isInvalidated
+    }
+
+    func finish(_ token: UInt64) {
+        lock.lock()
+        if currentToken == token {
+            currentToken = nil
+            isInvalidated = false
+        }
+        lock.unlock()
+    }
+
+    func invalidate(_ token: UInt64) {
+        lock.lock()
+        if currentToken == token {
+            isInvalidated = true
+        }
+        lock.unlock()
+    }
+
+    private var isInvalidated = false
 }

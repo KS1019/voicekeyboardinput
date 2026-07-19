@@ -23,12 +23,17 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
         let engine = AVAudioEngine()
         var sessionIsActive = false
         var tapIsInstalled = false
+        let tapGate = AudioInputProbeTapGate()
 
         do {
-            try session.setCategory(.record, mode: .measurement)
+            try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
             try session.setActive(true)
             sessionIsActive = true
+            if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
+                try? session.setPreferredInput(bluetoothInput)
+            }
             defer {
+                tapGate.invalidate()
                 if tapIsInstalled {
                     engine.inputNode.removeTap(onBus: 0)
                 }
@@ -50,13 +55,19 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
 
             let peakTracker = KeyboardAudioPeakTracker()
             inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-                peakTracker.observe(buffer)
+                tapGate.observe(buffer, using: peakTracker)
             }
             tapIsInstalled = true
 
             engine.prepare()
             try engine.start()
             try await Task.sleep(for: .seconds(duration.seconds))
+
+            guard session.isInputAvailable,
+                  !session.currentRoute.inputs.isEmpty,
+                  engine.isRunning else {
+                return Self.result(false, duration: duration, peakPower: await peakTracker.peakPower)
+            }
 
             return Self.result(true, duration: duration, peakPower: await peakTracker.peakPower)
         } catch is CancellationError {
@@ -79,6 +90,24 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             preconditionFailure("Invalid audio input probe result")
         }
         return result
+    }
+}
+
+private final class AudioInputProbeTapGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isActive = true
+
+    func invalidate() {
+        lock.lock()
+        isActive = false
+        lock.unlock()
+    }
+
+    func observe(_ buffer: AVAudioPCMBuffer, using tracker: KeyboardAudioPeakTracker) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isActive else { return }
+        tracker.observe(buffer)
     }
 }
 
