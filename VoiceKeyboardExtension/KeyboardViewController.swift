@@ -352,6 +352,8 @@ public final class KeyboardViewController: UIInputViewController {
                 for _ in 0..<count.value {
                     textDocumentProxy.deleteBackward()
                 }
+            case .showUnsupportedCommand:
+                break
             }
         }
     }

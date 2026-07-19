@@ -55,6 +55,32 @@ final class TextInsertionPlannerTests: XCTestCase {
         ])
     }
 
+    func testPlansEnglishOpeningDelimitersWithLeadingSpace() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [
+            .text("hello"),
+            .command(.insertText("(")),
+            .text("world"),
+            .command(.insertText(")")),
+            .command(.insertText("\"")),
+            .text("quoted"),
+            .command(.insertText("\""))
+        ])
+
+        XCTAssertEqual(
+            planner.plan(transcript, documentContextBeforeInput: ""),
+            [
+                .insertText("hello"),
+                .insertText(" ("),
+                .insertText("world"),
+                .insertText(")"),
+                .insertText(" \""),
+                .insertText("quoted"),
+                .insertText("\"")
+            ]
+        )
+    }
+
     func testDoesNotInsertSpaceAfterJapanesePunctuationCommands() {
         let planner = TextInsertionPlanner()
 
@@ -289,6 +315,43 @@ final class TextInsertionPlannerTests: XCTestCase {
                 documentContextBeforeInput: "一。「二。」"
             ),
             [.deleteBackward(count: deleteCount(4))]
+        )
+    }
+
+    func testPlansDeleteSentenceIncludingUnicodeClosingDelimiters() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        XCTAssertEqual(
+            planner.plan(
+                transcript,
+                documentContextBeforeInput: "One. “Two.”"
+            ),
+            [.deleteBackward(count: deleteCount(7))]
+        )
+
+        XCTAssertEqual(
+            planner.plan(
+                transcript,
+                documentContextBeforeInput: "One. （Two。）"
+            ),
+            [.deleteBackward(count: deleteCount(7))]
+        )
+    }
+
+    func testPlansTextWithSpaceAfterDeletingSentence() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [
+            .command(.deleteSentence),
+            .text("next")
+        ])
+
+        XCTAssertEqual(
+            planner.plan(transcript, documentContextBeforeInput: "One. Two"),
+            [
+                .deleteBackward(count: deleteCount(4)),
+                .insertText(" next")
+            ]
         )
     }
 

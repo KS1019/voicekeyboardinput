@@ -13,6 +13,7 @@ public enum KeyboardSpeechCaptureState: Equatable, Sendable {
     case listening
     case transcribing(SpeechRecognitionUpdate)
     case inserted(String)
+    case unsupportedCommand(String)
     case recognitionFailed(SpeechRecognitionError)
 }
 

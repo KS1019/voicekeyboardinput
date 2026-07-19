@@ -39,9 +39,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             try session.setActive(true)
             guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
             sessionIsActive = true
-            if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
-                try? session.setPreferredInput(bluetoothInput)
-            }
+            try await AppAudioSessionRouting.selectPreferredInputIfAvailable(session)
 
             let inputNode = engine.inputNode
             let format = inputNode.outputFormat(forBus: 0)

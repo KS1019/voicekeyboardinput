@@ -6,22 +6,38 @@ import VoiceKeyboardModels
 
 actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     private final class LegacyAudioTapGate: @unchecked Sendable {
-        private let lock = NSLock()
+        private let condition = NSCondition()
         private var isActive = true
+        private var inFlightCallbacks = 0
 
         func invalidate() {
-            lock.lock()
+            condition.lock()
             isActive = false
-            lock.unlock()
+            while inFlightCallbacks > 0 {
+                condition.wait()
+            }
+            condition.unlock()
         }
 
         func append(
             _ buffer: AVAudioPCMBuffer,
             to request: SFSpeechAudioBufferRecognitionRequest
         ) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard isActive else { return }
+            condition.lock()
+            guard isActive else {
+                condition.unlock()
+                return
+            }
+            inFlightCallbacks += 1
+            condition.unlock()
+            defer {
+                condition.lock()
+                inFlightCallbacks -= 1
+                if inFlightCallbacks == 0 {
+                    condition.broadcast()
+                }
+                condition.unlock()
+            }
             request.append(buffer)
         }
     }
@@ -40,19 +56,35 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     }
 
     private final class AnalyzerAudioTapGate: @unchecked Sendable {
-        private let lock = NSLock()
+        private let condition = NSCondition()
         private var isActive = true
+        private var inFlightCallbacks = 0
 
         func invalidate() {
-            lock.lock()
+            condition.lock()
             isActive = false
-            lock.unlock()
+            while inFlightCallbacks > 0 {
+                condition.wait()
+            }
+            condition.unlock()
         }
 
         func perform<T>(_ operation: () throws -> T) rethrows -> T? {
-            lock.lock()
-            defer { lock.unlock() }
-            guard isActive else { return nil }
+            condition.lock()
+            guard isActive else {
+                condition.unlock()
+                return nil
+            }
+            inFlightCallbacks += 1
+            condition.unlock()
+            defer {
+                condition.lock()
+                inFlightCallbacks -= 1
+                if inFlightCallbacks == 0 {
+                    condition.broadcast()
+                }
+                condition.unlock()
+            }
             return try operation()
         }
     }
@@ -149,9 +181,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
             try session.setActive(true)
             activeRun?.sessionActive = true
-            if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
-                try? session.setPreferredInput(bluetoothInput)
-            }
+            try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
             diagnostics.event("audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -293,9 +323,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
             try session.setActive(true)
             activeRun?.sessionActive = true
-            if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
-                try? session.setPreferredInput(bluetoothInput)
-            }
+            try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
             diagnostics.event("legacy-audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))

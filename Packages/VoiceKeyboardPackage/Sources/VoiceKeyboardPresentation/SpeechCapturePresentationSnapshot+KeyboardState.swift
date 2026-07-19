@@ -85,6 +85,16 @@ public extension SpeechCapturePresentationSnapshot {
                 voiceActivityState: .idle
             )
 
+        case let .unsupportedCommand(phrase):
+            return SpeechCapturePresentationSnapshot(
+                transcriptText: "Unsupported command: \(phrase)",
+                statusText: "Unsupported command.",
+                microphoneTitle: "Speak",
+                microphoneTone: .warning,
+                activeMicrophoneBars: .ready,
+                voiceActivityState: .idle
+            )
+
         case let .recognitionFailed(error):
             return failedKeyboardSpeechCapture(error)
 

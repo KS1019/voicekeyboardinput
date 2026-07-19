@@ -17,6 +17,7 @@ public struct KeyboardSpeechRecognitionEvent: Equatable, Sendable {
 public enum KeyboardTextInsertionAction: Equatable, Sendable {
     case insertText(String)
     case deleteBackward(count: TextDeletionCount)
+    case showUnsupportedCommand(String)
 }
 
 public struct KeyboardSpeechRecognitionSession: Sendable {
@@ -94,14 +95,14 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         let mappedActions = pipeline.operations(
             for: transcript,
             documentContextBeforeInput: documentContextBeforeInput
-        ).compactMap { operation -> KeyboardTextInsertionAction? in
+        ).map { operation -> KeyboardTextInsertionAction in
             switch operation {
             case .insertText(let value):
                 return .insertText(value)
             case .deleteBackward(let count):
                 return .deleteBackward(count: count)
-            case .showUnsupportedCommand:
-                return nil
+            case .showUnsupportedCommand(let phrase):
+                return .showUnsupportedCommand(phrase)
             }
         }
         return coalescedInsertActions(from: mappedActions)
@@ -111,10 +112,20 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         for update: SpeechRecognitionUpdate,
         actions: [KeyboardTextInsertionAction]
     ) -> KeyboardSpeechCaptureState {
+        if let phrase = actions.compactMap(unsupportedCommand(from:)).first {
+            return .unsupportedCommand(phrase)
+        }
         guard let insertedText = insertedText(from: actions) else {
             return .transcribing(update)
         }
         return .inserted(insertedText)
+    }
+
+    private func unsupportedCommand(
+        from action: KeyboardTextInsertionAction
+    ) -> String? {
+        guard case let .showUnsupportedCommand(phrase) = action else { return nil }
+        return phrase
     }
 
     private func insertedText(
@@ -145,6 +156,9 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
             case .insertText(let value):
                 pendingText.append(value)
             case .deleteBackward:
+                flushPendingText()
+                result.append(action)
+            case .showUnsupportedCommand:
                 flushPendingText()
                 result.append(action)
             }

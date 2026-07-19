@@ -48,22 +48,38 @@ final class AppSpeechDictationService {
 @MainActor
 final class AppSpeechDictationRun {
     private final class AudioTapGate: @unchecked Sendable {
-        private let lock = NSLock()
+        private let condition = NSCondition()
         private var isActive = true
+        private var inFlightCallbacks = 0
 
         func invalidate() {
-            lock.lock()
+            condition.lock()
             isActive = false
-            lock.unlock()
+            while inFlightCallbacks > 0 {
+                condition.wait()
+            }
+            condition.unlock()
         }
 
         func append(
             _ buffer: AVAudioPCMBuffer,
             to request: SFSpeechAudioBufferRecognitionRequest
         ) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard isActive else { return }
+            condition.lock()
+            guard isActive else {
+                condition.unlock()
+                return
+            }
+            inFlightCallbacks += 1
+            condition.unlock()
+            defer {
+                condition.lock()
+                inFlightCallbacks -= 1
+                if inFlightCallbacks == 0 {
+                    condition.broadcast()
+                }
+                condition.unlock()
+            }
             request.append(buffer)
         }
     }
@@ -143,8 +159,11 @@ final class AppSpeechDictationRun {
             await cleanup()
             throw CancellationError()
         }
-        if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
-            try? session.setPreferredInput(bluetoothInput)
+        do {
+            try await AppAudioSessionRouting.selectPreferredInputIfAvailable(session)
+        } catch {
+            await cleanup()
+            throw AppSpeechDictationError.audioConfigurationChanged
         }
 
         let inputNode = engine.inputNode
@@ -373,11 +392,12 @@ final class AppSpeechDictationRun {
                     continuation.resume(throwing: AudioSessionOperationError.timedOut)
                 }
                 session.activate(options: []) { activated, error in
-                    guard coordinator.isCurrent(operationToken) else {
-                        coordinator.finish(operationToken)
-                        return
-                    }
-                    guard gate.finish() else {
+                    let isCurrent = coordinator.isCurrent(operationToken)
+                    let wonCompletion = gate.finish()
+                    guard isCurrent && wonCompletion else {
+                        if activated {
+                            deactivateLateAudioSession(session)
+                        }
                         coordinator.finish(operationToken)
                         return
                     }
@@ -409,7 +429,10 @@ final class AppSpeechDictationRun {
                 }
                 do {
                     try session.setActive(true)
-                    guard coordinator.isCurrent(operationToken), gate.finish() else {
+                    let isCurrent = coordinator.isCurrent(operationToken)
+                    let wonCompletion = gate.finish()
+                    guard isCurrent && wonCompletion else {
+                        deactivateLateAudioSession(session)
                         coordinator.finish(operationToken)
                         return
                     }
@@ -429,7 +452,7 @@ final class AppSpeechDictationRun {
 
     private func deactivateAudioSession(_ session: AVAudioSession) async {
         let coordinator = AppAudioSessionOperationCoordinator.shared
-        guard let operationToken = coordinator.begin() else { return }
+        guard let operationToken = await coordinator.beginWhenAvailable() else { return }
         if #available(iOS 27.0, *) {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let gate = AudioSessionCompletionGate()
@@ -530,6 +553,16 @@ final class AppSpeechDictationRun {
 #endif
 }
 
+private func deactivateLateAudioSession(_ session: AVAudioSession) {
+    if #available(iOS 27.0, *) {
+        session.deactivate(options: .notifyOthersOnDeactivation) { _, _ in }
+    } else {
+        DispatchQueue.global(qos: .utility).async {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        }
+    }
+}
+
 final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
     static let shared = AppAudioSessionOperationCoordinator()
 
@@ -545,6 +578,16 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         currentToken = nextToken
         isInvalidated = false
         return nextToken
+    }
+
+    func beginWhenAvailable() async -> UInt64? {
+        for _ in 0..<40 {
+            if let token = begin() {
+                return token
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return nil
     }
 
     func isCurrent(_ token: UInt64) -> Bool {
@@ -565,7 +608,8 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
     func invalidate(_ token: UInt64) {
         lock.lock()
         if currentToken == token {
-            isInvalidated = true
+            currentToken = nil
+            isInvalidated = false
         }
         lock.unlock()
     }

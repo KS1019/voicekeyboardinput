@@ -20,8 +20,14 @@ package struct TextInsertionPlanner: Sendable {
                 shouldInsertSpaceBeforeText = true
             case .command(.insertText(let value)):
                 let opensQuote = value == "\"" && isOpeningQuoteContext(virtualContext)
-                operations.append(.insertText(value))
-                virtualContext.append(value)
+                let shouldAddSpace = shouldAddSpaceBeforeInsertedCommand(
+                    value,
+                    in: virtualContext,
+                    opensQuote: opensQuote
+                )
+                let text = shouldAddSpace ? " \(value)" : value
+                operations.append(.insertText(text))
+                virtualContext.append(text)
                 shouldInsertSpaceBeforeText = shouldAddSpaceAfterInsertedCommand(value, opensQuote: opensQuote)
             case .command(.deleteWord):
                 let count = deleteWordCount(in: virtualContext)
@@ -29,14 +35,14 @@ package struct TextInsertionPlanner: Sendable {
                     operations.append(.deleteBackward(count: count))
                 }
                 virtualContext = deletingSuffix(count, from: virtualContext)
-                shouldInsertSpaceBeforeText = false
+                shouldInsertSpaceBeforeText = shouldAddSpaceBeforeInitialText(in: virtualContext)
             case .command(.deleteSentence):
                 let count = deleteSentenceCount(in: virtualContext)
                 if let count = TextDeletionCount(count) {
                     operations.append(.deleteBackward(count: count))
                 }
                 virtualContext = deletingSuffix(count, from: virtualContext)
-                shouldInsertSpaceBeforeText = false
+                shouldInsertSpaceBeforeText = shouldAddSpaceBeforeInitialText(in: virtualContext)
             case .command(.unsupportedShortcut(let phrase)):
                 operations.append(.showUnsupportedCommand(phrase))
             }
@@ -69,9 +75,19 @@ package struct TextInsertionPlanner: Sendable {
         }
     }
 
+    private func shouldAddSpaceBeforeInsertedCommand(
+        _ value: String,
+        in context: String,
+        opensQuote: Bool
+    ) -> Bool {
+        guard value == "(" || opensQuote,
+              let previous = context.last else { return false }
+        return shouldAddSpaceBetween(previous: previous, next: value.first)
+            && !previous.isOpeningDelimiter
+    }
+
     private func isOpeningQuoteContext(_ context: String) -> Bool {
-        guard let last = context.last else { return true }
-        return last.isWhitespace || last == "("
+        context.filter { $0 == "\"" }.count.isMultiple(of: 2)
     }
 
     private func deleteWordCount(in context: String) -> Int {
@@ -115,7 +131,14 @@ package struct TextInsertionPlanner: Sendable {
 
 private extension Character {
     var isSentenceClosingDelimiter: Bool {
-        self == "\"" || self == ")" || self == "]" || self == "}" || self == "」" || self == "』"
+        [
+            "\"", "’", "”", ")", "]", "}", "）", "］", "｝", "】", "〕", "〉", "》", "」", "』", "›", "»"
+        ].contains(self)
+    }
+
+    var isOpeningDelimiter: Bool {
+        self == "(" || self == "[" || self == "{" || self == "（" || self == "［" || self == "｛"
+            || self == "【" || self == "〔" || self == "〈" || self == "《" || self == "「" || self == "『"
     }
 
     var isJapanesePunctuation: Bool {

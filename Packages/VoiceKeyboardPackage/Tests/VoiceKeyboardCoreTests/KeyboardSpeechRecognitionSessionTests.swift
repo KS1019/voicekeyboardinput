@@ -104,6 +104,23 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         XCTAssertEqual(events.last?.actions, expectedActions)
     }
 
+    func testUnsupportedCommandRemainsVisibleAsAnActionAndState() async {
+        let finalUpdate = SpeechRecognitionUpdate(transcript: "command copy", isFinal: true)
+        let service = FakeSpeechRecognitionService(initialUpdates: [finalUpdate])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: nil
+        ))
+
+        XCTAssertEqual(events.last?.state, .unsupportedCommand("command copy"))
+        XCTAssertEqual(events.last?.actions, [.showUnsupportedCommand("command copy")])
+    }
+
     func testStartFailureEmitsRecognitionFailed() async {
         let service = FakeSpeechRecognitionService(startError: .microphonePermissionDenied)
         let session = KeyboardSpeechRecognitionSession(
