@@ -7,9 +7,10 @@ APP_BUNDLE_ID := com.ks1019.voicekeyboardinput
 KEYBOARD_BUNDLE_ID := com.ks1019.voicekeyboardinput.keyboard
 SNAPSHOT_DIR ?= .build/snapshot-previews/$(shell date +%Y%m%d-%H%M%S)
 SCHEME := VoiceKeyboardInput
+MAC_SCHEME := VoiceKeyboardMenuBar
 DOCC_SCHEMES := VoiceKeyboardModels VoiceKeyboardPresentation VoiceKeyboardInterfaces VoiceKeyboardCore
 KEYBOARD_MANUAL_QA_DOC := docs/qa/keyboard-extension-manual-qa.md
-GENERATED_CHECK_PATHS := VoiceKeyboardInputApp/Info.plist VoiceKeyboardExtension/Info.plist VoiceKeyboardInput.xcodeproj/project.pbxproj VoiceKeyboardInput.xcodeproj/project.xcworkspace/contents.xcworkspacedata VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved VoiceKeyboardInput.xcodeproj/xcshareddata/xcschemes/VoiceKeyboardInput.xcscheme
+GENERATED_CHECK_PATHS := VoiceKeyboardInputApp/Info.plist VoiceKeyboardExtension/Info.plist VoiceKeyboardMenuBar/Info.plist VoiceKeyboardInput.xcodeproj/project.pbxproj VoiceKeyboardInput.xcodeproj/project.xcworkspace/contents.xcworkspacedata VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved VoiceKeyboardInput.xcodeproj/xcshareddata/xcschemes/VoiceKeyboardInput.xcscheme VoiceKeyboardInput.xcodeproj/xcshareddata/xcschemes/VoiceKeyboardMenuBar.xcscheme
 SWIFT_PM := env CLANG_MODULE_CACHE_PATH=/private/tmp/voicekeyboard-clang-cache SWIFTPM_CACHE_PATH=/private/tmp/voicekeyboard-swiftpm-cache swift
 XCODEBUILD := env CLANG_MODULE_CACHE_PATH=/private/tmp/voicekeyboard-clang-cache SWIFTPM_CACHE_PATH=/private/tmp/voicekeyboard-swiftpm-cache xcodebuild
 XCODEGEN ?= $(or $(shell command -v xcodegen 2>/dev/null),$(wildcard /opt/homebrew/bin/xcodegen),$(wildcard /usr/local/bin/xcodegen),xcodegen)
@@ -36,6 +37,14 @@ build: generate
 	$(XCODEBUILD) build \
 		-scheme $(SCHEME) \
 		-destination 'generic/platform=iOS Simulator' \
+		-derivedDataPath $(DERIVED_DATA) \
+		CODE_SIGNING_ALLOWED=NO
+
+.PHONY: mac-build
+mac-build: generate
+	$(XCODEBUILD) build \
+		-scheme $(MAC_SCHEME) \
+		-destination 'generic/platform=macOS' \
 		-derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO
 
@@ -128,6 +137,7 @@ verify:
 	$(MAKE) keyboard-permission-policy-check
 	$(MAKE) generated-check
 	$(MAKE) build
+	$(MAKE) mac-build
 	$(MAKE) ui-kit-test
 	$(MAKE) app-ui-test
 	$(MAKE) preview-layout-test

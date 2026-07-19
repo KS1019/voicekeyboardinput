@@ -10,6 +10,7 @@
 		0A81C1523E325DA035FA4B5C /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 9AD2555DE61EC01BF5E7E48D /* VoiceKeyboardModels */; };
 		0CC977A46331A4524876665A /* VoiceKeyboardInputPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 654F1526357CFEBE4C2E1AEB /* VoiceKeyboardInputPreviewTests.swift */; };
 		0F3054AAEAC057B09E9CA7A2 /* CapabilityIndicatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70BC36DDD467772F31DD3F2 /* CapabilityIndicatorView.swift */; };
+		166B12603EDFD3AEF130AB95 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0054C1360BA5B4450617CC0 /* MenuBarContentView.swift */; };
 		18749120FF40031274693ED5 /* SnapshottingTests in Frameworks */ = {isa = PBXBuildFile; productRef = 73BE31DA7A536DA7918CC001 /* SnapshottingTests */; };
 		1EAEDECF46F339B06204F4C1 /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 97A49A68D0E59F4A40298C00 /* VoiceKeyboardModels */; };
 		293F65B032DCF0891626B63E /* KeyboardSpeechCaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 511A94BF8DEED82E5D264C13 /* KeyboardSpeechCaptureCoordinator.swift */; };
@@ -34,6 +35,7 @@
 		A2CCADB036D5CCC97153A380 /* VoiceKeyboardPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = 867B29CEA76EDCE20EBB06D5 /* VoiceKeyboardPresentation */; };
 		A405C56ABB395071E5115E66 /* AppAudioInputProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97F9251E6840A81273F7991A /* AppAudioInputProbe.swift */; };
 		B509603735CECD961B5BFD77 /* VoiceKeyboardInterfaces in Frameworks */ = {isa = PBXBuildFile; productRef = 7DB9C02A1F53C172FF702C19 /* VoiceKeyboardInterfaces */; };
+		B8664FBA6B4C5362ED2DDFB1 /* VoiceKeyboardMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D82DF7B77C0C4E4E18ABE20 /* VoiceKeyboardMenuBarApp.swift */; };
 		BDFA298A77FF05845AC3B359 /* VoiceActivityMeterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */; };
 		C0A88DBA15728CC3694C2FEE /* KeyboardRootViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */; };
 		C0E7AFF1A4E851CE1D95CDD8 /* AppSpeechDictationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD7AB6375CF09FE52E7AF16 /* AppSpeechDictationService.swift */; };
@@ -110,9 +112,11 @@
 		734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootViewTests.swift; sourceTree = "<group>"; };
 		74E8977386F0041FFC7EDD21 /* VoiceKeyboardMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceKeyboardMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceActivityMeterView.swift; sourceTree = "<group>"; };
+		8D82DF7B77C0C4E4E18ABE20 /* VoiceKeyboardMenuBarApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardMenuBarApp.swift; sourceTree = "<group>"; };
 		94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootView.swift; sourceTree = "<group>"; };
 		97F9251E6840A81273F7991A /* AppAudioInputProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAudioInputProbe.swift; sourceTree = "<group>"; };
 		AAA63B156405B0FD473FB9D6 /* VoiceKeyboardExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VoiceKeyboardExtension.entitlements; sourceTree = "<group>"; };
+		B0054C1360BA5B4450617CC0 /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
 		B072E74E43466D1C21635BE3 /* VoiceInputLaunchModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputLaunchModelTests.swift; sourceTree = "<group>"; };
 		BBA4564E3C837B6C92D0292A /* KeyboardSpeechRecognitionDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSpeechRecognitionDiagnostics.swift; sourceTree = "<group>"; };
 		CB0C45B415B57E9B1974FCED /* VoiceKeyboardInputUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardInputUITests.swift; sourceTree = "<group>"; };
@@ -124,14 +128,6 @@
 		F1EB4E021CA9301314BBC924 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VoiceKeyboardInput.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = VoiceKeyboardMenuBar;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		5212B12B0BE64F6A0AD43290 /* Frameworks */ = {
@@ -255,6 +251,16 @@
 			path = VoiceKeyboardUIKit;
 			sourceTree = "<group>";
 		};
+		D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */ = {
+			isa = PBXGroup;
+			children = (
+				3C231EC1ED3178FAB1CCA242 /* Info.plist */,
+				B0054C1360BA5B4450617CC0 /* MenuBarContentView.swift */,
+				8D82DF7B77C0C4E4E18ABE20 /* VoiceKeyboardMenuBarApp.swift */,
+			);
+			path = VoiceKeyboardMenuBar;
+			sourceTree = "<group>";
+		};
 		DE211F1BB560983B56ACC8C4 /* VoiceKeyboardUIKitTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -331,9 +337,6 @@
 			buildRules = (
 			);
 			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */,
 			);
 			name = VoiceKeyboardMenuBar;
 			packageProductDependencies = (
@@ -512,6 +515,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				166B12603EDFD3AEF130AB95 /* MenuBarContentView.swift in Sources */,
+				B8664FBA6B4C5362ED2DDFB1 /* VoiceKeyboardMenuBarApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
