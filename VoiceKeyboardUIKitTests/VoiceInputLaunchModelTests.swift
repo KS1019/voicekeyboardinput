@@ -1,7 +1,8 @@
 @testable import VoiceKeyboardInput
 import VoiceKeyboardModels
-import VoiceKeyboardSharedStorage
 import XCTest
+
+typealias SharedDictationSessionStore = VoiceKeyboardInput.SharedDictationSessionStoreForTesting
 
 @MainActor
 final class VoiceInputLaunchModelTests: XCTestCase {

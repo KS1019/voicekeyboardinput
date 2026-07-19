@@ -142,8 +142,7 @@ dependency-policy-check:
 		test "$$(rg -o 'product: [A-Za-z0-9]+' "$$menu_bar_block" | sed 's/product: //' | sort | tr '\n' ' ' | sed 's/ $$//')" = "$$(printf '%s\n' $(MENU_BAR_ALLOWED_PACKAGE_PRODUCTS) | sort | tr '\n' ' ' | sed 's/ $$//')"; \
 		test "$$(rg -c 'product:' "$$menu_bar_block")" = "2"; \
 		status=0; rg --quiet $(MENU_BAR_FORBIDDEN_PROJECT_BLOCK_TOKENS) "$$menu_bar_block" || status=$$?; test $$status -eq 1; \
-		test "$$(rg -c 'product: VoiceKeyboardSharedStorage' "$$ui_kit_test_block")" = "1"; \
-		test "$$(rg -c 'link: false' "$$ui_kit_test_block")" = "1"
+		status=0; rg --quiet 'product: VoiceKeyboardSharedStorage' "$$ui_kit_test_block" || status=$$?; test $$status -eq 1
 
 .PHONY: keyboard-permission-policy-check
 keyboard-permission-policy-check:

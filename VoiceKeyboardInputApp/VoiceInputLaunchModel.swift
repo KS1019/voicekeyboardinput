@@ -97,6 +97,10 @@ protocol DictationSessionControlling {
     func cancelActiveSession() async
 }
 
+// UIKit tests use the host application's package instance instead of linking
+// a second copy of the shared-storage classes into the test bundle.
+typealias SharedDictationSessionStoreForTesting = SharedDictationSessionStore
+
 @MainActor
 protocol MicrophoneActivating {
     func activate() async -> VoiceInputLaunchStatus

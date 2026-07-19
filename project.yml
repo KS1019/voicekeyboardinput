@@ -166,9 +166,6 @@ targets:
       - VoiceKeyboardUIKitTests
     dependencies:
       - target: VoiceKeyboardInput
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardSharedStorage
-        link: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uikittests

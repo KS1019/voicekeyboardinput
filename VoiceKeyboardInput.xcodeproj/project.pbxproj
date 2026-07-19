@@ -353,7 +353,6 @@
 			);
 			dependencies = (
 				F24D1F3D5C3D06DF741A5598 /* PBXTargetDependency */,
-				882CEEF35EC1CAA3C3EE76DB /* PBXTargetDependency */,
 			);
 			name = VoiceKeyboardUIKitTests;
 			packageProductDependencies = (
@@ -595,10 +594,6 @@
 			isa = PBXTargetDependency;
 			target = 44EF56E44308FFEF9C106D76 /* VoiceKeyboardExtension */;
 			targetProxy = 56BCF077D8479425D5022D90 /* PBXContainerItemProxy */;
-		};
-		882CEEF35EC1CAA3C3EE76DB /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			productRef = "TEMP_6EF5C64C-25B7-4519-B4B5-B4D2AEBD2ADB" /* VoiceKeyboardSharedStorage */;
 		};
 		D30C5CDFE26A65236E4CD6AA /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -1128,10 +1123,6 @@
 		EEF58D95E435C6657D4FA2B7 /* VoiceKeyboardModels */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardModels;
-		};
-		"TEMP_6EF5C64C-25B7-4519-B4B5-B4D2AEBD2ADB" /* VoiceKeyboardSharedStorage */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = VoiceKeyboardSharedStorage;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
