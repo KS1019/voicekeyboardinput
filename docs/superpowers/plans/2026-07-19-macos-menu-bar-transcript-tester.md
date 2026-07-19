@@ -880,5 +880,3 @@ GIT_AUTHOR_NAME='Codex' GIT_AUTHOR_EMAIL='codex@openai.com' \
 GIT_COMMITTER_NAME='Codex' GIT_COMMITTER_EMAIL='codex@openai.com' \
 git commit --no-gpg-sign -m "test: verify macOS transcript tester build"
 ~~~
-
-
