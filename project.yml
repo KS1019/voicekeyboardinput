@@ -28,6 +28,8 @@ targets:
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardModels
       - package: VoiceKeyboardPackage
+        product: VoiceKeyboardSharedStorage
+      - package: VoiceKeyboardPackage
         product: VoiceKeyboardInterfaces
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardCommandPipeline
@@ -70,6 +72,8 @@ targets:
     dependencies:
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardModels
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardSharedStorage
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardInterfaces
       - package: VoiceKeyboardPackage
@@ -123,6 +127,21 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.menubar
 
+  VoiceKeyboardMenuBarTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - VoiceKeyboardMenuBarTests
+    dependencies:
+      - target: VoiceKeyboardMenuBar
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardCommandPipeline
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardModels
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.menubartests
+
   VoiceKeyboardInputPreviewTests:
     type: bundle.unit-test
     platform: iOS
@@ -145,6 +164,8 @@ targets:
       - VoiceKeyboardUIKitTests
     dependencies:
       - target: VoiceKeyboardInput
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardSharedStorage
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uikittests
@@ -189,6 +210,11 @@ schemes:
     build:
       targets:
         VoiceKeyboardMenuBar: all
+        VoiceKeyboardMenuBarTests: [test]
+    test:
+      macroExpansion: VoiceKeyboardMenuBar
+      targets:
+        - VoiceKeyboardMenuBarTests
     run:
       config: Debug
       executable: VoiceKeyboardMenuBar

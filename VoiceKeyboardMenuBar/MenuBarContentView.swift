@@ -127,37 +127,55 @@ struct MenuBarContentView: View {
     private func elementDescription(
         _ element: LiteralTranscriptElement
     ) -> String {
-        switch element {
-        case .text(let value):
-            "text(\"\(value)\")"
-        case .command(let command):
-            "command(\(commandDescription(command)))"
-        }
+        MenuBarDebugText.elementDescription(element)
     }
 
     private func commandDescription(
         _ command: LiteralTranscriptCommand
     ) -> String {
+        MenuBarDebugText.commandDescription(command)
+    }
+
+    private func operationDescription(_ operation: TextOperation) -> String {
+        MenuBarDebugText.operationDescription(operation)
+    }
+}
+
+enum MenuBarDebugText {
+    static func elementDescription(_ element: LiteralTranscriptElement) -> String {
+        switch element {
+        case .text(let value):
+            "text(\(literal(value)))"
+        case .command(let command):
+            "command(\(commandDescription(command)))"
+        }
+    }
+
+    static func commandDescription(_ command: LiteralTranscriptCommand) -> String {
         switch command {
         case .insertText(let value):
-            "insertText(\"\(value)\")"
+            "insertText(\(literal(value)))"
         case .deleteWord:
             "deleteWord"
         case .deleteSentence:
             "deleteSentence"
         case .unsupportedShortcut(let phrase):
-            "unsupportedShortcut(\"\(phrase)\")"
+            "unsupportedShortcut(\(literal(phrase)))"
         }
     }
 
-    private func operationDescription(_ operation: TextOperation) -> String {
+    static func operationDescription(_ operation: TextOperation) -> String {
         switch operation {
         case .insertText(let value):
-            "insertText(\"\(value)\")"
+            "insertText(\(literal(value)))"
         case .deleteBackward(let count):
             "deleteBackward(count: \(count.value))"
         case .showUnsupportedCommand(let phrase):
-            "showUnsupportedCommand(\"\(phrase)\")"
+            "showUnsupportedCommand(\(literal(phrase)))"
         }
+    }
+
+    private static func literal(_ value: String) -> String {
+        String(reflecting: value)
     }
 }

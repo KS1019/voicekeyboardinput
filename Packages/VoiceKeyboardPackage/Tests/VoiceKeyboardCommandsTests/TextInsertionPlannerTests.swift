@@ -98,6 +98,18 @@ final class TextInsertionPlannerTests: XCTestCase {
         )
     }
 
+    func testInitialTextSpacingDoesNotAddSpaceAfterOpeningDoubleQuote() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.text("hello")])
+
+        let operations = planner.plan(
+            transcript,
+            documentContextBeforeInput: "He said \""
+        )
+
+        XCTAssertEqual(operations, [.insertText("hello")])
+    }
+
     func testInitialTextSpacingDoesNotAddSpaceAfterJapanesePunctuation() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [.text("後")])
@@ -225,6 +237,30 @@ final class TextInsertionPlannerTests: XCTestCase {
 
         let operations = planner.plan(transcript, documentContextBeforeInput: "一。二三")
         XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(2))])
+    }
+
+    func testPlansDeleteSentenceIncludingStackedAsciiTerminators() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        let operations = planner.plan(
+            transcript,
+            documentContextBeforeInput: "One. Hello!!"
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(8))])
+    }
+
+    func testPlansDeleteSentenceIncludingStackedJapaneseTerminators() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        let operations = planner.plan(
+            transcript,
+            documentContextBeforeInput: "一。二三！！"
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(4))])
     }
 
     func testSkipsDeleteCommandsWithZeroCount() {

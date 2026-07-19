@@ -2,6 +2,7 @@ import AVFAudio
 import Observation
 import Speech
 import VoiceKeyboardModels
+import VoiceKeyboardSharedStorage
 
 enum VoiceInputLaunchStatus: Equatable {
     case idle
@@ -411,14 +412,20 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
 
     private func recoverStaleSession(in sessionStore: SharedDictationSessionStore) {
         switch sessionStore.status() {
+        case .idle:
+            guard let command = sessionStore.latestCommand(),
+                  command.source == .keyboard,
+                  command.isExpired() else {
+                return
+            }
+            sessionStore.saveStatus(.cancelled(token: command.token))
         case let .commandAcknowledged(token, _):
             sessionStore.saveStatus(.cancelled(token: token))
         case let .recording(token, _, _):
             sessionStore.saveStatus(.cancelled(token: token))
         case let .transcribing(token):
             sessionStore.saveStatus(.cancelled(token: token))
-        case .idle,
-             .transcriptReady,
+        case .transcriptReady,
              .failed,
              .cancelled:
             break

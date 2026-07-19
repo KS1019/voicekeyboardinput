@@ -2,6 +2,7 @@ import UIKit
 import VoiceKeyboardCore
 import VoiceKeyboardModels
 import VoiceKeyboardPresentation
+import VoiceKeyboardSharedStorage
 
 @MainActor
 public final class KeyboardViewController: UIInputViewController {

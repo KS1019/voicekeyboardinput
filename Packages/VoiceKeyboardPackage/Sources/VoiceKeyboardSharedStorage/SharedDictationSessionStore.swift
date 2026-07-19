@@ -1,4 +1,5 @@
 import Foundation
+import VoiceKeyboardModels
 
 public final class SharedDictationSessionStore {
     private enum Key {

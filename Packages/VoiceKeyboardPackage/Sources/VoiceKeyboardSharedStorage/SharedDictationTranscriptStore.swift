@@ -1,4 +1,5 @@
 import Foundation
+import VoiceKeyboardModels
 
 public struct SharedDictationTranscript: Codable, Equatable, Sendable {
     public let sessionID: String

@@ -1,5 +1,6 @@
 import Foundation
 import VoiceKeyboardModels
+import VoiceKeyboardSharedStorage
 import XCTest
 
 final class SharedDictationSessionStoreTests: XCTestCase {

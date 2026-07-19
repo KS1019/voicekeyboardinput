@@ -47,6 +47,9 @@ package struct TextInsertionPlanner: Sendable {
 
     private func shouldAddSpaceBeforeInitialText(in context: String) -> Bool {
         guard let last = context.last else { return false }
+        if last == "\"" {
+            return !isOpeningQuoteContext(String(context.dropLast()))
+        }
         return !last.isWhitespace && last != "(" && !last.isJapanesePunctuation
     }
 
@@ -91,10 +94,14 @@ package struct TextInsertionPlanner: Sendable {
 
         let sentenceTerminators: Set<Character> = [".", "?", "!", "\n", "。", "？", "！"]
         var count = 0
+        var hasSeenSentenceBody = false
 
         for character in trimmed.reversed() {
-            if sentenceTerminators.contains(character), count > 0 {
+            if sentenceTerminators.contains(character), hasSeenSentenceBody {
                 break
+            }
+            if !sentenceTerminators.contains(character) {
+                hasSeenSentenceBody = true
             }
             count += 1
         }
