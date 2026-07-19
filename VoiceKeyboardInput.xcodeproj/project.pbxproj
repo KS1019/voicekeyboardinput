@@ -20,6 +20,7 @@
 		49B8F15398B8F4DEB6F48E0B /* VoiceKeyboardPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = DB43C5971A85B4C594676C15 /* VoiceKeyboardPresentation */; };
 		4A004FDF680754D2225D2B11 /* VoiceInputLaunchModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B072E74E43466D1C21635BE3 /* VoiceInputLaunchModelTests.swift */; };
 		4AAAB0B9F861276E7C28928C /* VoiceKeyboardCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1F3687FF1C3F8BDC0A6113F8 /* VoiceKeyboardCore */; };
+		6005DBD655FA2909E919A822 /* VoiceKeyboardCommandPipeline in Frameworks */ = {isa = PBXBuildFile; productRef = 4D386FBC4C5E3BEF5DD41C85 /* VoiceKeyboardCommandPipeline */; };
 		65E325261794A0940527C7C4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1EB4E021CA9301314BBC924 /* ContentView.swift */; };
 		723A12F549B33D3567FBFA06 /* VoiceKeyboardInterfaces in Frameworks */ = {isa = PBXBuildFile; productRef = 92AD55E9B95DF56F69039605 /* VoiceKeyboardInterfaces */; };
 		7359B653BA35B9F71CD8205D /* VoiceKeyboardExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -37,6 +38,7 @@
 		C0A88DBA15728CC3694C2FEE /* KeyboardRootViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */; };
 		C0E7AFF1A4E851CE1D95CDD8 /* AppSpeechDictationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD7AB6375CF09FE52E7AF16 /* AppSpeechDictationService.swift */; };
 		C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardCommandPipeline in Frameworks */ = {isa = PBXBuildFile; productRef = CB00A63C89651DE419CC4B91 /* VoiceKeyboardCommandPipeline */; };
+		E30532B4715E7FD7C3059D3F /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = EEF58D95E435C6657D4FA2B7 /* VoiceKeyboardModels */; };
 		E48C4B4D8A4BFCE3205331F1 /* KeyboardAudioInputProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05180E43C6C8DE7232F93096 /* KeyboardAudioInputProbe.swift */; };
 		E8470A6DD4BF648039EBBA0C /* KeyboardRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */; };
 		F5DFCB4CF55FDE06A1C11F66 /* KeyboardSpeechRecognitionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E2893701F3C5692A33ED66 /* KeyboardSpeechRecognitionService.swift */; };
@@ -94,8 +96,9 @@
 		202396909E03B9F6D7F9B97C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		20DF6CEB98D29105405D8AD2 /* KeyboardRootViewPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootViewPreview.swift; sourceTree = "<group>"; };
 		284539418006C6BC0E82E233 /* VoiceInputLaunchModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputLaunchModel.swift; sourceTree = "<group>"; };
-		28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = VoiceKeyboardExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = VoiceKeyboardExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		35E2893701F3C5692A33ED66 /* KeyboardSpeechRecognitionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSpeechRecognitionService.swift; sourceTree = "<group>"; };
+		3C231EC1ED3178FAB1CCA242 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4BD7AB6375CF09FE52E7AF16 /* AppSpeechDictationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSpeechDictationService.swift; sourceTree = "<group>"; };
 		511A94BF8DEED82E5D264C13 /* KeyboardSpeechCaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSpeechCaptureCoordinator.swift; sourceTree = "<group>"; };
 		5D2EDB22C4B49AE3501D5234 /* VoiceKeyboardInputPreviewTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VoiceKeyboardInputPreviewTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -105,6 +108,7 @@
 		70A28AE15EE06A072B2DCA34 /* ContainingAppOpener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContainingAppOpener.swift; sourceTree = "<group>"; };
 		711AA4AFBC4B2CDBD62F17DA /* KeyboardViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardViewController.swift; sourceTree = "<group>"; };
 		734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootViewTests.swift; sourceTree = "<group>"; };
+		74E8977386F0041FFC7EDD21 /* VoiceKeyboardMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceKeyboardMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceActivityMeterView.swift; sourceTree = "<group>"; };
 		94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootView.swift; sourceTree = "<group>"; };
 		97F9251E6840A81273F7991A /* AppAudioInputProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAudioInputProbe.swift; sourceTree = "<group>"; };
@@ -118,7 +122,7 @@
 		E668C0FD03896C6082C211D8 /* VoiceKeyboardInputApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardInputApp.swift; sourceTree = "<group>"; };
 		E70BC36DDD467772F31DD3F2 /* CapabilityIndicatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilityIndicatorView.swift; sourceTree = "<group>"; };
 		F1EB4E021CA9301314BBC924 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceKeyboardInput.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VoiceKeyboardInput.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -149,6 +153,15 @@
 				B509603735CECD961B5BFD77 /* VoiceKeyboardInterfaces in Frameworks */,
 				C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardCommandPipeline in Frameworks */,
 				49B8F15398B8F4DEB6F48E0B /* VoiceKeyboardPresentation in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CD476C110C0DC2FBDB0C61A7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6005DBD655FA2909E919A822 /* VoiceKeyboardCommandPipeline in Frameworks */,
+				E30532B4715E7FD7C3059D3F /* VoiceKeyboardModels in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -201,6 +214,7 @@
 				F3D64D1319CA96FC44526FED /* VoiceKeyboardInput.app */,
 				5D2EDB22C4B49AE3501D5234 /* VoiceKeyboardInputPreviewTests.xctest */,
 				67E331DC598D00102FCE7458 /* VoiceKeyboardInputUITests.xctest */,
+				74E8977386F0041FFC7EDD21 /* VoiceKeyboardMenuBar.app */,
 				64294E39CA46A70709601B15 /* VoiceKeyboardUIKitTests.xctest */,
 			);
 			name = Products;
@@ -214,6 +228,7 @@
 				F11AE50F67EDF668F6F76B35 /* VoiceKeyboardInputApp */,
 				07C333BF3ADF43ECFF8FAD04 /* VoiceKeyboardInputPreviewTests */,
 				62C1B9250762E138954372F5 /* VoiceKeyboardInputUITests */,
+				D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */,
 				B1D197BDEE16DF9953A467F4 /* VoiceKeyboardUIKit */,
 				DE211F1BB560983B56ACC8C4 /* VoiceKeyboardUIKitTests */,
 				75C7BE0731E8AE349614B0E9 /* Products */,
@@ -230,6 +245,14 @@
 				80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */,
 			);
 			path = VoiceKeyboardUIKit;
+			sourceTree = "<group>";
+		};
+		D9ED58CEF801ADC527F25EE6 /* VoiceKeyboardMenuBar */ = {
+			isa = PBXGroup;
+			children = (
+				3C231EC1ED3178FAB1CCA242 /* Info.plist */,
+			);
+			path = VoiceKeyboardMenuBar;
 			sourceTree = "<group>";
 		};
 		DE211F1BB560983B56ACC8C4 /* VoiceKeyboardUIKitTests */ = {
@@ -297,6 +320,26 @@
 			productName = VoiceKeyboardExtension;
 			productReference = 28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		6FF63E16A7316C1BDAF8372F /* VoiceKeyboardMenuBar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8121559508E640FE04BADFF9 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBar" */;
+			buildPhases = (
+				889A2D09EFE0D67E3243DCC0 /* Sources */,
+				CD476C110C0DC2FBDB0C61A7 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VoiceKeyboardMenuBar;
+			packageProductDependencies = (
+				4D386FBC4C5E3BEF5DD41C85 /* VoiceKeyboardCommandPipeline */,
+				EEF58D95E435C6657D4FA2B7 /* VoiceKeyboardModels */,
+			);
+			productName = VoiceKeyboardMenuBar;
+			productReference = 74E8977386F0041FFC7EDD21 /* VoiceKeyboardMenuBar.app */;
+			productType = "com.apple.product-type.application";
 		};
 		B08F9F4B3BB328F2F23F7BE1 /* VoiceKeyboardInput */ = {
 			isa = PBXNativeTarget;
@@ -396,6 +439,7 @@
 				B08F9F4B3BB328F2F23F7BE1 /* VoiceKeyboardInput */,
 				C086F102A9D865A11554EC66 /* VoiceKeyboardInputPreviewTests */,
 				B701A1487117B92B513F19C9 /* VoiceKeyboardInputUITests */,
+				6FF63E16A7316C1BDAF8372F /* VoiceKeyboardMenuBar */,
 				3C9AA1DB37FF2A8C19BD6271 /* VoiceKeyboardUIKitTests */,
 			);
 		};
@@ -461,6 +505,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		889A2D09EFE0D67E3243DCC0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -508,18 +559,30 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 47JGA6NAP2;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
 				INFOPLIST_FILE = VoiceKeyboardInputApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1C0E8CC12939AE42905B1BF9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = VoiceKeyboardMenuBar/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput.menubar;
+				SDKROOT = macosx;
 			};
 			name = Debug;
 		};
@@ -569,10 +632,10 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
@@ -616,7 +679,6 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements;
-				DEVELOPMENT_TEAM = 47JGA6NAP2;
 				INFOPLIST_FILE = VoiceKeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -628,6 +690,21 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
+		};
+		9C33B17A9617F7759E61B595 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = VoiceKeyboardMenuBar/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput.menubar;
+				SDKROOT = macosx;
+			};
+			name = Release;
 		};
 		9F632AAA7EF00A34C3583F89 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -697,11 +774,11 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
@@ -713,7 +790,6 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements;
-				DEVELOPMENT_TEAM = 47JGA6NAP2;
 				INFOPLIST_FILE = VoiceKeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -763,16 +839,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 47JGA6NAP2;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
 				INFOPLIST_FILE = VoiceKeyboardInputApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -804,6 +877,15 @@
 			buildConfigurations = (
 				AD7EECBC11CBD29CCC6D40BE /* Debug */,
 				4331EBB1FFCF528B455F59FF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8121559508E640FE04BADFF9 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1C0E8CC12939AE42905B1BF9 /* Debug */,
+				9C33B17A9617F7759E61B595 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -860,6 +942,10 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardCore;
 		};
+		4D386FBC4C5E3BEF5DD41C85 /* VoiceKeyboardCommandPipeline */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKeyboardCommandPipeline;
+		};
 		73BE31DA7A536DA7918CC001 /* SnapshottingTests */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9B815F9F22F190F9E18FDA02 /* XCRemoteSwiftPackageReference "SnapshotPreviews" */;
@@ -892,6 +978,10 @@
 		DB43C5971A85B4C594676C15 /* VoiceKeyboardPresentation */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardPresentation;
+		};
+		EEF58D95E435C6657D4FA2B7 /* VoiceKeyboardModels */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKeyboardModels;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
