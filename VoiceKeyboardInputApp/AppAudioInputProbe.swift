@@ -9,36 +9,93 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         let engine = AVAudioEngine()
         var sessionIsActive = false
         var tapIsInstalled = false
+        var lingeringAudioSessionOperation: Task<AppAudioEngineOperationStatus, Never>?
+        var lingeringAudioEngineOperation: Task<AppAudioEngineOperationStatus, Never>?
         let tapGate = AudioInputProbeTapGate()
         let coordinator = AppAudioSessionOperationCoordinator.shared
+        guard let ownershipToken = coordinator.acquireOwnership() else {
+            throw .unavailableInCurrentProcess
+        }
         guard let operationToken = coordinator.begin() else {
+            coordinator.releaseOwnership(ownershipToken)
             throw .unavailableInCurrentProcess
         }
 
         defer {
             tapGate.invalidate()
-            if tapIsInstalled {
-                engine.inputNode.removeTap(onBus: 0)
+            let tapWasInstalled = tapIsInstalled
+            let sessionWasActive = sessionIsActive
+            let audioSessionOperation = lingeringAudioSessionOperation
+            let audioEngineOperation = lingeringAudioEngineOperation
+            Task.detached {
+                if let audioSessionOperation {
+                    if await audioSessionOperation.value == .succeeded {
+                        let deactivation = Self.makeSessionOperation(
+                            session,
+                            active: false,
+                            coordinator: coordinator
+                        )
+                        _ = await Self.waitForOperation(deactivation, timeout: 2)
+                    }
+                    coordinator.releaseOwnership(ownershipToken)
+                    coordinator.markTerminalAndRelease(operationToken)
+                    return
+                }
+                if let audioEngineOperation {
+                    _ = await audioEngineOperation.value
+                }
+                if tapWasInstalled {
+                    engine.inputNode.removeTap(onBus: 0)
+                }
+                engine.stop()
+                guard sessionWasActive, coordinator.isCurrent(operationToken) else {
+                    coordinator.finish(operationToken)
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
+                }
+                guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
+                    coordinator.markTerminalAndRelease(operationToken)
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
+                }
+                let deactivation = Self.makeSessionOperation(
+                    session,
+                    active: false,
+                    coordinator: coordinator
+                )
+                guard await Self.waitForOperation(deactivation, timeout: 2) == .succeeded else {
+                    coordinator.markTerminalAndRelease(operationToken)
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
+                }
+                if coordinator.isCurrent(operationToken) {
+                    coordinator.finish(operationToken)
+                }
+                coordinator.releaseOwnership(ownershipToken)
             }
-            engine.stop()
-            if sessionIsActive, coordinator.isCurrent(operationToken) {
-                // Keep the same ownership token through deactivation so a
-                // new speech run cannot start between these two operations.
-                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            Task {
+                try? await Task.sleep(for: .seconds(10))
+                coordinator.terminateOperationIfNeeded(operationToken)
             }
-            coordinator.finish(operationToken)
         }
 
         do {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .measurement,
-                options: [.allowBluetoothHFP, .duckOthers, .defaultToSpeaker]
+            let activation = Self.makeSessionOperation(
+                session,
+                active: true,
+                coordinator: coordinator
             )
+            switch await Self.waitForOperation(activation, timeout: 2) {
+            case .succeeded:
+                sessionIsActive = true
+            case .failed:
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            case .timedOut:
+                lingeringAudioSessionOperation = activation
+                coordinator.markTerminal()
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            }
             guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
-            try session.setActive(true)
-            guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
-            sessionIsActive = true
             try await AppAudioSessionRouting.selectPreferredInputIfAvailable(session)
             try await AppAudioSessionRouting.waitForStableInput(
                 session: session,
@@ -57,13 +114,24 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             }
 
             let peakTracker = AudioInputPeakTracker()
-            inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
+            guard VKInstallAudioInputTap(inputNode, { buffer, _ in
                 tapGate.observe(buffer, using: peakTracker)
+            }) else {
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
             tapIsInstalled = true
 
-            engine.prepare()
-            try engine.start()
+            let audioEngineOperation = Self.makeEngineOperation(engine)
+            switch await Self.waitForOperation(audioEngineOperation, timeout: 2) {
+            case .succeeded:
+                break
+            case .failed:
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            case .timedOut:
+                lingeringAudioEngineOperation = audioEngineOperation
+                coordinator.markTerminal()
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            }
             try await Task.sleep(for: .seconds(duration.seconds))
 
             guard session.isInputAvailable,
@@ -88,6 +156,65 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         }
     }
 
+    private static func makeSessionOperation(
+        _ session: AVAudioSession,
+        active: Bool,
+        coordinator: AppAudioSessionOperationCoordinator
+    ) -> Task<AppAudioEngineOperationStatus, Never> {
+        coordinator.beginSessionOperation()
+        return Task.detached {
+            defer { coordinator.completeSessionOperation() }
+            do {
+                if active {
+                    try session.setCategory(
+                        .playAndRecord,
+                        mode: .measurement,
+                        options: [.allowBluetoothHFP, .duckOthers, .defaultToSpeaker]
+                    )
+                    try session.setActive(true)
+                } else {
+                    try session.setActive(false, options: .notifyOthersOnDeactivation)
+                }
+                return .succeeded
+            } catch {
+                return .failed
+            }
+        }
+    }
+
+    private static func makeEngineOperation(
+        _ engine: AVAudioEngine
+    ) -> Task<AppAudioEngineOperationStatus, Never> {
+        Task.detached {
+            do {
+                engine.prepare()
+                try engine.start()
+                return .succeeded
+            } catch {
+                return .failed
+            }
+        }
+    }
+
+    private static func waitForOperation(
+        _ operation: Task<AppAudioEngineOperationStatus, Never>,
+        timeout: TimeInterval
+    ) async -> AppAudioEngineOperationStatus {
+        await withCheckedContinuation { continuation in
+            let gate = AppAudioProbeCompletionGate()
+            Task {
+                let status = await operation.value
+                guard gate.finish() else { return }
+                continuation.resume(returning: status)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                guard gate.finish() else { return }
+                continuation.resume(returning: .timedOut)
+            }
+        }
+    }
+
     private static func result(
         microphoneCaptureAvailable: Bool,
         duration: AudioCaptureProbeDuration,
@@ -101,6 +228,20 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             preconditionFailure("Invalid audio input probe result")
         }
         return result
+    }
+
+}
+
+private final class AppAudioProbeCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isFinished = false
+
+    func finish() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isFinished else { return false }
+        isFinished = true
+        return true
     }
 }
 

@@ -149,6 +149,45 @@ final class TextInsertionPlannerTests: XCTestCase {
         }
     }
 
+    func testSingleQuoteSpacingAndSentenceDeletionTreatsQuotesAsDelimiters() {
+        let planner = TextInsertionPlanner()
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [
+                    .command(.insertText("'")),
+                    .text("quoted"),
+                    .command(.insertText("'")),
+                    .text("world")
+                ]),
+                documentContextBeforeInput: ""
+            ),
+            [.insertText("'"), .insertText("quoted"), .insertText("'"), .insertText(" world")]
+        )
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.text("world")]),
+                documentContextBeforeInput: "He said '"
+            ),
+            [.insertText("world")]
+        )
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.text("world")]),
+                documentContextBeforeInput: "hello 'quoted'"
+            ),
+            [.insertText(" world")]
+        )
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: "One. 'Two.'"
+            ),
+            [.deleteBackward(count: deleteCount(7))]
+        )
+    }
+
     func testOpeningCommandDoesNotDuplicateExistingWhitespace() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [

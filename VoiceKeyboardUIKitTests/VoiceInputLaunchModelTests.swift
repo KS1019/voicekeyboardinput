@@ -6,6 +6,43 @@ typealias SharedDictationSessionStore = VoiceKeyboardInput.SharedDictationSessio
 
 @MainActor
 final class VoiceInputLaunchModelTests: XCTestCase {
+    func testTimedOutAudioOperationRetainsOwnershipUntilLateDeactivation() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        coordinator.invalidateAndHold(token)
+
+        XCTAssertNil(coordinator.begin())
+        XCTAssertTrue(coordinator.claimLateDeactivation(token))
+        coordinator.finish(token)
+        let nextToken = coordinator.begin()
+        XCTAssertNotNil(nextToken)
+        if let nextToken {
+            coordinator.finish(nextToken)
+        }
+    }
+
+    func testRetiredAudioOperationStillBlocksNewActivationUntilLateCallback() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        coordinator.invalidateAndHold(token)
+        coordinator.retire(token)
+
+        XCTAssertNil(coordinator.begin())
+        XCTAssertTrue(coordinator.claimLateDeactivation(token))
+        coordinator.finish(token)
+        let nextToken = coordinator.begin()
+        XCTAssertNotNil(nextToken)
+        if let nextToken {
+            coordinator.finish(nextToken)
+        }
+    }
+
     func testStartDictationPublishesInjectedProbeResult() async {
         let controller = DictationSessionControllerSpy(startStatus: .microphoneActive(peakPower: -18))
         let model = VoiceInputLaunchModel(sessionController: controller)

@@ -19,7 +19,12 @@ package struct TextInsertionPlanner: Sendable {
                 virtualContext.append(text)
                 shouldInsertSpaceBeforeText = true
             case .command(.insertText(let value)):
-                let opensQuote = value == "\"" && isOpeningQuoteContext(virtualContext)
+                let quote = value.count == 1 && (value.first == "\"" || value.first == "'")
+                    ? value.first
+                    : nil
+                let opensQuote = quote.map {
+                    isOpeningQuoteContext(virtualContext, quote: $0)
+                } ?? false
                 let shouldAddSpace = shouldAddSpaceBeforeInsertedCommand(
                     value,
                     in: virtualContext,
@@ -56,6 +61,9 @@ package struct TextInsertionPlanner: Sendable {
         if last == "\"" {
             return !isOpeningQuoteContext(String(context.dropLast()))
         }
+        if last == "'" {
+            return !isOpeningQuoteContext(String(context.dropLast()), quote: "'")
+        }
         return !last.isWhitespace && !last.isOpeningDelimiter && !last.isJapanesePunctuation
     }
 
@@ -87,8 +95,8 @@ package struct TextInsertionPlanner: Sendable {
             && !previous.isOpeningDelimiter
     }
 
-    private func isOpeningQuoteContext(_ context: String) -> Bool {
-        context.filter { $0 == "\"" }.count.isMultiple(of: 2)
+    private func isOpeningQuoteContext(_ context: String, quote: Character = "\"") -> Bool {
+        context.filter { $0 == quote }.count.isMultiple(of: 2)
     }
 
     private func deleteWordCount(in context: String) -> Int {
@@ -133,7 +141,7 @@ package struct TextInsertionPlanner: Sendable {
 private extension Character {
     var isSentenceClosingDelimiter: Bool {
         [
-            "\"", "’", "”", ")", "]", "}", "）", "］", "｝", "】", "〕", "〉", "》", "」", "』", "›", "»"
+            "\"", "'", "’", "”", ")", "]", "}", "）", "］", "｝", "】", "〕", "〉", "》", "」", "』", "›", "»"
         ].contains(self)
     }
 
@@ -142,6 +150,7 @@ private extension Character {
             || self == "["
             || self == "{"
             || self == "\""
+            || self == "'"
             || self == "“"
             || self == "‘"
             || self == "（"

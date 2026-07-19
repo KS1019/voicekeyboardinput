@@ -53,7 +53,9 @@ mac-build: generate
 		-destination 'generic/platform=macOS' \
 		-derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO
-	$(LSREGISTER) -u "$(MAC_APP_BUNDLE)"
+	# Launch Services cleanup is best-effort; it can fail when the unsigned
+	# build is not registered, while the macOS build itself succeeded.
+	$(LSREGISTER) -u "$(MAC_APP_BUNDLE)" >/dev/null 2>&1 || true
 
 .PHONY: mac-test
 mac-test: generate

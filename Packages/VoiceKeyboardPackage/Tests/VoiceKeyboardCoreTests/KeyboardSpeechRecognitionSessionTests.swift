@@ -188,6 +188,27 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         XCTAssertEqual(events.last?.actions, [.insertText("こんにちは、世界")])
     }
 
+    func testJapaneseFinalSegmentsDoNotGainAsciiSeparators() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "こんにちは", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "世界", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "ja-JP"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.dropFirst().map(\.actions), [
+            [.insertText("こんにちは")],
+            [.insertText("世界")]
+        ])
+    }
+
     func testUnsupportedCommandRemainsVisibleAsAnActionAndState() async {
         let finalUpdate = SpeechRecognitionUpdate(transcript: "command copy", isFinal: true)
         let service = FakeSpeechRecognitionService(initialUpdates: [finalUpdate])

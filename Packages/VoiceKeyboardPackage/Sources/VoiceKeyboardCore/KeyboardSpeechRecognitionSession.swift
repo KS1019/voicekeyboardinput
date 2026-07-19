@@ -182,6 +182,9 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         if last.isWhitespace || first.isWhitespace {
             return transcript + segment
         }
+        if last.isJapaneseTextLike && first.isJapaneseTextLike {
+            return transcript + segment
+        }
         return transcript + " " + segment
     }
 
@@ -243,6 +246,19 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
 
         flushPendingText()
         return result
+    }
+}
+
+private extension Character {
+    var isJapaneseTextLike: Bool {
+        unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3000...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xFF01...0xFF65:
+                return true
+            default:
+                return false
+            }
+        }
     }
 }
 

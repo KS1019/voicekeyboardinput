@@ -4,6 +4,72 @@ import Speech
 import VoiceKeyboardInterfaces
 import VoiceKeyboardModels
 
+private final class AudioPreparationMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = 0
+
+    var changeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+
+    func markChanged() {
+        lock.lock()
+        generation &+= 1
+        lock.unlock()
+    }
+}
+
+enum AudioSessionOperationStatus: Sendable {
+    case succeeded
+    case failed
+    case timedOut
+}
+
+final class DeferredAudioSessionOperation: @unchecked Sendable {
+    let task: Task<AudioSessionOperationStatus, Never>
+
+    init(session: AVAudioSession, activate: Bool) {
+        let coordinator = KeyboardAudioSessionOperationCoordinator.shared
+        coordinator.beginOperation()
+        task = Task.detached {
+            defer { coordinator.completeOperation() }
+            do {
+                if activate {
+                    try session.setCategory(
+                        .record,
+                        mode: .measurement,
+                        options: [.allowBluetoothHFP]
+                    )
+                    try session.setActive(true)
+                } else {
+                    try session.setActive(false, options: .notifyOthersOnDeactivation)
+                }
+                return .succeeded
+            } catch {
+                return .failed
+            }
+        }
+    }
+}
+
+final class DeferredAudioEngineOperation: @unchecked Sendable {
+    let task: Task<AudioSessionOperationStatus, Never>
+
+    init(engine: AVAudioEngine) {
+        task = Task.detached {
+            do {
+                engine.prepare()
+                try engine.start()
+                return .succeeded
+            } catch {
+                return .failed
+            }
+        }
+    }
+}
+
 actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     private final class LegacyAudioTapGate: @unchecked Sendable {
         private let condition = NSCondition()
@@ -11,24 +77,32 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         private var inFlightCallbacks = 0
 
         @discardableResult
-        func invalidate(timeout: TimeInterval = 1) -> Bool {
+        func invalidate() -> Bool {
             condition.lock()
             isActive = false
-            let deadline = Date().addingTimeInterval(timeout)
-            while inFlightCallbacks > 0 {
-                guard condition.wait(until: deadline) else { break }
-            }
             let didDrain = inFlightCallbacks == 0
             condition.unlock()
             return didDrain
         }
 
         func waitUntilDrained() {
+            _ = waitUntilDrained(timeout: nil)
+        }
+
+        @discardableResult
+        func waitUntilDrained(timeout: TimeInterval?) -> Bool {
             condition.lock()
+            let deadline = timeout.map { Date().addingTimeInterval($0) }
             while inFlightCallbacks > 0 {
-                condition.wait()
+                if let deadline {
+                    guard condition.wait(until: deadline) else { break }
+                } else {
+                    condition.wait()
+                }
             }
+            let didDrain = inFlightCallbacks == 0
             condition.unlock()
+            return didDrain
         }
 
         func append(
@@ -54,20 +128,53 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
     }
 
-    private final class DeferredLegacyRequestCleanup: @unchecked Sendable {
+    private final class DeferredLegacyAudioCleanup: @unchecked Sendable {
         private let gate: LegacyAudioTapGate
+        private let engine: AVAudioEngine
         private let request: SFSpeechAudioBufferRecognitionRequest
 
-        init(gate: LegacyAudioTapGate, request: SFSpeechAudioBufferRecognitionRequest) {
+        init(
+            gate: LegacyAudioTapGate,
+            engine: AVAudioEngine,
+            request: SFSpeechAudioBufferRecognitionRequest
+        ) {
             self.gate = gate
+            self.engine = engine
             self.request = request
         }
 
-        func schedule() {
-            DispatchQueue.global(qos: .utility).async { [self] in
-                gate.waitUntilDrained()
-                request.endAudio()
+        func waitForCompletion(timeout: TimeInterval) async -> Bool {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async { [self] in
+                    guard gate.waitUntilDrained(timeout: timeout) else {
+                        continuation.resume(returning: false)
+                        return
+                    }
+                    performTeardown()
+                    continuation.resume(returning: true)
+                }
             }
+        }
+
+        func quarantine() -> Task<Void, Never> {
+            Task.detached { [self] in
+                gate.waitUntilDrained()
+                performTeardown()
+            }
+        }
+
+        private func performTeardown() {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            request.endAudio()
+        }
+    }
+
+    private final class LegacyRequestHolder: @unchecked Sendable {
+        let request: SFSpeechAudioBufferRecognitionRequest
+
+        init(_ request: SFSpeechAudioBufferRecognitionRequest) {
+            self.request = request
         }
     }
 
@@ -84,18 +191,140 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
     }
 
+    private final class RecognitionOutputBridge: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: SpeechRecognitionUpdateStream.Continuation?
+        private var pendingUpdates: [SpeechRecognitionUpdate] = []
+        private var isFinished = false
+        private var terminalError: Error?
+
+        func attach(_ continuation: SpeechRecognitionUpdateStream.Continuation) {
+            lock.lock()
+            if isFinished {
+                let pendingUpdates = self.pendingUpdates
+                self.pendingUpdates.removeAll()
+                let terminalError = self.terminalError
+                lock.unlock()
+                pendingUpdates.forEach { continuation.yield($0) }
+                continuation.finish(throwing: terminalError)
+                return
+            }
+            self.continuation = continuation
+            let pendingUpdates = self.pendingUpdates
+            self.pendingUpdates.removeAll()
+            pendingUpdates.forEach { continuation.yield($0) }
+            lock.unlock()
+        }
+
+        func yield(_ update: SpeechRecognitionUpdate) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isFinished else { return }
+            if let continuation {
+                continuation.yield(update)
+            } else {
+                pendingUpdates.append(update)
+            }
+        }
+
+        func finish(throwing error: Error? = nil) {
+            lock.lock()
+            guard !isFinished else {
+                lock.unlock()
+                return
+            }
+            isFinished = true
+            terminalError = error
+            let continuation = self.continuation
+            if continuation != nil {
+                pendingUpdates.removeAll()
+            }
+            lock.unlock()
+            continuation?.finish(throwing: error)
+        }
+    }
+
+    private final class AnalyzerInputBridge: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
+        private var pendingInputs: [AnalyzerInput] = []
+        private var isFinished = false
+        private var terminalError: Error?
+
+        func attach(_ continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation) {
+            lock.lock()
+            if isFinished {
+                let pendingInputs = self.pendingInputs
+                self.pendingInputs.removeAll()
+                let terminalError = self.terminalError
+                lock.unlock()
+                pendingInputs.forEach { continuation.yield($0) }
+                continuation.finish(throwing: terminalError)
+                return
+            }
+            self.continuation = continuation
+            let pendingInputs = self.pendingInputs
+            self.pendingInputs.removeAll()
+            pendingInputs.forEach { continuation.yield($0) }
+            lock.unlock()
+        }
+
+        func yield(_ input: AnalyzerInput) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isFinished else { return }
+            if let continuation {
+                continuation.yield(input)
+            } else {
+                pendingInputs.append(input)
+            }
+        }
+
+        func finish(throwing error: Error? = nil) {
+            lock.lock()
+            guard !isFinished else {
+                lock.unlock()
+                return
+            }
+            isFinished = true
+            terminalError = error
+            let continuation = self.continuation
+            if continuation != nil {
+                pendingInputs.removeAll()
+            }
+            lock.unlock()
+            continuation?.finish(throwing: error)
+        }
+    }
+
     private final class AnalyzerAudioTapGate: @unchecked Sendable {
         private let condition = NSCondition()
         private var isActive = true
         private var inFlightCallbacks = 0
 
         @discardableResult
-        func invalidate(timeout: TimeInterval = 1) -> Bool {
+        func invalidate() -> Bool {
             condition.lock()
             isActive = false
-            let deadline = Date().addingTimeInterval(timeout)
+            let didDrain = inFlightCallbacks == 0
+            condition.unlock()
+            return didDrain
+        }
+
+        func waitUntilDrained() {
+            _ = waitUntilDrained(timeout: nil)
+        }
+
+        @discardableResult
+        func waitUntilDrained(timeout: TimeInterval?) -> Bool {
+            condition.lock()
+            let deadline = timeout.map { Date().addingTimeInterval($0) }
             while inFlightCallbacks > 0 {
-                guard condition.wait(until: deadline) else { break }
+                if let deadline {
+                    guard condition.wait(until: deadline) else { break }
+                } else {
+                    condition.wait()
+                }
             }
             let didDrain = inFlightCallbacks == 0
             condition.unlock()
@@ -122,6 +351,41 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
     }
 
+    private final class DeferredAnalyzerAudioCleanup: @unchecked Sendable {
+        private let gate: AnalyzerAudioTapGate
+        private let engine: AVAudioEngine
+
+        init(gate: AnalyzerAudioTapGate, engine: AVAudioEngine) {
+            self.gate = gate
+            self.engine = engine
+        }
+
+        func waitForCompletion(timeout: TimeInterval) async -> Bool {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async { [self] in
+                    guard gate.waitUntilDrained(timeout: timeout) else {
+                        continuation.resume(returning: false)
+                        return
+                    }
+                    performTeardown()
+                    continuation.resume(returning: true)
+                }
+            }
+        }
+
+        func quarantine() -> Task<Void, Never> {
+            Task.detached { [self] in
+                gate.waitUntilDrained()
+                performTeardown()
+            }
+        }
+
+        private func performTeardown() {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+    }
+
     private struct ActiveRun {
         let generation: UInt64
         var engine: AVAudioEngine?
@@ -132,22 +396,34 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         var analyzerTapGate: AnalyzerAudioTapGate?
         var pendingUpdate: SpeechRecognitionUpdate?
         var recognitionTasks: [Task<Void, Never>] = []
-        var inputContinuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
-        var outputContinuations: [SpeechRecognitionUpdateStream.Continuation] = []
+        var inputBridge: AnalyzerInputBridge?
+        var outputBridge: RecognitionOutputBridge?
         var legacyRequest: SFSpeechAudioBufferRecognitionRequest?
         var legacyTask: SFSpeechRecognitionTask?
         var legacyTapGate: LegacyAudioTapGate?
         var audioObservers: [NSObjectProtocol] = []
+        var isPreparingAudio = true
+        var preparationInvalidated = false
+        var preparationMonitor = AudioPreparationMonitor()
+        var preparationGeneration = 0
+        var preparationInputUID: String?
+        var preparationChannelCount: UInt32 = 0
+        var preparationSampleRate: Double = 0
         var stopping = false
     }
 
     private let diagnostics: KeyboardSpeechRecognitionDiagnostics
     private var nextGeneration: UInt64 = 0
     private var activeRun: ActiveRun?
+    private var lingeringAnalyzerCleanupTask: Task<Void, Never>?
+    private var lingeringAudioTeardownTask: Task<Void, Never>?
+    private var lingeringAudioSessionTask: Task<Void, Never>?
+    private var lingeringAudioEngineOperation: Task<AudioSessionOperationStatus, Never>?
+    private var pendingAudioSessionActivation: DeferredAudioSessionOperation?
+    private var audioSessionQuarantineScheduled = false
+    private var audioSessionOwnershipToken: UInt64?
+    private var terminalAudioQuarantineError: SpeechRecognitionError?
     private var cleanupTasks: [UInt64: Task<Void, Never>] = [:]
-    private var pendingInputFailures: [UInt64: SpeechRecognitionError] = [:]
-    private var pendingOutputFailures: [UInt64: SpeechRecognitionError] = [:]
-    private var pendingFailureExpiryTasks: [UInt64: Task<Void, Never>] = [:]
     private var activePermissionCancellation: (() -> Void)?
     private var activePermissionCancellationToken: AnyObject?
 
@@ -156,9 +432,33 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     }
 
     func start(locale: VoiceKeyboardLocale) async throws(SpeechRecognitionError) -> SpeechRecognitionUpdateStream {
+        if let terminalAudioQuarantineError {
+            throw terminalAudioQuarantineError
+        }
+        if KeyboardAudioSessionOperationCoordinator.shared.isTerminal {
+            throw .recognitionStartFailed(
+                "Audio session recovery did not complete; restart the keyboard extension."
+            )
+        }
+        if let lingeringAudioTeardownTask {
+            guard await waitForAnalyzerCleanup(lingeringAudioTeardownTask) else {
+                throw .recognitionStartFailed("A previous audio teardown is still finishing")
+            }
+            self.lingeringAudioTeardownTask = nil
+        }
+        if let lingeringAnalyzerCleanupTask {
+            guard await waitForAnalyzerCleanup(lingeringAnalyzerCleanupTask) else {
+                throw .recognitionStartFailed("A previous speech analyzer is still finishing")
+            }
+            self.lingeringAnalyzerCleanupTask = nil
+        }
         guard activeRun == nil else {
             throw .recognitionStartFailed("Speech recognition is already active")
         }
+        guard let ownershipToken = KeyboardAudioSessionOperationCoordinator.shared.acquireOwnership() else {
+            throw .recognitionStartFailed("Audio input is already in use")
+        }
+        audioSessionOwnershipToken = ownershipToken
         nextGeneration &+= 1
         let generation = nextGeneration
         activeRun = ActiveRun(generation: generation)
@@ -177,6 +477,133 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         } catch {
             await requestCleanup(generation: generation)
             throw error
+        }
+    }
+
+    private func activateAudioSession(
+        _ session: AVAudioSession,
+        generation: UInt64
+    ) async throws(SpeechRecognitionError) {
+        let operation = DeferredAudioSessionOperation(session: session, activate: true)
+        pendingAudioSessionActivation = operation
+        switch await waitForAudioSessionOperation(operation, timeout: 2) {
+        case .succeeded:
+            pendingAudioSessionActivation = nil
+            guard activeRun?.generation == generation,
+                  activeRun?.stopping == false else {
+                guard !audioSessionQuarantineScheduled else {
+                    throw .cancelled
+                }
+                let cleanup = DeferredAudioSessionOperation(session: session, activate: false)
+                switch await waitForAudioSessionOperation(cleanup, timeout: 2) {
+                case .succeeded:
+                    break
+                case .failed, .timedOut:
+                    KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
+                    terminalAudioQuarantineError = .recognitionStartFailed(
+                        "A stale audio session activation could not be reversed; restart the keyboard extension."
+                    )
+                    diagnostics.failure("stale-audio-session-activation", error: terminalAudioQuarantineError!)
+                    lingeringAudioSessionTask = Task { _ = await cleanup.task.value }
+                }
+                throw .cancelled
+            }
+            activeRun?.sessionActive = true
+        case .failed:
+            pendingAudioSessionActivation = nil
+            throw .audioSessionActivationFailed("Could not activate the audio session")
+        case .timedOut:
+            quarantineAudioSessionOperation(
+                operation,
+                session: session,
+                generation: generation
+            )
+            throw .audioSessionActivationFailed("Audio session activation timed out")
+        }
+    }
+
+    private func quarantineAudioSessionOperation(
+        _ operation: DeferredAudioSessionOperation,
+        session: AVAudioSession,
+        generation: UInt64
+    ) {
+        guard !audioSessionQuarantineScheduled else { return }
+        audioSessionQuarantineScheduled = true
+        KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
+        terminalAudioQuarantineError = .recognitionStartFailed(
+            "Audio session recovery did not complete; restart the keyboard extension."
+        )
+        diagnostics.failure("audio-session-quarantine", error: terminalAudioQuarantineError!)
+        let finalizer = Task.detached {
+            if await operation.task.value == .succeeded {
+                _ = await DeferredAudioSessionOperation(session: session, activate: false).task.value
+            }
+        }
+        lingeringAudioSessionTask = Task { await finalizer.value }
+    }
+
+    private func waitForAudioSessionOperation(
+        _ operation: DeferredAudioSessionOperation,
+        timeout: TimeInterval
+    ) async -> AudioSessionOperationStatus {
+        await withCheckedContinuation { continuation in
+            let gate = CleanupCompletionGate()
+            Task {
+                let status = await operation.task.value
+                guard gate.finish() else { return }
+                continuation.resume(returning: status)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                guard gate.finish() else { return }
+                continuation.resume(returning: .timedOut)
+            }
+        }
+    }
+
+    private func prepareAndStartAudioEngine(
+        _ engine: AVAudioEngine,
+        generation: UInt64
+    ) async throws(SpeechRecognitionError) {
+        let operation = DeferredAudioEngineOperation(engine: engine)
+        lingeringAudioEngineOperation = operation.task
+        switch await waitForAudioEngineOperation(operation, timeout: 2) {
+        case .succeeded:
+            lingeringAudioEngineOperation = nil
+            guard activeRun?.generation == generation,
+                  activeRun?.stopping == false else {
+                throw .cancelled
+            }
+            return
+        case .failed:
+            lingeringAudioEngineOperation = nil
+            throw .audioEngineStartFailed("Could not start the audio engine")
+        case .timedOut:
+            terminalAudioQuarantineError = .recognitionStartFailed(
+                "Audio engine startup did not complete; restart the keyboard extension."
+            )
+            diagnostics.failure("audio-engine-quarantine", error: terminalAudioQuarantineError!)
+            guard activeRun?.generation == generation else { return }
+            throw .audioEngineStartFailed("Audio engine startup timed out")
+        }
+    }
+
+    private func waitForAudioEngineOperation(
+        _ operation: DeferredAudioEngineOperation,
+        timeout: TimeInterval
+    ) async -> AudioSessionOperationStatus {
+        await withCheckedContinuation { continuation in
+            let gate = CleanupCompletionGate()
+            Task {
+                let status = await operation.task.value
+                guard gate.finish() else { return }
+                continuation.resume(returning: status)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                guard gate.finish() else { return }
+                continuation.resume(returning: .timedOut)
+            }
         }
     }
 
@@ -213,15 +640,15 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         let engine = AVAudioEngine()
         activeRun?.engine = engine
         let session = AVAudioSession.sharedInstance()
+        installAudioObservers(session: session, engine: engine, generation: generation)
         do {
-            try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
-            try session.setActive(true)
-            activeRun?.sessionActive = true
+            try await activateAudioSession(session, generation: generation)
             try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
             try await KeyboardAudioSessionRouting.waitForStableInput(
                 session: session,
                 engine: engine
             )
+            guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
             diagnostics.event("audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -240,6 +667,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             "channels": "\(naturalFormat.channelCount)",
             "sampleRate": "\(naturalFormat.sampleRate)"
         ])
+        activeRun?.preparationInputUID = session.currentRoute.inputs.first?.uid
+        activeRun?.preparationChannelCount = naturalFormat.channelCount
+        activeRun?.preparationSampleRate = naturalFormat.sampleRate
 
         do {
             try await analyzer.prepareToAnalyze(in: naturalFormat)
@@ -250,11 +680,15 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             throw mapped
         }
 
+        let inputBridge = AnalyzerInputBridge()
+        activeRun?.inputBridge = inputBridge
         let inputStream = AsyncThrowingStream<AnalyzerInput, Error> { continuation in
-            Task { self.setInputContinuation(continuation, generation: generation) }
+            inputBridge.attach(continuation)
         }
         let tapGate = AnalyzerAudioTapGate()
         activeRun?.analyzerTapGate = tapGate
+        let outputBridge = RecognitionOutputBridge()
+        activeRun?.outputBridge = outputBridge
         let converter: AnalyzerInputConverter
         do {
             converter = try await AnalyzerInputConverter.converter(compatibleWith: modules)
@@ -264,9 +698,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             diagnostics.failure("converter", error: mapped)
             throw mapped
         }
+        guard preparationAudioIsStable(session: session, engine: engine, generation: generation) else {
+            throw SpeechRecognitionError.audioSessionActivationFailed("Audio input changed during setup")
+        }
 
-        installAudioObservers(session: session, engine: engine, generation: generation)
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: naturalFormat) { [weak self] buffer, time in
+        guard VKInstallAudioInputTap(inputNode, { [weak self] buffer, time in
             guard let self else { return }
             do {
                 guard let inputs = try tapGate.perform({
@@ -285,13 +721,24 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     await self.finishInput(throwing: SpeechRecognitionError.recognitionFailed(description), generation: generation)
                 }
             }
+        }) else {
+            throw SpeechRecognitionError.audioSessionActivationFailed("Audio input tap could not be installed")
         }
         activeRun?.tapInstalled = true
 
         guard isCurrent(generation) else { throw .cancelled }
         do {
-            engine.prepare()
-            try engine.start()
+            try await prepareAndStartAudioEngine(engine, generation: generation)
+            guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
+            let preparationIsStable = preparationAudioIsStable(
+                session: session,
+                engine: engine,
+                generation: generation
+            )
+            activeRun?.isPreparingAudio = false
+            guard preparationIsStable else {
+                throw SpeechRecognitionError.audioSessionActivationFailed("Audio input changed during setup")
+            }
             diagnostics.event("audio-engine-started")
         } catch {
             let mapped = SpeechRecognitionError.audioEngineStartFailed(String(describing: error))
@@ -314,7 +761,10 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         return SpeechRecognitionUpdateStream { continuation in
-            Task { await self.addOutputContinuation(continuation, generation: generation) }
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.requestCleanup(generation: generation) }
+            }
+            outputBridge.attach(continuation)
             let resultTask = Task {
                 do {
                     for try await result in transcriber.results {
@@ -325,19 +775,19 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                             isFinal: result.isFinal,
                             inputLevel: nil
                         )
-                        await self.record(update, generation: generation)
-                        continuation.yield(
-                            update
-                        )
+                        self.record(update, generation: generation)
+                        outputBridge.yield(update)
                     }
-                    await self.flushPendingUpdate(generation: generation)
-                    continuation.finish()
+                    self.flushPendingUpdate(generation: generation)
+                    outputBridge.finish()
                 } catch {
                     guard self.isCurrent(generation) else { return }
-                    continuation.finish(throwing: SpeechRecognitionError.recognitionFailed(String(describing: error)))
+                    outputBridge.finish(
+                        throwing: SpeechRecognitionError.recognitionFailed(String(describing: error))
+                    )
                 }
             }
-            Task { await self.addRecognitionTask(resultTask, generation: generation) }
+            Task { self.addRecognitionTask(resultTask, generation: generation) }
         }
     }
 
@@ -364,15 +814,15 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activeRun?.engine = engine
         let session = AVAudioSession.sharedInstance()
         guard isCurrent(generation) else { throw .cancelled }
+        installAudioObservers(session: session, engine: engine, generation: generation)
         do {
-            try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
-            try session.setActive(true)
-            activeRun?.sessionActive = true
+            try await activateAudioSession(session, generation: generation)
             try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
             try await KeyboardAudioSessionRouting.waitForStableInput(
                 session: session,
                 engine: engine
             )
+            guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
             diagnostics.event("legacy-audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -392,6 +842,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             "sampleRate": "\(format.sampleRate)",
             "onDevice": "\(recognizer.supportsOnDeviceRecognition)"
         ])
+        activeRun?.preparationInputUID = session.currentRoute.inputs.first?.uid
+        activeRun?.preparationChannelCount = format.channelCount
+        activeRun?.preparationSampleRate = format.sampleRate
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -403,15 +856,30 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activeRun?.legacyRequest = request
         let tapGate = LegacyAudioTapGate()
         activeRun?.legacyTapGate = tapGate
-        installAudioObservers(session: session, engine: engine, generation: generation)
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
+        let outputBridge = RecognitionOutputBridge()
+        activeRun?.outputBridge = outputBridge
+        guard preparationAudioIsStable(session: session, engine: engine, generation: generation) else {
+            throw SpeechRecognitionError.audioSessionActivationFailed("Audio input changed during setup")
+        }
+        guard VKInstallAudioInputTap(inputNode, { buffer, _ in
             tapGate.append(buffer, to: request)
+        }) else {
+            throw SpeechRecognitionError.audioSessionActivationFailed("Audio input tap could not be installed")
         }
         activeRun?.tapInstalled = true
 
         do {
-            engine.prepare()
-            try engine.start()
+            try await prepareAndStartAudioEngine(engine, generation: generation)
+            guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
+            let preparationIsStable = preparationAudioIsStable(
+                session: session,
+                engine: engine,
+                generation: generation
+            )
+            activeRun?.isPreparingAudio = false
+            guard preparationIsStable else {
+                throw SpeechRecognitionError.audioSessionActivationFailed("Audio input changed during setup")
+            }
             diagnostics.event("legacy-audio-engine-started")
         } catch {
             let mapped = SpeechRecognitionError.audioEngineStartFailed(String(describing: error))
@@ -419,7 +887,10 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             throw mapped
         }
         return SpeechRecognitionUpdateStream { continuation in
-            Task { await self.addOutputContinuation(continuation, generation: generation) }
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.requestCleanup(generation: generation) }
+            }
+            outputBridge.attach(continuation)
             let task = recognizer.recognitionTask(with: request) { result, error in
                 if let result {
                     Task {
@@ -429,10 +900,10 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                             isFinal: result.isFinal,
                             inputLevel: nil
                         )
-                        await self.record(update, generation: generation)
-                        continuation.yield(update)
+                        self.record(update, generation: generation)
+                        outputBridge.yield(update)
                         if result.isFinal, self.isCurrent(generation) {
-                            continuation.finish()
+                            outputBridge.finish()
                         }
                     }
                 }
@@ -440,7 +911,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 if let error {
                     Task {
                         guard self.isCurrent(generation) else { return }
-                        continuation.finish(
+                        outputBridge.finish(
                             throwing: SpeechRecognitionError.recognitionFailed(String(describing: error))
                         )
                     }
@@ -484,65 +955,283 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         activeRun = run
 
         // Invalidate callbacks before releasing any resource.
-        run.inputContinuation?.finish()
-        run.inputContinuation = nil
-        run.outputContinuations.forEach { $0.finish() }
-        run.outputContinuations.removeAll()
+        run.inputBridge?.finish()
+        run.inputBridge = nil
+        run.outputBridge?.finish()
+        run.outputBridge = nil
         run.analyzerTask?.cancel()
         run.analyzerTask = nil
         run.recognitionTasks.forEach { $0.cancel() }
         run.recognitionTasks.removeAll()
-        run.analyzerTapGate?.invalidate()
+        let analyzerTapGate = run.analyzerTapGate
+        let analyzerTapDidDrain = analyzerTapGate?.invalidate() ?? true
         run.analyzerTapGate = nil
         run.legacyTask?.cancel()
         run.legacyTask = nil
-        if let legacyTapGate = run.legacyTapGate {
-            let didDrain = legacyTapGate.invalidate()
-            run.legacyTapGate = nil
-            if let legacyRequest = run.legacyRequest {
-                if didDrain {
-                    legacyRequest.endAudio()
-                } else {
-                    DeferredLegacyRequestCleanup(
-                        gate: legacyTapGate,
-                        request: legacyRequest
-                    ).schedule()
-                }
-            }
-        } else {
-            run.legacyRequest?.endAudio()
-        }
+        let legacyTapGate = run.legacyTapGate
+        let legacyTapDidDrain = legacyTapGate?.invalidate() ?? true
+        run.legacyTapGate = nil
+        let legacyRequest = run.legacyRequest
         run.legacyRequest = nil
         run.audioObservers.forEach { NotificationCenter.default.removeObserver($0) }
         run.audioObservers.removeAll()
-        if run.tapInstalled {
-            run.engine?.inputNode.removeTap(onBus: 0)
+        let pendingEngineOperation = lingeringAudioEngineOperation
+        let pendingSessionActivation = pendingAudioSessionActivation
+        let sessionQuarantineAlreadyScheduled = audioSessionQuarantineScheduled
+        var audioQuarantineTask: Task<Void, Never>?
+        if pendingSessionActivation != nil || pendingEngineOperation != nil {
+            terminalAudioQuarantineError = .recognitionStartFailed(
+                "Audio startup is still finishing; restart the keyboard extension."
+            )
+            diagnostics.failure("startup-quarantine", error: terminalAudioQuarantineError!)
         }
-        run.engine?.stop()
+        if let pendingSessionActivation {
+            audioSessionQuarantineScheduled = true
+            let engine = run.engine
+            let tapInstalled = run.tapInstalled
+            let legacyRequestHolder = legacyRequest.map(LegacyRequestHolder.init)
+            audioQuarantineTask = Task.detached {
+                let activationSucceeded = await pendingSessionActivation.task.value == .succeeded
+                if let engine {
+                    if let analyzerTapGate { analyzerTapGate.waitUntilDrained() }
+                    if let legacyTapGate { legacyTapGate.waitUntilDrained() }
+                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    engine.stop()
+                }
+                legacyRequestHolder?.request.endAudio()
+                if activationSucceeded && !sessionQuarantineAlreadyScheduled {
+                    let deactivation = DeferredAudioSessionOperation(
+                        session: AVAudioSession.sharedInstance(),
+                        activate: false
+                    )
+                    if await deactivation.task.value != .succeeded {
+                        KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
+                    }
+                }
+            }
+        } else if let engine = run.engine, let pendingEngineOperation {
+            let tapInstalled = run.tapInstalled
+            let legacyRequestHolder = legacyRequest.map(LegacyRequestHolder.init)
+            if let analyzerTapGate {
+                audioQuarantineTask = Task.detached {
+                    _ = await pendingEngineOperation.value
+                    analyzerTapGate.waitUntilDrained()
+                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    engine.stop()
+                }
+            } else if let legacyTapGate {
+                audioQuarantineTask = Task.detached {
+                    _ = await pendingEngineOperation.value
+                    legacyTapGate.waitUntilDrained()
+                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    engine.stop()
+                    legacyRequestHolder?.request.endAudio()
+                }
+            } else {
+                audioQuarantineTask = Task.detached {
+                    _ = await pendingEngineOperation.value
+                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    engine.stop()
+                    legacyRequestHolder?.request.endAudio()
+                }
+            }
+        } else if let engine = run.engine {
+            if let analyzerTapGate {
+                if analyzerTapDidDrain {
+                    if run.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    engine.stop()
+                } else {
+                    let cleanup = DeferredAnalyzerAudioCleanup(gate: analyzerTapGate, engine: engine)
+                    if await cleanup.waitForCompletion(timeout: 2) == false {
+                        audioQuarantineTask = cleanup.quarantine()
+                    }
+                }
+            } else if let legacyTapGate {
+                if legacyTapDidDrain {
+                    if run.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    engine.stop()
+                } else if let legacyRequest {
+                    let cleanup = DeferredLegacyAudioCleanup(
+                        gate: legacyTapGate,
+                        engine: engine,
+                        request: legacyRequest
+                    )
+                    if await cleanup.waitForCompletion(timeout: 2) == false {
+                        audioQuarantineTask = cleanup.quarantine()
+                    }
+                }
+            } else {
+                if run.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                engine.stop()
+            }
+        }
+        if pendingEngineOperation == nil && pendingSessionActivation == nil
+            && (legacyTapGate == nil || legacyTapDidDrain) {
+            legacyRequest?.endAudio()
+        }
         run.engine = nil
         if let analyzer = run.analyzer {
             await cancelAnalyzerWithTimeout(analyzer)
         }
         run.analyzer = nil
+        var quarantineTasks: [Task<Void, Never>] = []
+        if let audioQuarantineTask {
+            quarantineTasks.append(audioQuarantineTask)
+        }
+        if let analyzerCleanupTask = lingeringAnalyzerCleanupTask {
+            quarantineTasks.append(analyzerCleanupTask)
+        }
+        if let audioSessionCleanupTask = lingeringAudioSessionTask {
+            quarantineTasks.append(audioSessionCleanupTask)
+        }
+        if !quarantineTasks.isEmpty {
+            let generation = run.generation
+            let sessionActive = run.sessionActive
+            let combinedQuarantineTask = Task {
+                for task in quarantineTasks {
+                    await task.value
+                }
+            }
+            self.lingeringAudioTeardownTask = Task { [weak self] in
+                guard let self else {
+                    await combinedQuarantineTask.value
+                    return
+                }
+                if await self.waitForAnalyzerCleanup(combinedQuarantineTask) == false {
+                    await self.markTerminalAudioQuarantine(generation: generation)
+                    // Keep the terminal quarantine isolated from stopRecognition().
+                    // A blocked engine/tap must not make the extension's stop path
+                    // wait forever or race a session deactivation.
+                    Task { [weak self] in
+                        await combinedQuarantineTask.value
+                        guard let self else { return }
+                        await self.finishQuarantinedCleanup(
+                            generation: generation,
+                            sessionActive: sessionActive
+                        )
+                    }
+                    return
+                }
+                await self.finishQuarantinedCleanup(
+                    generation: generation,
+                    sessionActive: sessionActive
+                )
+            }
+            activeRun = run
+            return
+        }
         if run.sessionActive {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            await deactivateAudioSession(AVAudioSession.sharedInstance(), generation: run.generation)
+        }
+        if lingeringAudioSessionTask != nil {
+            return
+        }
+        if let ownershipToken = audioSessionOwnershipToken {
+            KeyboardAudioSessionOperationCoordinator.shared.releaseOwnership(ownershipToken)
+            audioSessionOwnershipToken = nil
         }
         activeRun = nil
     }
 
+    private func finishQuarantinedCleanup(
+        generation: UInt64,
+        sessionActive: Bool
+    ) async {
+        guard activeRun?.generation == generation else { return }
+        let hadLingeringAudioSessionTask = lingeringAudioSessionTask != nil
+        if sessionActive {
+            await deactivateAudioSession(AVAudioSession.sharedInstance(), generation: generation)
+        }
+        if !hadLingeringAudioSessionTask, lingeringAudioSessionTask != nil {
+            return
+        }
+        lingeringAudioSessionTask = nil
+        if let ownershipToken = audioSessionOwnershipToken {
+            KeyboardAudioSessionOperationCoordinator.shared.releaseOwnership(ownershipToken)
+            audioSessionOwnershipToken = nil
+        }
+        activeRun = nil
+        lingeringAudioTeardownTask = nil
+        lingeringAudioEngineOperation = nil
+        pendingAudioSessionActivation = nil
+        audioSessionQuarantineScheduled = false
+    }
+
+    private func deactivateAudioSession(
+        _ session: AVAudioSession,
+        generation: UInt64
+    ) async {
+        guard await KeyboardAudioSessionOperationCoordinator.shared.waitForPendingOperations(
+            timeout: 10
+        ) else {
+            KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
+            terminalAudioQuarantineError = .recognitionStartFailed(
+                "Audio route recovery did not complete; restart the keyboard extension."
+            )
+            diagnostics.failure("audio-route-quarantine", error: terminalAudioQuarantineError!)
+            return
+        }
+        let operation = DeferredAudioSessionOperation(session: session, activate: false)
+        switch await waitForAudioSessionOperation(operation, timeout: 2) {
+        case .succeeded:
+            return
+        case .failed, .timedOut:
+            KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
+            terminalAudioQuarantineError = .recognitionStartFailed(
+                "Audio session deactivation did not complete; restart the keyboard extension."
+            )
+            diagnostics.failure("audio-session-deactivation", error: terminalAudioQuarantineError!)
+            let lingeringTask = Task { _ = await operation.task.value }
+            lingeringAudioSessionTask = lingeringTask
+            Task { [weak self] in
+                await lingeringTask.value
+                await self?.finishLingeringAudioSessionCleanup(generation: generation)
+            }
+            guard activeRun?.generation == generation else { return }
+        }
+    }
+
+    private func finishLingeringAudioSessionCleanup(generation: UInt64) {
+        lingeringAudioSessionTask = nil
+        if let ownershipToken = audioSessionOwnershipToken {
+            KeyboardAudioSessionOperationCoordinator.shared.releaseOwnership(ownershipToken)
+            audioSessionOwnershipToken = nil
+        }
+        if activeRun?.generation == generation {
+            activeRun = nil
+        }
+    }
+
+    private func markTerminalAudioQuarantine(generation: UInt64) {
+        guard activeRun?.generation == generation else { return }
+        terminalAudioQuarantineError = .recognitionStartFailed(
+            "Audio teardown did not complete; restart the keyboard extension."
+        )
+        diagnostics.failure("audio-quarantine", error: terminalAudioQuarantineError!)
+    }
+
     private func cancelAnalyzerWithTimeout(_ analyzer: SpeechAnalyzer) async {
+        let cleanupTask = Task {
+            await analyzer.cancelAndFinishNow()
+        }
+        lingeringAnalyzerCleanupTask = cleanupTask
+        if await waitForAnalyzerCleanup(cleanupTask) {
+            lingeringAnalyzerCleanupTask = nil
+        }
+    }
+
+    private func waitForAnalyzerCleanup(_ cleanupTask: Task<Void, Never>) async -> Bool {
         await withCheckedContinuation { continuation in
             let gate = CleanupCompletionGate()
-            let cleanupTask = Task {
-                await analyzer.cancelAndFinishNow()
+            Task {
+                await cleanupTask.value
                 guard gate.finish() else { return }
-                continuation.resume()
+                continuation.resume(returning: true)
             }
             Task {
                 try? await Task.sleep(for: .seconds(2))
                 guard gate.finish() else { return }
-                cleanupTask.cancel()
-                continuation.resume()
+                continuation.resume(returning: false)
             }
         }
     }
@@ -553,12 +1242,15 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         generation: UInt64
     ) {
         guard isCurrent(generation) else { return }
+        let preparationMonitor = activeRun?.preparationMonitor
+        activeRun?.preparationGeneration = preparationMonitor?.changeCount ?? 0
         let notificationCenter = NotificationCenter.default
         let interruptionObserver = notificationCenter.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: session,
             queue: nil
-        ) { [weak self] notification in
+        ) { [weak self, preparationMonitor] notification in
+            preparationMonitor?.markChanged()
             guard let interruptionTypeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   let interruptionType = AVAudioSession.InterruptionType(rawValue: interruptionTypeValue),
                   interruptionType == .began else { return }
@@ -573,14 +1265,17 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             forName: AVAudioSession.routeChangeNotification,
             object: session,
             queue: nil
-        ) { [weak self] notification in
-            guard let reasonValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue),
-                  reason == .oldDeviceUnavailable || reason == .noSuitableRouteForCategory,
-                  session.currentRoute.inputs.isEmpty else { return }
+        ) { [weak self, preparationMonitor] _ in
+            preparationMonitor?.markChanged()
             Task {
-                await self?.failCurrentRun(
-                    .recognitionFailed("Audio input route is no longer available."),
+                guard let self,
+                      await self.routeChangeInvalidatesRun(
+                          session: session,
+                          engine: engine,
+                          generation: generation
+                      ) else { return }
+                await self.failCurrentRun(
+                    .recognitionFailed("Audio input route changed during recognition."),
                     generation: generation
                 )
             }
@@ -589,7 +1284,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
             queue: nil
-        ) { [weak self] _ in
+        ) { [weak self, preparationMonitor] _ in
+            preparationMonitor?.markChanged()
             Task {
                 await self?.failCurrentRun(
                     .recognitionFailed("Audio engine configuration changed."),
@@ -601,7 +1297,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             forName: AVAudioSession.mediaServicesWereLostNotification,
             object: session,
             queue: nil
-        ) { [weak self] _ in
+        ) { [weak self, preparationMonitor] _ in
+            preparationMonitor?.markChanged()
             Task {
                 await self?.failCurrentRun(
                     .recognitionFailed("Audio media services were lost."),
@@ -613,7 +1310,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             forName: AVAudioSession.mediaServicesWereResetNotification,
             object: session,
             queue: nil
-        ) { [weak self] _ in
+        ) { [weak self, preparationMonitor] _ in
+            preparationMonitor?.markChanged()
             Task {
                 await self?.failCurrentRun(
                     .recognitionFailed("Audio media services were reset."),
@@ -630,14 +1328,30 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         ]
     }
 
+    private func routeChangeInvalidatesRun(
+        session: AVAudioSession,
+        engine: AVAudioEngine,
+        generation: UInt64
+    ) -> Bool {
+        guard isCurrent(generation), activeRun?.isPreparingAudio == false else { return false }
+        return !preparationAudioIsStable(
+            session: session,
+            engine: engine,
+            generation: generation
+        )
+    }
+
     private func failCurrentRun(
         _ error: SpeechRecognitionError,
         generation: UInt64
     ) {
         guard isCurrent(generation) else { return }
-        cachePendingFailure(error, generation: generation)
-        activeRun?.inputContinuation?.finish(throwing: error)
-        activeRun?.outputContinuations.forEach { $0.finish(throwing: error) }
+        guard activeRun?.isPreparingAudio == false else {
+            activeRun?.preparationInvalidated = true
+            return
+        }
+        activeRun?.inputBridge?.finish(throwing: error)
+        activeRun?.outputBridge?.finish(throwing: error)
         Task { await requestCleanup(generation: generation) }
     }
 
@@ -657,90 +1371,41 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             isFinal: true,
             inputLevel: pendingUpdate.inputLevel?.value
         )
-        run.outputContinuations.forEach { $0.yield(finalUpdate) }
+        run.outputBridge?.yield(finalUpdate)
     }
 
     private func isCurrent(_ generation: UInt64) -> Bool {
         activeRun?.generation == generation && activeRun?.stopping == false
     }
 
-    private func setInputContinuation(
-        _ continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation,
+    private func preparationAudioIsStable(
+        session: AVAudioSession,
+        engine: AVAudioEngine,
         generation: UInt64
-    ) {
-        if let pendingFailure = pendingInputFailures.removeValue(forKey: generation) {
-            continuation.finish(throwing: pendingFailure)
-            clearPendingFailureExpiryIfUnused(generation: generation)
-            return
+    ) -> Bool {
+        guard let run = activeRun,
+              run.generation == generation,
+              !run.preparationInvalidated,
+              run.preparationMonitor.changeCount == run.preparationGeneration,
+              let input = session.currentRoute.inputs.first else {
+            return false
         }
-        guard isCurrent(generation) else {
-            continuation.finish()
-            return
-        }
-        activeRun?.inputContinuation = continuation
-    }
-
-    private func addOutputContinuation(
-        _ continuation: SpeechRecognitionUpdateStream.Continuation,
-        generation: UInt64
-    ) {
-        if let pendingFailure = pendingOutputFailures.removeValue(forKey: generation) {
-            continuation.finish(throwing: pendingFailure)
-            clearPendingFailureExpiryIfUnused(generation: generation)
-            return
-        }
-        guard isCurrent(generation) else {
-            continuation.finish()
-            return
-        }
-        activeRun?.outputContinuations.append(continuation)
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        return input.uid == run.preparationInputUID
+            && format.channelCount == run.preparationChannelCount
+            && format.sampleRate == run.preparationSampleRate
     }
 
     private func yield(_ input: AnalyzerInput, generation: UInt64) {
         guard isCurrent(generation) else { return }
-        activeRun?.inputContinuation?.yield(input)
+        activeRun?.inputBridge?.yield(input)
     }
 
     private func finishInput(throwing error: Error, generation: UInt64) {
         guard isCurrent(generation) else { return }
-        if let inputContinuation = activeRun?.inputContinuation {
-            inputContinuation.finish(throwing: error)
-        } else {
-            cachePendingFailure(
-                .recognitionFailed(String(describing: error)),
-                generation: generation
-            )
-        }
-    }
-
-    private func cachePendingFailure(
-        _ error: SpeechRecognitionError,
-        generation: UInt64
-    ) {
-        pendingInputFailures[generation] = error
-        pendingOutputFailures[generation] = error
-        pendingFailureExpiryTasks[generation]?.cancel()
-        pendingFailureExpiryTasks[generation] = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(10))
-            } catch {
-                return
-            }
-            await self?.expirePendingFailure(generation: generation)
-        }
-    }
-
-    private func clearPendingFailureExpiryIfUnused(generation: UInt64) {
-        guard pendingInputFailures[generation] == nil,
-              pendingOutputFailures[generation] == nil else { return }
-        pendingFailureExpiryTasks[generation]?.cancel()
-        pendingFailureExpiryTasks[generation] = nil
-    }
-
-    private func expirePendingFailure(generation: UInt64) {
-        pendingInputFailures[generation] = nil
-        pendingOutputFailures[generation] = nil
-        pendingFailureExpiryTasks[generation] = nil
+        activeRun?.inputBridge?.finish(
+            throwing: SpeechRecognitionError.recognitionFailed(String(describing: error))
+        )
     }
 
     private func setLegacyTask(_ task: SFSpeechRecognitionTask, generation: UInt64) {

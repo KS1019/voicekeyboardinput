@@ -4,6 +4,7 @@ import Foundation
 enum AppAudioSessionRoutingError: Error {
     case preferredInputDidNotBecomeCurrent
     case inputDidNotStabilize
+    case operationTimedOut
 }
 
 enum AppAudioSessionRouting {
@@ -15,7 +16,7 @@ enum AppAudioSessionRouting {
             return
         }
 
-        try session.setPreferredInput(preferredInput)
+        try await setPreferredInput(preferredInput, on: session)
         for _ in 0..<20 {
             if session.currentRoute.inputs.contains(where: { $0.uid == preferredInput.uid }) {
                 return
@@ -88,6 +89,54 @@ enum AppAudioSessionRouting {
         }
 
         throw AppAudioSessionRoutingError.inputDidNotStabilize
+    }
+
+    private static func setPreferredInput(
+        _ input: AVAudioSessionPortDescription,
+        on session: AVAudioSession
+    ) async throws {
+        let coordinator = AppAudioSessionOperationCoordinator.shared
+        coordinator.beginSessionOperation()
+        let operation = Task.detached { () -> Bool in
+            defer { coordinator.completeSessionOperation() }
+            do {
+                try session.setPreferredInput(input)
+                return true
+            } catch {
+                return false
+            }
+        }
+        let result: Bool? = await withCheckedContinuation { continuation in
+            let gate = AppAudioSessionRoutingCompletionGate()
+            Task {
+                let result = await operation.value
+                guard gate.finish() else { return }
+                continuation.resume(returning: result)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                guard gate.finish() else { return }
+                continuation.resume(returning: nil)
+            }
+        }
+        guard let result else {
+            coordinator.markTerminal()
+            throw AppAudioSessionRoutingError.operationTimedOut
+        }
+        guard result else { throw AppAudioSessionRoutingError.preferredInputDidNotBecomeCurrent }
+    }
+}
+
+private final class AppAudioSessionRoutingCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isFinished = false
+
+    func finish() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isFinished else { return false }
+        isFinished = true
+        return true
     }
 }
 

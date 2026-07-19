@@ -23,6 +23,7 @@ targets:
     platform: iOS
     sources:
       - VoiceKeyboardInputApp
+      - VoiceKeyboardAudioSupport
       # Keep UIKit source-shared while it is small and extension-safe.
       # Promote to an iOS-only local framework only when app/extension UI APIs need an explicit module boundary.
       - VoiceKeyboardUIKit
@@ -64,6 +65,7 @@ targets:
         DEVELOPMENT_TEAM: 47JGA6NAP2
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput
         PROVISIONING_PROFILE_SPECIFIER: ""
+        SWIFT_OBJC_BRIDGING_HEADER: VoiceKeyboardAudioSupport/VoiceKeyboardAudioExceptionGuard.h
 
   VoiceKeyboardExtension:
     type: app-extension
@@ -74,6 +76,7 @@ targets:
       - path: VoiceKeyboardUIKit
         excludes:
           - KeyboardRootViewPreview.swift
+      - VoiceKeyboardAudioSupport
       - VoiceKeyboardExtension
     dependencies:
       - package: VoiceKeyboardPackage
@@ -113,6 +116,7 @@ targets:
         DEVELOPMENT_TEAM: 47JGA6NAP2
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.keyboard
         APPLICATION_EXTENSION_API_ONLY: YES
+        SWIFT_OBJC_BRIDGING_HEADER: VoiceKeyboardAudioSupport/VoiceKeyboardAudioExceptionGuard.h
 
   VoiceKeyboardMenuBar:
     type: application
@@ -144,6 +148,7 @@ targets:
       - target: VoiceKeyboardMenuBar
     settings:
       base:
+        MACOSX_DEPLOYMENT_TARGET: 14.0
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.menubartests
 
   VoiceKeyboardInputPreviewTests:

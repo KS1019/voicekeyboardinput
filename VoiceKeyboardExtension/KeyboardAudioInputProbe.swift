@@ -23,21 +23,67 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
         let engine = AVAudioEngine()
         var sessionIsActive = false
         var tapIsInstalled = false
+        var lingeringAudioSessionOperation: DeferredAudioSessionOperation?
+        var lingeringAudioEngineOperation: DeferredAudioEngineOperation?
         let tapGate = AudioInputProbeTapGate()
+        let coordinator = KeyboardAudioSessionOperationCoordinator.shared
+        guard let ownershipToken = coordinator.acquireOwnership() else {
+            throw .unavailableInCurrentProcess
+        }
 
-        do {
-            try session.setCategory(.record, mode: .measurement, options: [.allowBluetoothHFP])
-            try session.setActive(true)
-            sessionIsActive = true
-            defer {
-                tapGate.invalidate()
-                if tapIsInstalled {
+        defer {
+            tapGate.invalidate()
+            let tapWasInstalled = tapIsInstalled
+            let sessionWasActive = sessionIsActive
+            let audioSessionOperation = lingeringAudioSessionOperation
+            let audioEngineOperation = lingeringAudioEngineOperation
+            Task.detached {
+                guard await coordinator.waitForPendingOperations(
+                    timeout: 10
+                ) else {
+                    coordinator.markTerminal()
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
+                }
+                if let audioSessionOperation {
+                    if await audioSessionOperation.task.value == .succeeded {
+                        _ = await DeferredAudioSessionOperation(session: session, activate: false).task.value
+                    }
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
+                }
+                if let audioEngineOperation {
+                    _ = await audioEngineOperation.task.value
+                }
+                if tapWasInstalled {
                     engine.inputNode.removeTap(onBus: 0)
                 }
                 engine.stop()
-                if sessionIsActive {
-                    try? session.setActive(false, options: .notifyOthersOnDeactivation)
+                guard sessionWasActive else {
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
                 }
+                let deactivation = DeferredAudioSessionOperation(session: session, activate: false)
+                guard await waitForKeyboardAudioProbeOperation(deactivation.task, timeout: 2) == .succeeded else {
+                    coordinator.markTerminal()
+                    coordinator.releaseOwnership(ownershipToken)
+                    return
+                }
+                coordinator.releaseOwnership(ownershipToken)
+            }
+        }
+
+        do {
+            let activation = DeferredAudioSessionOperation(session: session, activate: true)
+            switch await waitForKeyboardAudioProbeOperation(activation.task, timeout: 2) {
+            case .succeeded:
+                sessionIsActive = true
+            case .failed:
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            case .timedOut:
+                lingeringAudioSessionOperation = activation
+                coordinator.markTerminal()
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
             try await KeyboardAudioSessionRouting.selectPreferredInputIfAvailable(session)
             try await KeyboardAudioSessionRouting.waitForStableInput(
@@ -56,13 +102,24 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             }
 
             let peakTracker = KeyboardAudioPeakTracker()
-            inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
+            guard VKInstallAudioInputTap(inputNode, { buffer, _ in
                 tapGate.observe(buffer, using: peakTracker)
+            }) else {
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
             tapIsInstalled = true
 
-            engine.prepare()
-            try engine.start()
+            let audioEngineOperation = DeferredAudioEngineOperation(engine: engine)
+            switch await waitForKeyboardAudioProbeOperation(audioEngineOperation.task, timeout: 2) {
+            case .succeeded:
+                break
+            case .failed:
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            case .timedOut:
+                lingeringAudioEngineOperation = audioEngineOperation
+                coordinator.markTerminal()
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            }
             try await Task.sleep(for: .seconds(duration.seconds))
 
             guard session.isInputAvailable,
@@ -79,6 +136,25 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
         }
     }
 
+    private func waitForKeyboardAudioProbeOperation(
+        _ operation: Task<AudioSessionOperationStatus, Never>,
+        timeout: TimeInterval
+    ) async -> AudioSessionOperationStatus {
+        await withCheckedContinuation { continuation in
+            let gate = KeyboardAudioProbeCompletionGate()
+            Task {
+                let status = await operation.value
+                guard gate.finish() else { return }
+                continuation.resume(returning: status)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                guard gate.finish() else { return }
+                continuation.resume(returning: .timedOut)
+            }
+        }
+    }
+
     private static func result(
         _ microphoneCaptureAvailable: Bool,
         duration: AudioCaptureProbeDuration,
@@ -92,6 +168,19 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             preconditionFailure("Invalid audio input probe result")
         }
         return result
+    }
+}
+
+private final class KeyboardAudioProbeCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isFinished = false
+
+    func finish() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isFinished else { return false }
+        isFinished = true
+        return true
     }
 }
 
