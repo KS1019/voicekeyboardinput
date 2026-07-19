@@ -2,6 +2,8 @@ DERIVED_DATA := .build/XcodeDerivedData
 PACKAGE_DIR := Packages/VoiceKeyboardPackage
 PACKAGE_SWIFT_DIRS := $(PACKAGE_DIR)/Sources $(PACKAGE_DIR)/Tests
 MAC_APP_SWIFT_DIRS := VoiceKeyboardMenuBar
+MAC_APP_BUNDLE := $(DERIVED_DATA)/Build/Products/Debug/VoiceKeyboardMenuBar.app
+LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister
 PREVIEW_DESTINATION ?= platform=iOS Simulator,name=iPhone 17
 SIMULATOR_DEVICE ?= booted
 APP_BUNDLE_ID := com.ks1019.voicekeyboardinput
@@ -51,6 +53,7 @@ mac-build: generate
 		-destination 'generic/platform=macOS' \
 		-derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO
+	$(LSREGISTER) -u "$(MAC_APP_BUNDLE)"
 
 .PHONY: mac-test
 mac-test: generate
