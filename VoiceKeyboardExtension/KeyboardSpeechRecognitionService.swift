@@ -305,6 +305,24 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
     }
 
+    private final class AnalyzerInputDeliveryQueue: @unchecked Sendable {
+        private let queue = DispatchQueue(
+            label: "com.ks1019.voicekeyboardinput.analyzer-input",
+            qos: .userInitiated
+        )
+        private let sink: @Sendable (AnalyzerInput) -> Void
+
+        init(sink: @escaping @Sendable (AnalyzerInput) -> Void) {
+            self.sink = sink
+        }
+
+        func enqueue(_ inputs: [AnalyzerInput]) {
+            queue.async { [sink] in
+                inputs.forEach(sink)
+            }
+        }
+    }
+
     private final class AnalyzerAudioTapGate: @unchecked Sendable {
         private let condition = NSCondition()
         private var isActive = true
@@ -413,6 +431,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         var audioObservers: [NSObjectProtocol] = []
         var isPreparingAudio = true
         var preparationInvalidated = false
+        var preparationFailure: SpeechRecognitionError?
         var preparationMonitor = AudioPreparationMonitor()
         var preparationGeneration = 0
         var preparationInputUID: String?
@@ -481,11 +500,42 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             case .legacyAudioBuffer:
                 return try await startLegacyAudioBufferRecognition(locale: locale, generation: generation)
             case .speechAnalyzer:
-                return try await startSpeechAnalyzerRecognition(locale: locale, generation: generation)
+                do {
+                    return try await startSpeechAnalyzerRecognition(locale: locale, generation: generation)
+                } catch let error {
+                    guard error == .speechRecognizerUnavailable else {
+                        throw error
+                    }
+
+                    // SpeechAnalyzer availability and locale support are
+                    // runtime capabilities, not OS-version guarantees.
+                    // Recreate the audio run before trying the legacy path.
+                    await requestCleanup(generation: generation)
+                    guard terminalAudioQuarantineError == nil,
+                          !KeyboardAudioSessionOperationCoordinator.shared.isTerminal,
+                          let ownershipToken = KeyboardAudioSessionOperationCoordinator.shared.acquireOwnership()
+                    else {
+                        throw SpeechRecognitionError.speechRecognizerUnavailable
+                    }
+                    audioSessionOwnershipToken = ownershipToken
+                    nextGeneration &+= 1
+                    let fallbackGeneration = nextGeneration
+                    activeRun = ActiveRun(generation: fallbackGeneration)
+                    diagnostics.event("strategy-fallback", metadata: [
+                        "value": "legacyAudioBuffer"
+                    ])
+                    return try await startLegacyAudioBufferRecognition(
+                        locale: locale,
+                        generation: fallbackGeneration
+                    )
+                }
             }
         } catch {
-            await requestCleanup(generation: generation)
-            throw error
+            await requestCleanup(generation: activeRun?.generation ?? generation)
+            if let error = error as? SpeechRecognitionError {
+                throw error
+            }
+            throw SpeechRecognitionError.recognitionStartFailed(String(describing: error))
         }
     }
 
@@ -663,6 +713,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 engine: engine,
                 generation: generation
             )
+            if let preparationFailure = activeRun?.preparationFailure {
+                throw preparationFailure
+            }
             diagnostics.event("audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -696,6 +749,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
 
         let inputBridge = AnalyzerInputBridge()
         activeRun?.inputBridge = inputBridge
+        let inputDeliveryQueue = AnalyzerInputDeliveryQueue(sink: inputBridge.yield)
         let inputStream = AsyncThrowingStream<AnalyzerInput, Error>(
             bufferingPolicy: .bufferingNewest(32)
         ) { continuation in
@@ -726,11 +780,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 }) else {
                     return
                 }
-                Task {
-                    for input in inputs {
-                        await self.yield(input, generation: generation)
-                    }
-                }
+                inputDeliveryQueue.enqueue(inputs)
             } catch {
                 let description = String(describing: error)
                 Task {
@@ -853,6 +903,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 engine: engine,
                 generation: generation
             )
+            if let preparationFailure = activeRun?.preparationFailure {
+                throw preparationFailure
+            }
             diagnostics.event("legacy-audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -1288,7 +1341,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             Task {
                 await self?.failCurrentRun(
                     .recognitionFailed("Audio input was interrupted."),
-                    generation: generation
+                    generation: generation,
+                    latchDuringPreparation: true
                 )
             }
         }
@@ -1333,7 +1387,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             Task {
                 await self?.failCurrentRun(
                     .recognitionFailed("Audio media services were lost."),
-                    generation: generation
+                    generation: generation,
+                    latchDuringPreparation: true
                 )
             }
         }
@@ -1346,7 +1401,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             Task {
                 await self?.failCurrentRun(
                     .recognitionFailed("Audio media services were reset."),
-                    generation: generation
+                    generation: generation,
+                    latchDuringPreparation: true
                 )
             }
         }
@@ -1374,13 +1430,14 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
 
     private func failCurrentRun(
         _ error: SpeechRecognitionError,
-        generation: UInt64
+        generation: UInt64,
+        latchDuringPreparation: Bool = false
     ) {
         guard isCurrent(generation) else { return }
         guard activeRun?.isPreparingAudio == false else {
-            // Setup deliberately changes the route and can reconfigure the
-            // engine. The post-routing stable baseline and format validation
-            // decide whether setup succeeded.
+            guard latchDuringPreparation else { return }
+            activeRun?.preparationInvalidated = true
+            activeRun?.preparationFailure = error
             return
         }
         activeRun?.inputBridge?.finish(throwing: error)
@@ -1395,6 +1452,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     ) {
         guard isCurrent(generation), var run = activeRun,
               run.generation == generation else { return }
+        guard run.preparationFailure == nil else { return }
         let format = engine.inputNode.outputFormat(forBus: 0)
         run.preparationInvalidated = false
         run.preparationGeneration = run.preparationMonitor.changeCount
@@ -1435,6 +1493,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         guard let run = activeRun,
               run.generation == generation,
               !run.preparationInvalidated,
+              run.preparationFailure == nil,
               run.preparationMonitor.changeCount == run.preparationGeneration,
               let input = session.currentRoute.inputs.first else {
             return false

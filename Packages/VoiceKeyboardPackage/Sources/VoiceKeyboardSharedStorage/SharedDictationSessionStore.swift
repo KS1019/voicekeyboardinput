@@ -5,6 +5,7 @@ public final class SharedDictationSessionStore {
     private enum Key {
         static let command = "sharedDictation.session.command"
         static let status = "sharedDictation.session.status"
+        static let statusPrefix = "sharedDictation.session.status."
         static let heartbeat = "sharedDictation.session.heartbeat"
     }
 
@@ -43,10 +44,20 @@ public final class SharedDictationSessionStore {
 
     public func saveStatus(_ status: SharedDictationSessionStatus) {
         save(status, forKey: Key.status)
+        if let commandToken = status.commandToken {
+            save(status, forKey: Key.statusPrefix + commandToken)
+        }
     }
 
     public func status() -> SharedDictationSessionStatus {
         load(SharedDictationSessionStatus.self, forKey: Key.status) ?? .idle
+    }
+
+    public func status(forCommandToken commandToken: String) -> SharedDictationSessionStatus {
+        load(
+            SharedDictationSessionStatus.self,
+            forKey: Key.statusPrefix + commandToken
+        ) ?? (status().commandToken == commandToken ? status() : .idle)
     }
 
     public func saveHeartbeat(_ heartbeat: SharedDictationAppHeartbeat) {
@@ -65,5 +76,23 @@ public final class SharedDictationSessionStore {
     private func load<Value: Decodable>(_ type: Value.Type, forKey key: String) -> Value? {
         guard let data = defaults.data(forKey: key) else { return nil }
         return try? decoder.decode(type, from: data)
+    }
+}
+
+private extension SharedDictationSessionStatus {
+    var commandToken: String? {
+        switch self {
+        case let .commandPending(token, _),
+             let .commandAcknowledged(token, _),
+             let .recording(token, _, _),
+             let .transcribing(token),
+             let .transcriptReady(token):
+            return token
+        case let .failed(token, _),
+             let .cancelled(token):
+            return token
+        case .idle:
+            return nil
+        }
     }
 }

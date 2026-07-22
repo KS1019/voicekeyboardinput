@@ -462,6 +462,10 @@ final class AppSpeechDictationRun {
         complete(.failure(CancellationError()))
     }
 
+    func finishForUserStop() {
+        finishWithLatestTranscript()
+    }
+
     private func installAudioSessionObservers() {
         let notificationCenter = NotificationCenter.default
         let preparationMonitor = self.preparationMonitor

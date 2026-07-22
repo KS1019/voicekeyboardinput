@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import VoiceKeyboardModels
 
 public struct SharedDictationTranscript: Codable, Equatable, Sendable {
@@ -31,7 +32,7 @@ public struct SharedDictationTranscript: Codable, Equatable, Sendable {
         commandToken: String,
         text: String,
         createdAt: Date = Date(),
-        expiryInterval: TimeInterval = 10
+        expiryInterval: TimeInterval = 300
     ) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return nil }
@@ -63,48 +64,97 @@ public struct SharedDictationTranscript: Codable, Equatable, Sendable {
 public final class SharedDictationTranscriptStore {
     public static let appGroupIdentifier = "group.com.ks1019.voicekeyboardinput"
 
+    private struct DeliveryLease: Codable {
+        let transcriptToken: String
+        let expiresAt: Date
+    }
+
     private enum Key {
         static let transcriptRecord = "sharedDictation.transcriptRecord"
         static let consumedToken = "sharedDictation.consumedToken"
+        static let deliveryLease = "sharedDictation.deliveryLease"
     }
 
+    private static let deliveryLeaseInterval: TimeInterval = 5
+    private static let inProcessLock = NSLock()
+
     private let defaults: UserDefaults
+    private let lockFileDescriptor: Int32?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
     public init(defaults: UserDefaults) {
         self.defaults = defaults
+        self.lockFileDescriptor = nil
+    }
+
+    private init(defaults: UserDefaults, lockFileDescriptor: Int32) {
+        self.defaults = defaults
+        self.lockFileDescriptor = lockFileDescriptor
+    }
+
+    deinit {
+        if let lockFileDescriptor {
+            close(lockFileDescriptor)
+        }
     }
 
     public static func appGroupStore() -> SharedDictationTranscriptStore? {
-        guard let defaults = UserDefaults(suiteName: appGroupIdentifier) else { return nil }
-        return SharedDictationTranscriptStore(defaults: defaults)
+        guard let defaults = UserDefaults(suiteName: appGroupIdentifier),
+              let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: appGroupIdentifier
+              ) else { return nil }
+        let lockFileURL = containerURL.appendingPathComponent(
+            "SharedDictationTranscriptStore.lock",
+            isDirectory: false
+        )
+        let lockFileDescriptor = open(
+            lockFileURL.path,
+            O_CREAT | O_RDWR,
+            S_IRUSR | S_IWUSR
+        )
+        guard lockFileDescriptor >= 0 else { return nil }
+        return SharedDictationTranscriptStore(
+            defaults: defaults,
+            lockFileDescriptor: lockFileDescriptor
+        )
     }
 
     public func save(_ transcript: SharedDictationTranscript) {
-        saveRecord(transcript)
+        withExclusiveAccess {
+            saveRecord(transcript)
+            if let lease = loadDeliveryLease(), lease.transcriptToken != transcript.token {
+                defaults.removeObject(forKey: Key.deliveryLease)
+            }
+        }
     }
 
     public func latestTranscript() -> SharedDictationTranscript? {
-        loadRecord()
+        withExclusiveAccess {
+            loadRecord()
+        }
     }
 
     public func latestTranscript(forSessionID sessionID: String) -> SharedDictationTranscript? {
-        guard let transcript = latestTranscript(), transcript.sessionID == sessionID else {
-            return nil
+        withExclusiveAccess {
+            guard let transcript = loadRecord(), transcript.sessionID == sessionID else {
+                return nil
+            }
+            return transcript
         }
-        return transcript
     }
 
     public func consumeLatestTranscript(
         afterLastConsumedToken lastConsumedToken: String?,
         now: Date = Date()
     ) -> SharedDictationTranscript? {
-        loadMatchingTranscript(
-            forSessionID: nil,
-            afterLastConsumedToken: lastConsumedToken,
-            now: now
-        )
+        withExclusiveAccess {
+            loadMatchingTranscript(
+                forSessionID: nil,
+                afterLastConsumedToken: lastConsumedToken,
+                now: now
+            )
+        }
     }
 
     public func consumeLatestTranscript(
@@ -112,11 +162,13 @@ public final class SharedDictationTranscriptStore {
         afterLastConsumedToken lastConsumedToken: String?,
         now: Date = Date()
     ) -> SharedDictationTranscript? {
-        loadMatchingTranscript(
-            forSessionID: sessionID,
-            afterLastConsumedToken: lastConsumedToken,
-            now: now
-        )
+        withExclusiveAccess {
+            loadMatchingTranscript(
+                forSessionID: sessionID,
+                afterLastConsumedToken: lastConsumedToken,
+                now: now
+            )
+        }
     }
 
     private func loadMatchingTranscript(
@@ -124,7 +176,7 @@ public final class SharedDictationTranscriptStore {
         afterLastConsumedToken lastConsumedToken: String?,
         now: Date
     ) -> SharedDictationTranscript? {
-        guard let transcript = latestTranscript(),
+        guard let transcript = loadRecord(),
               sessionID == nil || transcript.sessionID == sessionID,
               !transcript.isConsumed,
               !transcript.isExpired(at: now) else { return nil }
@@ -136,14 +188,13 @@ public final class SharedDictationTranscriptStore {
         afterLastConsumedToken lastConsumedToken: String?,
         now: Date = Date()
     ) -> SharedDictationTranscript? {
-        guard let transcript = consumeLatestTranscript(
-            afterLastConsumedToken: lastConsumedToken,
-            now: now
-        ) else {
-            return nil
+        withExclusiveAccess {
+            claimMatchingTranscript(
+                forSessionID: nil,
+                afterLastConsumedToken: lastConsumedToken,
+                now: now
+            )
         }
-        markConsumed(transcript)
-        return transcript
     }
 
     public func claimLatestTranscript(
@@ -151,33 +202,70 @@ public final class SharedDictationTranscriptStore {
         afterLastConsumedToken lastConsumedToken: String?,
         now: Date = Date()
     ) -> SharedDictationTranscript? {
-        guard let transcript = consumeLatestTranscript(
+        withExclusiveAccess {
+            claimMatchingTranscript(
+                forSessionID: sessionID,
+                afterLastConsumedToken: lastConsumedToken,
+                now: now
+            )
+        }
+    }
+
+    private func claimMatchingTranscript(
+        forSessionID sessionID: String?,
+        afterLastConsumedToken lastConsumedToken: String?,
+        now: Date
+    ) -> SharedDictationTranscript? {
+        guard let transcript = loadMatchingTranscript(
             forSessionID: sessionID,
             afterLastConsumedToken: lastConsumedToken,
             now: now
-        ) else {
+        ) else { return nil }
+        if let lease = loadDeliveryLease(),
+           lease.transcriptToken == transcript.token,
+           now < lease.expiresAt {
             return nil
         }
-        markConsumed(transcript)
+        saveDeliveryLease(DeliveryLease(
+            transcriptToken: transcript.token,
+            expiresAt: now.addingTimeInterval(Self.deliveryLeaseInterval)
+        ))
         return transcript
     }
 
     public func markConsumed(_ transcript: SharedDictationTranscript) {
-        guard let current = loadRecord(), current.token == transcript.token else { return }
-        defaults.set(current.token, forKey: Key.consumedToken)
+        withExclusiveAccess {
+            guard let current = loadRecord(), current.token == transcript.token else { return }
+            defaults.set(current.token, forKey: Key.consumedToken)
+            if loadDeliveryLease()?.transcriptToken == current.token {
+                defaults.removeObject(forKey: Key.deliveryLease)
+            }
+        }
     }
 
     public func lastConsumedToken() -> String? {
-        if let consumedToken = defaults.string(forKey: Key.consumedToken) {
-            return consumedToken
+        withExclusiveAccess {
+            if let consumedToken = defaults.string(forKey: Key.consumedToken) {
+                return consumedToken
+            }
+            guard let transcript = loadRecord(), transcript.isConsumed else { return nil }
+            return transcript.token
         }
-        guard let transcript = loadRecord(), transcript.isConsumed else { return nil }
-        return transcript.token
     }
 
     private func saveRecord(_ transcript: SharedDictationTranscript) {
         guard let data = try? encoder.encode(transcript) else { return }
         defaults.set(data, forKey: Key.transcriptRecord)
+    }
+
+    private func saveDeliveryLease(_ lease: DeliveryLease) {
+        guard let data = try? encoder.encode(lease) else { return }
+        defaults.set(data, forKey: Key.deliveryLease)
+    }
+
+    private func loadDeliveryLease() -> DeliveryLease? {
+        guard let data = defaults.data(forKey: Key.deliveryLease) else { return nil }
+        return try? decoder.decode(DeliveryLease.self, from: data)
     }
 
     private func loadRecord() -> SharedDictationTranscript? {
@@ -195,5 +283,34 @@ public final class SharedDictationTranscriptStore {
             expiresAt: transcript.expiresAt,
             isConsumed: true
         )
+    }
+
+    private func withExclusiveAccess<Result>(_ body: () -> Result) -> Result {
+        Self.inProcessLock.lock()
+        defer { Self.inProcessLock.unlock() }
+
+        let hasFileLock = acquireFileLock()
+        defer {
+            if hasFileLock, let lockFileDescriptor {
+                flock(lockFileDescriptor, LOCK_UN)
+            }
+        }
+
+        if lockFileDescriptor != nil {
+            defaults.synchronize()
+        }
+        let result = body()
+        if lockFileDescriptor != nil {
+            defaults.synchronize()
+        }
+        return result
+    }
+
+    private func acquireFileLock() -> Bool {
+        guard let lockFileDescriptor else { return false }
+        while flock(lockFileDescriptor, LOCK_EX) != 0 {
+            guard errno == EINTR else { return false }
+        }
+        return true
     }
 }

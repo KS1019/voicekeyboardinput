@@ -51,7 +51,8 @@ final class VoiceCommandParserTests: XCTestCase {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         XCTAssertTrue(parser.hasIncompleteCommandPrefix("改"))
-        XCTAssertTrue(parser.hasIncompleteCommandPrefix("こんにちは読"))
+        XCTAssertTrue(parser.hasIncompleteCommandPrefix("こんにちは／読"))
+        XCTAssertFalse(parser.hasIncompleteCommandPrefix("こんにちは読"))
         XCTAssertFalse(parser.hasIncompleteCommandPrefix("改行"))
         XCTAssertFalse(parser.hasIncompleteCommandPrefix("こんにちは読点"))
 
@@ -109,7 +110,19 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
-    func testParsesJapaneseAliasesWithoutWhitespace() {
+    func testParsesJapaneseAliasesAtPunctuationBoundariesWithoutWhitespace() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        let result = parser.parse("こんにちは／読点／世界／改行")
+        XCTAssertEqual(result.elements, [
+            .text("こんにちは／"),
+            .command(.insertText("、")),
+            .text("／世界／"),
+            .command(.insertText("\n"))
+        ])
+    }
+
+    func testParsesJapaneseUnspacedCommandSequenceWithTerminalCommand() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         let result = parser.parse("こんにちは読点世界改行")
@@ -121,10 +134,22 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
+    func testJapaneseAliasesEmbeddedInNaturalTextRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in ["改行コード", "空白文字", "読点の使い方", "この改行コード", "句読点"] {
+            XCTAssertEqual(
+                parser.parse(transcript).elements,
+                [.text(transcript)],
+                transcript
+            )
+        }
+    }
+
     func testParsesJapaneseAliasesForLocaleWithExtension() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja@calendar=japanese"))
 
-        let result = parser.parse("こんにちは読点世界")
+        let result = parser.parse("こんにちは 読点 世界")
         XCTAssertEqual(result.elements, [
             .text("こんにちは"),
             .command(.insertText("、")),
@@ -135,7 +160,7 @@ final class VoiceCommandParserTests: XCTestCase {
     func testParsesJapaneseAliasesForUppercaseUnderscoreLocale() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "JA_jp"))
 
-        let result = parser.parse("こんにちは読点世界")
+        let result = parser.parse("こんにちは 読点 世界")
         XCTAssertEqual(result.elements, [
             .text("こんにちは"),
             .command(.insertText("、")),
@@ -143,13 +168,12 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
-    func testParsesJapaneseAliasesWithinWhitespaceDelimitedSegments() {
+    func testSingleJapaneseTerminalAliasInsideTextRemainsLiteral() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         let result = parser.parse("こんにちは読点 世界")
         XCTAssertEqual(result.elements, [
-            .text("こんにちは"),
-            .command(.insertText("、")),
+            .text("こんにちは読点"),
             .text("世界")
         ])
     }

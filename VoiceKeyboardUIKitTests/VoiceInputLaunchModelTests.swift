@@ -695,6 +695,8 @@ private final class DictationSessionControllerSpy: DictationSessionControlling {
         return startStatus
     }
 
+    func setAppAvailable(_ isAvailable: Bool) {}
+
     func cancelActiveSession() async {}
 
     func recordedPrepareCallCount() -> Int {
@@ -732,6 +734,8 @@ private final class SuspendedDictationSessionController: DictationSessionControl
             continuations.append(continuation)
         }
     }
+
+    func setAppAvailable(_ isAvailable: Bool) {}
 
     func cancelActiveSession() async {}
 

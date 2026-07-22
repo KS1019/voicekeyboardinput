@@ -100,6 +100,10 @@ final class VoiceInputLaunchModel {
         guard status == .idle else { return }
         status = await sessionController.prepareSession()
     }
+
+    func setAppAvailable(_ isAvailable: Bool) {
+        sessionController.setAppAvailable(isAvailable)
+    }
 }
 
 @MainActor
@@ -107,6 +111,7 @@ protocol DictationSessionControlling {
     func prepareSession() async -> VoiceInputLaunchStatus
     func startFromContainingApp() async -> VoiceInputLaunchStatus
     func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus
+    func setAppAvailable(_ isAvailable: Bool)
     func cancelActiveSession() async
 }
 
@@ -132,6 +137,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private var activeCommandToken: String?
     private var isMicrophoneActivationActive = false
     private var lastClaimedCommandToken: String?
+    private var isAppAvailable = true
 
     init(
         microphoneActivator: any MicrophoneActivating = AppMicrophoneActivator(),
@@ -149,7 +155,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }
         recoverStaleSession(in: sessionStore)
         heartbeatToken = UUID().uuidString
-        heartbeatState = .armed
+        heartbeatState = isAppAvailable ? .armed : .unavailable
         // A fresh pending command may have been written just before this app
         // launched. Older acknowledged/recording commands are one-shot and
         // must not be replayed by the new process.
@@ -181,9 +187,28 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             lastClaimedCommandToken = sessionStore.latestCommand()?.token
         }
         writeHeartbeat(in: sessionStore)
+        guard isAppAvailable else { return .sessionReady }
         startHeartbeatTask()
         startCommandMonitor()
         return .sessionReady
+    }
+
+    func setAppAvailable(_ isAvailable: Bool) {
+        isAppAvailable = isAvailable
+        if !isAvailable {
+            heartbeatState = .unavailable
+            writeHeartbeat()
+            commandMonitorTask?.cancel()
+            commandMonitorTask = nil
+            heartbeatTask?.cancel()
+            heartbeatTask = nil
+            return
+        }
+
+        heartbeatState = isMicrophoneActivationActive ? .recording : .armed
+        writeHeartbeat()
+        startHeartbeatTask()
+        startCommandMonitor()
     }
 
     func startFromContainingApp() async -> VoiceInputLaunchStatus {
@@ -285,7 +310,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         activeSessionID = nil
         activeCommandToken = nil
         isMicrophoneActivationActive = false
-        heartbeatState = .unavailable
+        heartbeatState = isAppAvailable ? .armed : .unavailable
         writeHeartbeat()
         if let activationTask {
             _ = await activationTask.value
@@ -293,7 +318,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     private func startCommandMonitor() {
-        guard commandMonitorTask == nil else { return }
+        guard isAppAvailable, commandMonitorTask == nil else { return }
         commandMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.consumeCommandIfNeeded()
@@ -315,7 +340,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         switch command.kind {
         case .start:
             startDictation(for: command, in: sessionStore)
-        case .stop, .cancel:
+        case .stop:
             guard activeSessionID == command.sessionID else {
                 guard activeSessionID == nil else { return }
                 // A stop can arrive while the containing app has not yet
@@ -323,10 +348,44 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 // the keyboard's stop monitor does not wait on the replaced
                 // start token until its deadline.
                 sessionStore.saveStatus(.cancelled(token: command.token))
-                heartbeatState = .armed
+                heartbeatState = isAppAvailable ? .armed : .unavailable
                 writeHeartbeat(in: sessionStore)
                 return
             }
+            guard sessionStore.status(forCommandToken: activeCommandToken ?? "").acceptsKeyboardStopCommand else {
+                return
+            }
+            let activationTask = activeStartTask
+            sessionStore.saveStatus(.commandAcknowledged(
+                token: command.token,
+                acknowledgedAt: Date()
+            ))
+            if let stoppableActivator = microphoneActivator as? any StoppableSessionAwareMicrophoneActivating {
+                await stoppableActivator.stop(
+                    sessionID: command.sessionID,
+                    commandToken: activeCommandToken ?? ""
+                )
+                if let activationTask {
+                    _ = await activationTask.value
+                }
+                sessionStore.saveStatus(.cancelled(token: command.token))
+                heartbeatState = isAppAvailable ? .armed : .unavailable
+                writeHeartbeat(in: sessionStore)
+            } else {
+                activeStartTask = nil
+                activationTask?.cancel()
+                isMicrophoneActivationActive = false
+                activeSessionID = nil
+                activeCommandToken = nil
+                sessionStore.saveStatus(.cancelled(token: command.token))
+                heartbeatState = isAppAvailable ? .armed : .unavailable
+                writeHeartbeat(in: sessionStore)
+                if let activationTask {
+                    _ = await activationTask.value
+                }
+            }
+        case .cancel:
+            guard activeSessionID == command.sessionID else { return }
             let activationTask = activeStartTask
             activeStartTask = nil
             activationTask?.cancel()
@@ -334,11 +393,9 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             activeSessionID = nil
             activeCommandToken = nil
             sessionStore.saveStatus(.cancelled(token: command.token))
-            heartbeatState = .armed
+            heartbeatState = isAppAvailable ? .armed : .unavailable
             writeHeartbeat(in: sessionStore)
-            if let activationTask {
-                _ = await activationTask.value
-            }
+            if let activationTask { _ = await activationTask.value }
         }
     }
 
@@ -351,7 +408,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 token: command.token,
                 message: "Voice input is already in progress."
             ))
-            heartbeatState = .armed
+            heartbeatState = isAppAvailable ? .armed : .unavailable
             writeHeartbeat(in: sessionStore)
             return
         }
@@ -416,7 +473,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         activeSessionID = nil
         activeCommandToken = nil
         isMicrophoneActivationActive = false
-        heartbeatState = .armed
+        heartbeatState = isAppAvailable ? .armed : .unavailable
         writeHeartbeat(in: sessionStore)
     }
 
@@ -445,7 +502,8 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
-                self?.writeHeartbeat()
+                guard let self, self.isAppAvailable else { return }
+                self.writeHeartbeat()
             }
         }
     }
@@ -497,8 +555,15 @@ protocol SessionAwareMicrophoneActivating {
     func activate(sessionID: String, commandToken: String) async -> VoiceInputLaunchStatus
 }
 
-struct AppMicrophoneActivator: MicrophoneActivating, SessionAwareMicrophoneActivating {
+@MainActor
+protocol StoppableSessionAwareMicrophoneActivating: SessionAwareMicrophoneActivating {
+    func stop(sessionID: String, commandToken: String) async
+}
+
+@MainActor
+final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareMicrophoneActivating {
     private let transcriptStoreProvider: () -> SharedDictationTranscriptStore?
+    private var activeRun: AppSpeechDictationRun?
 
     init(
         transcriptStoreProvider: @escaping () -> SharedDictationTranscriptStore? = {
@@ -527,11 +592,12 @@ struct AppMicrophoneActivator: MicrophoneActivating, SessionAwareMicrophoneActiv
             return .failed("Enable speech recognition access in Settings to use keyboard voice input.")
         }
 
+        let run = AppSpeechDictationRun(locale: Locale.current, maximumDuration: 8)
+        activeRun = run
+        defer { if activeRun === run { activeRun = nil } }
+
         do {
-            let transcriptText = try await AppSpeechDictationService().transcribe(
-                locale: Locale.current,
-                maximumDuration: 8
-            )
+            let transcriptText = try await run.start()
             guard let transcript = SharedDictationTranscript(
                 sessionID: sessionID,
                 commandToken: commandToken,
@@ -549,6 +615,10 @@ struct AppMicrophoneActivator: MicrophoneActivating, SessionAwareMicrophoneActiv
         } catch {
             return .failed(error.localizedDescription)
         }
+    }
+
+    func stop(sessionID: String, commandToken: String) async {
+        activeRun?.finishForUserStop()
     }
 
     private func requestRecordPermission() async -> Bool {

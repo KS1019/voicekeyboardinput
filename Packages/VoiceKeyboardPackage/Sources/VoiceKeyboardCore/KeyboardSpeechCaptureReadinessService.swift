@@ -39,22 +39,15 @@ public actor KeyboardSpeechCaptureReadinessService {
     public func directRecognitionIsReady(
         duration: AudioCaptureProbeDuration
     ) async -> Bool {
-        let state = currentState()
-        switch state {
-        case .ready:
-            return true
-        case .probeNeeded, .probeFailed:
-            return await probeState(duration: duration) == .ready
-        case .containingAppLaunchRequired,
-             .unavailable,
-             .probing,
-             .listening,
-             .transcribing,
-             .inserted,
-             .unsupportedCommand,
-             .recognitionFailed:
+        guard capabilityChecker.currentCapabilities().microphoneCaptureAvailable else {
             return false
         }
+
+        // A Bluetooth route can change while the extension remains alive. A
+        // previous successful probe must not be treated as proof that the
+        // current route is still capturable.
+        resetProbe()
+        return await probeState(duration: duration) == .ready
     }
 
     public func probeState(duration: AudioCaptureProbeDuration) async -> KeyboardSpeechCaptureState {

@@ -22,6 +22,16 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         XCTAssertNil(SharedDictationTranscript(text: "   "))
     }
 
+    func testDefaultExpiryAllowsTimeForManualAppToKeyboardSwitch() throws {
+        let createdAt = Date(timeIntervalSince1970: 1_720_000_000)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            text: "switch back manually",
+            createdAt: createdAt
+        ))
+
+        XCTAssertFalse(transcript.isExpired(at: createdAt.addingTimeInterval(60)))
+    }
+
     func testLatestTranscriptCanBeConsumedOnlyOnceForKnownToken() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)
@@ -92,11 +102,11 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         ))
     }
 
-    func testClaimMarksTranscriptConsumedBeforeCallerInsertsIt() throws {
+    func testClaimPlacesLeaseWithoutMarkingTranscriptConsumed() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)
         let transcript = try XCTUnwrap(SharedDictationTranscript(
-            text: "claim before insert",
+            text: "lease before insert",
             createdAt: Date(timeIntervalSince1970: 1_720_000_002)
         ))
         store.save(transcript)
@@ -107,11 +117,79 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(claimedTranscript, transcript)
-        XCTAssertEqual(store.lastConsumedToken(), transcript.token)
-        XCTAssertNil(store.consumeLatestTranscript(
-            afterLastConsumedToken: store.lastConsumedToken(),
+        XCTAssertNil(store.lastConsumedToken())
+        XCTAssertEqual(store.latestTranscript()?.isConsumed, false)
+        XCTAssertNil(store.claimLatestTranscript(
+            afterLastConsumedToken: nil,
             now: Date(timeIntervalSince1970: 1_720_000_010)
         ))
+    }
+
+    func testExpiredDeliveryLeaseCanBeClaimedAgain() throws {
+        let defaults = try makeDefaults()
+        let firstStore = SharedDictationTranscriptStore(defaults: defaults)
+        let secondStore = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            text: "retry after insertion failure",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        firstStore.save(transcript)
+
+        XCTAssertEqual(firstStore.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ), transcript)
+        XCTAssertEqual(secondStore.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_016)
+        ), transcript)
+    }
+
+    func testMarkConsumedMakesClaimIrreversibleAfterLeaseExpires() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            text: "inserted successfully",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        store.save(transcript)
+        let claimedTranscript = try XCTUnwrap(store.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+
+        store.markConsumed(claimedTranscript)
+
+        XCTAssertEqual(store.lastConsumedToken(), transcript.token)
+        XCTAssertEqual(store.latestTranscript()?.isConsumed, true)
+        XCTAssertNil(store.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_016)
+        ))
+    }
+
+    func testConcurrentClaimsHaveSingleWinner() throws {
+        let defaults = try makeDefaults()
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-a",
+            commandToken: "command-a",
+            text: "insert exactly once",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        let harness = ConcurrentClaimHarness(
+            stores: [
+                SharedDictationTranscriptStore(defaults: defaults),
+                SharedDictationTranscriptStore(defaults: defaults)
+            ],
+            transcript: transcript
+        )
+        harness.stores[0].save(transcript)
+
+        DispatchQueue.concurrentPerform(iterations: harness.stores.count) { index in
+            harness.claim(usingStoreAt: index)
+        }
+
+        XCTAssertEqual(harness.claims, [transcript])
     }
 
     func testMarkConsumedDoesNotOverwriteTranscriptSavedAfterItsRead() throws {
@@ -131,11 +209,16 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
             createdAt: Date(timeIntervalSince1970: 1_720_000_005)
         ))
         consumingStore.save(consumedTranscript)
+        let concurrentSave = ConcurrentSaveHarness(
+            store: savingStore,
+            transcript: newerTranscript
+        )
         defaults.afterNextObjectRead = {
-            savingStore.save(newerTranscript)
+            concurrentSave.start()
         }
 
         consumingStore.markConsumed(consumedTranscript)
+        XCTAssertTrue(concurrentSave.waitUntilFinished())
 
         XCTAssertEqual(consumingStore.latestTranscript(), newerTranscript)
         XCTAssertEqual(consumingStore.lastConsumedToken(), consumedTranscript.token)
@@ -153,6 +236,63 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         let defaults = try XCTUnwrap(InterleavingUserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+}
+
+private final class ConcurrentClaimHarness: @unchecked Sendable {
+    let stores: [SharedDictationTranscriptStore]
+    private let transcript: SharedDictationTranscript
+    private let resultLock = NSLock()
+    private var claimedTranscripts: [SharedDictationTranscript] = []
+
+    var claims: [SharedDictationTranscript] {
+        resultLock.lock()
+        defer { resultLock.unlock() }
+        return claimedTranscripts
+    }
+
+    init(
+        stores: [SharedDictationTranscriptStore],
+        transcript: SharedDictationTranscript
+    ) {
+        self.stores = stores
+        self.transcript = transcript
+    }
+
+    func claim(usingStoreAt index: Int) {
+        guard let claimedTranscript = stores[index].claimLatestTranscript(
+            forSessionID: transcript.sessionID,
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ) else { return }
+        resultLock.lock()
+        claimedTranscripts.append(claimedTranscript)
+        resultLock.unlock()
+    }
+}
+
+private final class ConcurrentSaveHarness: @unchecked Sendable {
+    private let store: SharedDictationTranscriptStore
+    private let transcript: SharedDictationTranscript
+    private let finished = DispatchSemaphore(value: 0)
+
+    init(
+        store: SharedDictationTranscriptStore,
+        transcript: SharedDictationTranscript
+    ) {
+        self.store = store
+        self.transcript = transcript
+    }
+
+    func start() {
+        DispatchQueue.global().async { [self] in
+            store.save(transcript)
+            finished.signal()
+        }
+    }
+
+    func waitUntilFinished() -> Bool {
+        finished.wait(timeout: .now() + 2) == .success
     }
 }
 

@@ -13,11 +13,13 @@ public final class KeyboardViewController: UIInputViewController {
     private var renderTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
     private var sharedDictationPollingTask: Task<Void, Never>?
+    private var microphoneDecisionTask: Task<Void, Never>?
     private var isRecognitionActive = false
     private var isRecognitionStopping = false
     private var isMicrophoneDecisionInFlight = false
     private var isViewVisible = false
     private var lifecycleEpoch: UInt64 = 0
+    private var sharedPollingGeneration: UInt64 = 0
     private var activeSharedSessionID: String?
     private var activeSharedCommandToken: String?
 
@@ -39,6 +41,7 @@ public final class KeyboardViewController: UIInputViewController {
         renderTask?.cancel()
         recognitionTask?.cancel()
         sharedDictationPollingTask?.cancel()
+        microphoneDecisionTask?.cancel()
     }
 
     public override func viewWillAppear(_ animated: Bool) {
@@ -67,6 +70,9 @@ public final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         isViewVisible = false
         lifecycleEpoch &+= 1
+        microphoneDecisionTask?.cancel()
+        microphoneDecisionTask = nil
+        isMicrophoneDecisionInFlight = false
         recognitionTask?.cancel()
         recognitionTask = nil
         isRecognitionActive = false
@@ -136,17 +142,32 @@ public final class KeyboardViewController: UIInputViewController {
     @objc private func microphoneTapped() {
         guard !isRecognitionStopping, !isMicrophoneDecisionInFlight else { return }
 
-        if sharedSessionStore?.status().acceptsKeyboardStopCommand == true {
+        if let commandToken = activeSharedCommandToken,
+           sharedSessionStore?.status(forCommandToken: commandToken).acceptsKeyboardStopCommand == true {
             stopSharedDictationSession()
             return
         }
 
+        if isRecognitionActive {
+            startDirectKeyboardRecognition()
+            return
+        }
+
         isMicrophoneDecisionInFlight = true
-        Task { [weak self] in
+        let epoch = lifecycleEpoch
+        microphoneDecisionTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.isMicrophoneDecisionInFlight = false }
+            defer {
+                if self.lifecycleEpoch == epoch {
+                    self.isMicrophoneDecisionInFlight = false
+                    self.microphoneDecisionTask = nil
+                }
+            }
             let directRecognitionReady = await speechCaptureCoordinator.directRecognitionIsReady()
-            guard !Task.isCancelled, !self.isRecognitionStopping else { return }
+            guard !Task.isCancelled,
+                  self.isViewVisible,
+                  self.lifecycleEpoch == epoch,
+                  !self.isRecognitionStopping else { return }
             self.handleMicrophoneTap(directRecognitionReady: directRecognitionReady)
         }
     }
@@ -274,8 +295,12 @@ public final class KeyboardViewController: UIInputViewController {
             )
             return
         }
-        guard let sessionID = activeSharedSessionID
-            ?? sharedSessionStore.latestCommand()?.sessionID else {
+        guard let sessionID = activeSharedSessionID,
+              let commandToken = activeSharedCommandToken,
+              let latestCommand = sharedSessionStore.latestCommand(),
+              latestCommand.sessionID == sessionID,
+              latestCommand.token == commandToken,
+              latestCommand.source == .keyboard else {
             keyboardRootView.render(
                 speechCapture: .sharedDictationUnavailable,
                 announce: true
@@ -297,8 +322,17 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func monitorSharedDictationSession(command: SharedDictationSessionCommand) {
         sharedDictationPollingTask?.cancel()
+        sharedPollingGeneration &+= 1
+        let pollingGeneration = sharedPollingGeneration
         let epoch = lifecycleEpoch
         sharedDictationPollingTask = Task { [weak self] in
+            defer {
+                if let self,
+                   self.lifecycleEpoch == epoch,
+                   self.sharedPollingGeneration == pollingGeneration {
+                    self.sharedDictationPollingTask = nil
+                }
+            }
             let deadline = Date().addingTimeInterval(16)
 
             while !Task.isCancelled {
@@ -311,19 +345,10 @@ public final class KeyboardViewController: UIInputViewController {
                     return
                 }
 
-                if let status = sharedSessionStore?.status() {
+                if let status = sharedSessionStore?.status(forCommandToken: command.token) {
                     guard status.commandToken == command.token else {
                         try? await Task.sleep(for: .milliseconds(250))
                         continue
-                    }
-                    if command.kind == .start,
-                       command.isExpired(),
-                       status.isActiveDictationStatus {
-                        keyboardRootView.render(
-                            speechCapture: .sharedDictationTimedOut,
-                            announce: true
-                        )
-                        return
                     }
                     keyboardRootView.render(
                         speechCapture: .sharedDictationSessionStatus(status),
@@ -415,7 +440,7 @@ public final class KeyboardViewController: UIInputViewController {
         guard let sharedTranscriptStore else { return false }
         guard let command = command ?? matchingReadyStartCommand(),
               command.kind == .start else { return false }
-        guard let status = sharedSessionStore?.status(),
+        guard let status = sharedSessionStore?.status(forCommandToken: command.token),
               case let .transcriptReady(statusToken) = status,
               statusToken == command.token else {
             return false
@@ -444,6 +469,7 @@ public final class KeyboardViewController: UIInputViewController {
         }
 
         applySharedTranscript(transcript.text)
+        sharedTranscriptStore.markConsumed(transcript)
         activeSharedSessionID = nil
         activeSharedCommandToken = nil
         sharedDictationPollingTask?.cancel()
@@ -458,16 +484,21 @@ public final class KeyboardViewController: UIInputViewController {
             documentContextBeforeInput: textDocumentProxy.documentContextBeforeInput
         )
         var unsupportedCommand: String?
+        var insertedText = ""
+        var didEditDocument = false
         for operation in operations {
             switch operation {
             case .insertText(let value):
                 textDocumentProxy.insertText(value)
+                insertedText.append(value)
+                didEditDocument = true
             case .deleteBackward(let count):
                 for _ in 0..<count.value {
                     textDocumentProxy.deleteBackward()
                 }
+                didEditDocument = true
             case .showUnsupportedCommand(let phrase):
-                unsupportedCommand = phrase
+                unsupportedCommand = unsupportedCommand ?? phrase
             }
         }
 
@@ -476,9 +507,14 @@ public final class KeyboardViewController: UIInputViewController {
                 speechCapture: .keyboardSpeechCapture(.unsupportedCommand(unsupportedCommand)),
                 announce: true
             )
+        } else if didEditDocument, !insertedText.isEmpty {
+            keyboardRootView.render(
+                speechCapture: .keyboardSpeechCapture(.inserted(insertedText)),
+                announce: true
+            )
         } else {
             keyboardRootView.render(
-                speechCapture: .keyboardSpeechCapture(.inserted(transcript)),
+                speechCapture: .keyboardSpeechCapture(.listening),
                 announce: true
             )
         }
@@ -486,19 +522,19 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func matchingReadyStartCommand() -> SharedDictationSessionCommand? {
         guard let command = matchingActiveStartCommand() else { return nil }
-        guard let status = sharedSessionStore?.status(),
+        guard let status = sharedSessionStore?.status(forCommandToken: command.token),
               case .transcriptReady = status else { return nil }
         return command
     }
 
     private func matchingActiveStartCommand() -> SharedDictationSessionCommand? {
         guard let sharedSessionStore else { return nil }
-        let status = sharedSessionStore.status()
         guard let latestCommand = sharedSessionStore.latestCommand(),
               latestCommand.kind == .start,
               latestCommand.source == .keyboard else {
             return nil
         }
+        let status = sharedSessionStore.status(forCommandToken: latestCommand.token)
         if case .idle = status {
             guard !latestCommand.isExpired() else { return nil }
             activeSharedSessionID = latestCommand.sessionID

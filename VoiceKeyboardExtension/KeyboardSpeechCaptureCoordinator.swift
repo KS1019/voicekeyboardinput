@@ -47,7 +47,12 @@ struct KeyboardSpeechCaptureCoordinator {
               let duration = AudioCaptureProbeDuration(seconds: 0.8) else {
             return false
         }
-        return await readinessService.directRecognitionIsReady(duration: duration)
+        guard await readinessService.directRecognitionIsReady(duration: duration) else {
+            return false
+        }
+        return await KeyboardAudioSessionOperationCoordinator.shared.waitUntilAvailable(
+            timeout: 10
+        )
     }
 
     func probeSnapshot() async -> SpeechCapturePresentationSnapshot {

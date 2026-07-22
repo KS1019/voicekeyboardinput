@@ -36,14 +36,18 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         locale: VoiceKeyboardLocale,
         documentContextBeforeInput: String?
     ) -> AsyncStream<KeyboardSpeechRecognitionEvent> {
-        AsyncStream { continuation in
+        AsyncStream(bufferingPolicy: .bufferingOldest(1)) { continuation in
             let stopGate = SpeechRecognitionStopGate()
             let task = Task {
-                continuation.yield(KeyboardSpeechRecognitionEvent(state: .listening))
+                guard await yieldRequired(
+                    KeyboardSpeechRecognitionEvent(state: .listening),
+                    to: continuation
+                ) else { return }
+
+                var virtualDocumentContext = documentContextBeforeInput ?? ""
+                var pendingFinalTranscript = ""
                 do {
                     let updates = try await speechService.start(locale: locale)
-                    var virtualDocumentContext = documentContextBeforeInput ?? ""
-                    var pendingFinalTranscript = ""
                     for try await update in updates {
                         guard !Task.isCancelled else { break }
                         if update.isFinal {
@@ -75,50 +79,48 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                             )
                             pendingFinalTranscript = ""
                             virtualDocumentContext = applying(actions, to: virtualDocumentContext)
-                            continuation.yield(
+                            guard await yieldRequired(
                                 KeyboardSpeechRecognitionEvent(
                                     state: eventState(for: update, actions: actions),
                                     actions: actions
-                                )
-                            )
+                                ),
+                                to: continuation
+                            ) else { break }
                         } else {
                             continuation.yield(KeyboardSpeechRecognitionEvent(state: .transcribing(update)))
                         }
                     }
                     if !Task.isCancelled, !pendingFinalTranscript.isEmpty {
-                        let finalUpdate = SpeechRecognitionUpdate(
-                            transcript: pendingFinalTranscript,
-                            isFinal: true
-                        )
-                        let actions = actions(
+                        let event = finalEvent(
                             transcript: pendingFinalTranscript,
                             documentContextBeforeInput: virtualDocumentContext,
                             locale: locale
                         )
-                        virtualDocumentContext = applying(actions, to: virtualDocumentContext)
-                        continuation.yield(
-                            KeyboardSpeechRecognitionEvent(
-                                state: eventState(for: finalUpdate, actions: actions),
-                                actions: actions
-                            )
-                        )
+                        _ = await yieldRequired(event, to: continuation)
                     }
                     await stopGate.stop(speechService)
                     continuation.finish()
-                } catch let error as SpeechRecognitionError {
-                    await stopGate.stop(speechService)
-                    continuation.yield(KeyboardSpeechRecognitionEvent(state: .recognitionFailed(error)))
-                    continuation.finish()
-                } catch is CancellationError {
-                    await stopGate.stop(speechService)
-                    continuation.yield(KeyboardSpeechRecognitionEvent(state: .recognitionFailed(.cancelled)))
-                    continuation.finish()
                 } catch {
-                    await stopGate.stop(speechService)
-                    continuation.yield(
-                        KeyboardSpeechRecognitionEvent(
-                            state: .recognitionFailed(.recognitionFailed(String(describing: error)))
+                    if !pendingFinalTranscript.isEmpty {
+                        let event = finalEvent(
+                            transcript: pendingFinalTranscript,
+                            documentContextBeforeInput: virtualDocumentContext,
+                            locale: locale
                         )
+                        _ = await yieldRequired(event, to: continuation)
+                    }
+                    await stopGate.stop(speechService)
+                    let recognitionError: SpeechRecognitionError
+                    if let error = error as? SpeechRecognitionError {
+                        recognitionError = error
+                    } else if error is CancellationError {
+                        recognitionError = .cancelled
+                    } else {
+                        recognitionError = .recognitionFailed(String(describing: error))
+                    }
+                    _ = await yieldRequired(
+                        KeyboardSpeechRecognitionEvent(state: .recognitionFailed(recognitionError)),
+                        to: continuation
                     )
                     continuation.finish()
                 }
@@ -130,6 +132,42 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                 }
             }
         }
+    }
+
+    private func finalEvent(
+        transcript: String,
+        documentContextBeforeInput: String,
+        locale: VoiceKeyboardLocale
+    ) -> KeyboardSpeechRecognitionEvent {
+        let update = SpeechRecognitionUpdate(transcript: transcript, isFinal: true)
+        let actions = actions(
+            transcript: transcript,
+            documentContextBeforeInput: documentContextBeforeInput,
+            locale: locale
+        )
+        return KeyboardSpeechRecognitionEvent(
+            state: eventState(for: update, actions: actions),
+            actions: actions
+        )
+    }
+
+    private func yieldRequired(
+        _ event: KeyboardSpeechRecognitionEvent,
+        to continuation: AsyncStream<KeyboardSpeechRecognitionEvent>.Continuation
+    ) async -> Bool {
+        while !Task.isCancelled {
+            switch continuation.yield(event) {
+            case .enqueued:
+                return true
+            case .dropped:
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            case .terminated:
+                return false
+            @unknown default:
+                return false
+            }
+        }
+        return false
     }
 
     private func actions(

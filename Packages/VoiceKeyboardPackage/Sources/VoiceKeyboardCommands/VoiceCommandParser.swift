@@ -87,9 +87,15 @@ package struct VoiceCommandParser: Sendable {
             let maximumSuffixLength = min(segment.count, match.alias.count - 1)
             guard maximumSuffixLength > 0 else { continue }
 
-            for length in 1...maximumSuffixLength
-            where match.alias.hasPrefix(segment.suffix(length)) {
-                return true
+            for length in 1...maximumSuffixLength {
+                let suffix = segment.suffix(length)
+                guard match.alias.hasPrefix(suffix) else { continue }
+
+                let suffixStart = suffix.startIndex
+                if suffixStart == segment.startIndex ||
+                    segment[segment.index(before: suffixStart)].isCommandBoundary {
+                    return true
+                }
             }
         }
         return false
@@ -99,9 +105,19 @@ package struct VoiceCommandParser: Sendable {
         var remaining = segment[...]
         var pendingText = ""
         var elements: [TranscriptElement] = []
+        let isCommandSequence = japaneseUnspacedAliases.first(where: {
+            segment.hasSuffix($0.alias)
+        }).map { terminalMatch in
+            let prefix = segment.dropLast(terminalMatch.alias.count)
+            return japaneseUnspacedAliases.contains { prefix.contains($0.alias) }
+        } ?? false
 
         while !remaining.isEmpty {
-            if let match = japaneseUnspacedAliases.first(where: { remaining.hasPrefix($0.alias) }) {
+            if let match = japaneseUnspacedAliases.first(where: {
+                remaining.hasPrefix($0.alias) &&
+                    (isCommandSequence ||
+                        hasCommandBoundaries(for: $0.alias, at: remaining.startIndex, in: segment))
+            }) {
                 if !pendingText.isEmpty {
                     elements.append(.text(pendingText))
                     pendingText = ""
@@ -118,6 +134,19 @@ package struct VoiceCommandParser: Sendable {
         }
 
         return elements
+    }
+
+    private func hasCommandBoundaries(
+        for alias: String,
+        at startIndex: String.Index,
+        in segment: String
+    ) -> Bool {
+        let hasLeadingBoundary = startIndex == segment.startIndex ||
+            segment[segment.index(before: startIndex)].isCommandBoundary
+        let endIndex = segment.index(startIndex, offsetBy: alias.count)
+        let hasTrailingBoundary = endIndex == segment.endIndex ||
+            segment[endIndex].isCommandBoundary
+        return hasLeadingBoundary && hasTrailingBoundary
     }
 
     private static func makeCommandMap(isJapaneseLocale: Bool) -> [String: VoiceCommand] {
@@ -151,6 +180,12 @@ package struct VoiceCommandParser: Sendable {
         }
 
         return commands
+    }
+}
+
+private extension Character {
+    var isCommandBoundary: Bool {
+        !isLetter && !isNumber
     }
 }
 

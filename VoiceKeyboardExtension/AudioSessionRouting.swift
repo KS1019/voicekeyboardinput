@@ -71,6 +71,28 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
         }
         return true
     }
+
+    func waitUntilAvailable(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let snapshot = availabilitySnapshot()
+            let available = snapshot.available
+            let isTerminal = snapshot.isTerminal
+            if isTerminal { return false }
+            if available { return true }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private func availabilitySnapshot() -> (available: Bool, isTerminal: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            ownerToken == nil && pendingOperations == 0,
+            terminal
+        )
+    }
 }
 
 enum KeyboardAudioSessionRouting {

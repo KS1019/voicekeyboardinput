@@ -344,6 +344,29 @@ final class KeyboardSpeechCaptureReadinessServiceTests: XCTestCase {
         XCTAssertTrue(isReady)
     }
 
+    func testDirectRecognitionReadinessReprobesAfterAPreviouslyReadyRoute() async {
+        let probe = SequenceProbe(results: [
+            .success(AudioCaptureProbeResult(
+                microphoneCaptureAvailable: true,
+                duration: standardDuration,
+                peakPower: -12
+            )!),
+            .failure(.unavailableInCurrentProcess)
+        ])
+        let service = KeyboardSpeechCaptureReadinessService(
+            capabilityChecker: CapabilityCheckerSpy(capabilities: availableCapabilities),
+            audioProbe: probe
+        )
+
+        let firstState = await service.probeState(duration: standardDuration)
+        let isReady = await service.directRecognitionIsReady(duration: standardDuration)
+        let callCount = await probe.callCount()
+
+        XCTAssertEqual(firstState, .ready)
+        XCTAssertFalse(isReady)
+        XCTAssertEqual(callCount, 2)
+    }
+
     func testDirectRecognitionReadinessRejectsPermissionOnlyCapabilityWhenProbeFails() async {
         let service = KeyboardSpeechCaptureReadinessService(
             capabilityChecker: CapabilityCheckerSpy(capabilities: availableCapabilities),
