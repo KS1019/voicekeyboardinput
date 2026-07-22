@@ -8,4 +8,6 @@ FOUNDATION_EXPORT BOOL VKInstallAudioInputTap(
     AVAudioNodeTapBlock tapBlock
 );
 
+FOUNDATION_EXPORT BOOL VKRemoveAudioInputTap(AVAudioInputNode *inputNode);
+
 NS_ASSUME_NONNULL_END

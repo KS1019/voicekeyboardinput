@@ -114,10 +114,56 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         ))
     }
 
+    func testMarkConsumedDoesNotOverwriteTranscriptSavedAfterItsRead() throws {
+        let defaults = try makeInterleavingDefaults()
+        let consumingStore = SharedDictationTranscriptStore(defaults: defaults)
+        let savingStore = SharedDictationTranscriptStore(defaults: defaults)
+        let consumedTranscript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-a",
+            commandToken: "command-a",
+            text: "already claimed",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_004)
+        ))
+        let newerTranscript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-b",
+            commandToken: "command-b",
+            text: "saved concurrently",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_005)
+        ))
+        consumingStore.save(consumedTranscript)
+        defaults.afterNextObjectRead = {
+            savingStore.save(newerTranscript)
+        }
+
+        consumingStore.markConsumed(consumedTranscript)
+
+        XCTAssertEqual(consumingStore.latestTranscript(), newerTranscript)
+        XCTAssertEqual(consumingStore.lastConsumedToken(), consumedTranscript.token)
+    }
+
     private func makeDefaults() throws -> UserDefaults {
         let suiteName = "SharedDictationTranscriptStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+
+    private func makeInterleavingDefaults() throws -> InterleavingUserDefaults {
+        let suiteName = "SharedDictationTranscriptStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(InterleavingUserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+}
+
+private final class InterleavingUserDefaults: UserDefaults, @unchecked Sendable {
+    var afterNextObjectRead: (() -> Void)?
+
+    override func object(forKey defaultName: String) -> Any? {
+        let value = super.object(forKey: defaultName)
+        let action = afterNextObjectRead
+        afterNextObjectRead = nil
+        action?()
+        return value
     }
 }

@@ -47,6 +47,24 @@ final class VoiceCommandParserTests: XCTestCase {
         XCTAssertFalse(parser.hasIncompleteCommandPrefix("hello world"))
     }
 
+    func testRecognizesIncompleteJapaneseAliasesAcrossFinalizedSegments() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        XCTAssertTrue(parser.hasIncompleteCommandPrefix("改"))
+        XCTAssertTrue(parser.hasIncompleteCommandPrefix("こんにちは読"))
+        XCTAssertFalse(parser.hasIncompleteCommandPrefix("改行"))
+        XCTAssertFalse(parser.hasIncompleteCommandPrefix("こんにちは読点"))
+
+        XCTAssertEqual(
+            parser.parse("改" + "行").elements,
+            [.command(.insertText("\n"))]
+        )
+        XCTAssertEqual(
+            parser.parse("読" + "点").elements,
+            [.command(.insertText("、"))]
+        )
+    }
+
     func testParsesUnsupportedShortcutCommands() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 

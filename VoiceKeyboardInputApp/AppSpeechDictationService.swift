@@ -196,7 +196,7 @@ final class AppSpeechDictationRun {
 
         private func performTeardown() {
             if tapIsInstalled {
-                engine.inputNode.removeTap(onBus: 0)
+                _ = VKRemoveAudioInputTap(engine.inputNode)
             }
             engine.stop()
             request?.endAudio()
@@ -305,6 +305,13 @@ final class AppSpeechDictationRun {
             await cleanup()
             throw AppSpeechDictationError.audioConfigurationChanged
         }
+
+        // Selecting Bluetooth HFP intentionally emits route/engine
+        // configuration notifications. Establish the run's baseline only
+        // after that transition has settled; otherwise the setup itself is
+        // mistaken for a broken input route.
+        preparationInvalidated = false
+        preparationGeneration = preparationMonitor.changeCount
 
         if let pendingError {
             await cleanup()
@@ -480,7 +487,9 @@ final class AppSpeechDictationRun {
             Task { @MainActor in
                 guard let self else { return }
                 if self.isPreparingAudio {
-                    self.preparationInvalidated = true
+                    // Route changes caused by selecting the preferred HFP
+                    // input are expected during setup. The stable baseline
+                    // is captured after routing settles.
                     return
                 }
                 // A Bluetooth HFP disconnect may silently fall back to the
@@ -502,7 +511,9 @@ final class AppSpeechDictationRun {
             Task { @MainActor in
                 guard let self else { return }
                 if self.isPreparingAudio {
-                    self.preparationInvalidated = true
+                    // AVAudioEngine can report a configuration change while
+                    // the selected HFP route is being materialized. The
+                    // stable format check below is the setup-time authority.
                     return
                 }
                 self.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))

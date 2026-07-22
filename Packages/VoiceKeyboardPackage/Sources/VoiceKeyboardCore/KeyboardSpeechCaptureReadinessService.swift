@@ -33,6 +33,30 @@ public actor KeyboardSpeechCaptureReadinessService {
         lastProbeError = nil
     }
 
+    /// Permission is not proof that this process can actually configure an
+    /// input route. Before starting recognition, validate the capture path
+    /// with the same short probe used by the readiness UI.
+    public func directRecognitionIsReady(
+        duration: AudioCaptureProbeDuration
+    ) async -> Bool {
+        let state = currentState()
+        switch state {
+        case .ready:
+            return true
+        case .probeNeeded, .probeFailed:
+            return await probeState(duration: duration) == .ready
+        case .containingAppLaunchRequired,
+             .unavailable,
+             .probing,
+             .listening,
+             .transcribing,
+             .inserted,
+             .unsupportedCommand,
+             .recognitionFailed:
+            return false
+        }
+    }
+
     public func probeState(duration: AudioCaptureProbeDuration) async -> KeyboardSpeechCaptureState {
         let capabilities = capabilityChecker.currentCapabilities()
         let initialState = stateMachine.state(

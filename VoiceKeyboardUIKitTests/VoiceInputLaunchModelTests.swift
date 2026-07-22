@@ -63,6 +63,17 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(controller.recordedStartCallCount(), 1)
     }
 
+    func testKeyboardSessionURLUsesTheExistingSessionHandoff() async throws {
+        let controller = DictationSessionControllerSpy(startStatus: .transcriptShared("hello"))
+        let model = VoiceInputLaunchModel(sessionController: controller)
+
+        model.handleOpenURL(try XCTUnwrap(URL(string: "voicekeyboard://start-dictation?sessionID=keyboard-1")))
+        await waitForStatus(.transcriptShared("hello"), in: model)
+
+        XCTAssertEqual(controller.recordedKeyboardSessionStartCallCount(), 1)
+        XCTAssertEqual(controller.recordedStartCallCount(), 0)
+    }
+
     func testPrepareSessionPublishesSessionReady() async {
         let controller = DictationSessionControllerSpy(prepareStatus: .sessionReady)
         let model = VoiceInputLaunchModel(sessionController: controller)
@@ -99,6 +110,26 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         } else {
             XCTFail("Expected transcriptReady status, got \(store.status())")
         }
+    }
+
+    func testColdKeyboardSessionStartClaimsTheExactExistingCommand() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let activator = MicrophoneActivatorSpy(status: .transcriptShared("cold hello"))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store }
+        )
+        let command = SharedDictationSessionCommand.start(source: .keyboard)
+        store.saveCommand(command)
+
+        let result = await controller.startFromKeyboardSession(sessionID: command.sessionID)
+
+        XCTAssertEqual(result, .transcriptShared("cold hello"))
+        XCTAssertEqual(activator.recordedCallCount(), 1)
+        XCTAssertEqual(store.status(), .transcriptReady(token: command.token))
     }
 
     func testPreparedAppSessionPublishesRecordingStatusWhileStartCommandRuns() async throws {
@@ -637,6 +668,7 @@ private final class NonCooperativeSuspendedMicrophoneActivator: MicrophoneActiva
 private final class DictationSessionControllerSpy: DictationSessionControlling {
     private var prepareCallCount = 0
     private var startCallCount = 0
+    private var keyboardSessionStartCallCount = 0
     private let prepareStatus: VoiceInputLaunchStatus
     private let startStatus: VoiceInputLaunchStatus
 
@@ -658,6 +690,11 @@ private final class DictationSessionControllerSpy: DictationSessionControlling {
         return startStatus
     }
 
+    func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus {
+        keyboardSessionStartCallCount += 1
+        return startStatus
+    }
+
     func cancelActiveSession() async {}
 
     func recordedPrepareCallCount() -> Int {
@@ -666,6 +703,10 @@ private final class DictationSessionControllerSpy: DictationSessionControlling {
 
     func recordedStartCallCount() -> Int {
         startCallCount
+    }
+
+    func recordedKeyboardSessionStartCallCount() -> Int {
+        keyboardSessionStartCallCount
     }
 }
 
@@ -679,6 +720,13 @@ private final class SuspendedDictationSessionController: DictationSessionControl
     }
 
     func startFromContainingApp() async -> VoiceInputLaunchStatus {
+        startCallCount += 1
+        return await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus {
         startCallCount += 1
         return await withCheckedContinuation { continuation in
             continuations.append(continuation)

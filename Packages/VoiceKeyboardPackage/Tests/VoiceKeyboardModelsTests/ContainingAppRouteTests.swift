@@ -15,6 +15,19 @@ final class ContainingAppRouteTests: XCTestCase {
         XCTAssertEqual(route, .startDictation)
     }
 
+    func testCarriesKeyboardSessionIDThroughStartDictationURL() throws {
+        let route = ContainingAppRoute.startDictationForKeyboardSession(sessionID: "keyboard-session-1")
+
+        XCTAssertEqual(
+            route.url.absoluteString,
+            "voicekeyboard://start-dictation?sessionID=keyboard-session-1"
+        )
+        XCTAssertEqual(
+            ContainingAppRoute(url: route.url),
+            route
+        )
+    }
+
     func testRejectsUnknownURL() {
         XCTAssertNil(ContainingAppRoute(url: URL(string: "voicekeyboard://settings")!))
         XCTAssertNil(ContainingAppRoute(url: URL(string: "https://start-dictation")!))

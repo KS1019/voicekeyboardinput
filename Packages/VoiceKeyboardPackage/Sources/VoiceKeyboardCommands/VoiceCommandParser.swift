@@ -64,13 +64,31 @@ package struct VoiceCommandParser: Sendable {
             .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
         let maximumSuffixLength = min(maxPhraseLength - 1, words.count)
-        guard maximumSuffixLength > 0 else { return false }
+        if maximumSuffixLength > 0 {
+            for length in 1...maximumSuffixLength {
+                let suffix = words.suffix(length).joined(separator: " ").lowercased()
+                if commandMap.keys.contains(where: { phrase in
+                    phrase.hasPrefix(suffix + " ")
+                }) {
+                    return true
+                }
+            }
+        }
+        return hasIncompleteJapaneseAliasSuffix(in: transcript)
+    }
 
-        for length in 1...maximumSuffixLength {
-            let suffix = words.suffix(length).joined(separator: " ").lowercased()
-            if commandMap.keys.contains(where: { phrase in
-                phrase.hasPrefix(suffix + " ")
-            }) {
+    private func hasIncompleteJapaneseAliasSuffix(in transcript: String) -> Bool {
+        guard isJapaneseLocale,
+              let segment = transcript.split(whereSeparator: { $0.isWhitespace }).last else {
+            return false
+        }
+
+        for match in japaneseUnspacedAliases {
+            let maximumSuffixLength = min(segment.count, match.alias.count - 1)
+            guard maximumSuffixLength > 0 else { continue }
+
+            for length in 1...maximumSuffixLength
+            where match.alias.hasPrefix(segment.suffix(length)) {
                 return true
             }
         }

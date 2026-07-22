@@ -3,7 +3,17 @@ import VoiceKeyboardModels
 
 @MainActor
 protocol ContainingAppOpening {
-    func openContainingAppForDictation(completion: @escaping @Sendable (Bool) -> Void)
+    func openContainingAppForDictation(
+        sessionID: String?,
+        completion: @escaping @Sendable (Bool) -> Void
+    )
+}
+
+@MainActor
+extension ContainingAppOpening {
+    func openContainingAppForDictation(completion: @escaping @Sendable (Bool) -> Void) {
+        openContainingAppForDictation(sessionID: nil, completion: completion)
+    }
 }
 
 @MainActor
@@ -14,14 +24,18 @@ struct ExtensionContextContainingAppOpener: ContainingAppOpening {
         self.extensionContextProvider = extensionContextProvider
     }
 
-    func openContainingAppForDictation(completion: @escaping @Sendable (Bool) -> Void) {
+    func openContainingAppForDictation(
+        sessionID: String?,
+        completion: @escaping @Sendable (Bool) -> Void
+    ) {
         guard let extensionContext = extensionContextProvider() else {
             completion(false)
             return
         }
 
         extensionContext.open(
-            ContainingAppRoute.startDictation.url,
+            (sessionID.map(ContainingAppRoute.startDictationForKeyboardSession)
+                ?? .startDictation).url,
             completionHandler: completion
         )
     }

@@ -42,6 +42,14 @@ struct KeyboardSpeechCaptureCoordinator {
         capabilityChecker.currentCapabilities().microphoneCaptureAvailable == false
     }
 
+    func directRecognitionIsReady() async -> Bool {
+        guard !shouldOpenContainingAppForDictation(),
+              let duration = AudioCaptureProbeDuration(seconds: 0.8) else {
+            return false
+        }
+        return await readinessService.directRecognitionIsReady(duration: duration)
+    }
+
     func probeSnapshot() async -> SpeechCapturePresentationSnapshot {
         if shouldOpenContainingAppForDictation() {
             return .keyboardSpeechCapture(.containingAppLaunchRequired)

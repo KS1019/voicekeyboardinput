@@ -18,3 +18,16 @@ BOOL VKInstallAudioInputTap(
         return NO;
     }
 }
+
+BOOL VKRemoveAudioInputTap(AVAudioInputNode *inputNode) {
+    @try {
+        // removeTapOnBus: can raise an Objective-C exception after a media
+        // services reset or when the engine has already lost its input node.
+        // Keep teardown best-effort and convert that exception to a result
+        // instead of allowing it to terminate the process.
+        [inputNode removeTapOnBus:0];
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}

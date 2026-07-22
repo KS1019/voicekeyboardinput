@@ -65,6 +65,7 @@ public final class SharedDictationTranscriptStore {
 
     private enum Key {
         static let transcriptRecord = "sharedDictation.transcriptRecord"
+        static let consumedToken = "sharedDictation.consumedToken"
     }
 
     private let defaults: UserDefaults
@@ -163,18 +164,13 @@ public final class SharedDictationTranscriptStore {
 
     public func markConsumed(_ transcript: SharedDictationTranscript) {
         guard let current = loadRecord(), current.token == transcript.token else { return }
-        let consumed = SharedDictationTranscript(
-            sessionID: current.sessionID,
-            commandToken: current.commandToken,
-            text: current.text,
-            createdAt: current.createdAt,
-            expiresAt: current.expiresAt,
-            isConsumed: true
-        )
-        saveRecord(consumed)
+        defaults.set(current.token, forKey: Key.consumedToken)
     }
 
     public func lastConsumedToken() -> String? {
+        if let consumedToken = defaults.string(forKey: Key.consumedToken) {
+            return consumedToken
+        }
         guard let transcript = loadRecord(), transcript.isConsumed else { return nil }
         return transcript.token
     }
@@ -186,6 +182,18 @@ public final class SharedDictationTranscriptStore {
 
     private func loadRecord() -> SharedDictationTranscript? {
         guard let data = defaults.data(forKey: Key.transcriptRecord) else { return nil }
-        return try? decoder.decode(SharedDictationTranscript.self, from: data)
+        guard let transcript = try? decoder.decode(SharedDictationTranscript.self, from: data) else {
+            return nil
+        }
+        guard defaults.string(forKey: Key.consumedToken) == transcript.token,
+              !transcript.isConsumed else { return transcript }
+        return SharedDictationTranscript(
+            sessionID: transcript.sessionID,
+            commandToken: transcript.commandToken,
+            text: transcript.text,
+            createdAt: transcript.createdAt,
+            expiresAt: transcript.expiresAt,
+            isConsumed: true
+        )
     }
 }

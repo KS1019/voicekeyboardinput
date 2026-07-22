@@ -45,7 +45,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                     _ = await audioEngineOperation.value
                 }
                 if tapWasInstalled {
-                    engine.inputNode.removeTap(onBus: 0)
+                    _ = VKRemoveAudioInputTap(engine.inputNode)
                 }
                 engine.stop()
                 guard sessionWasActive, coordinator.isCurrent(operationToken) else {

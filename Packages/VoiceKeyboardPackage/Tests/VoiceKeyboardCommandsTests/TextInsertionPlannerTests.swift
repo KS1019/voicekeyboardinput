@@ -188,6 +188,39 @@ final class TextInsertionPlannerTests: XCTestCase {
         )
     }
 
+    func testInitialTextSpacingAddsSpaceAfterWordFinalApostrophe() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.text("car")])
+
+        for context in ["James'", "dogs'"] {
+            XCTAssertEqual(
+                planner.plan(transcript, documentContextBeforeInput: context),
+                [.insertText(" car")],
+                context
+            )
+        }
+    }
+
+    func testContractionApostropheDoesNotAffectSingleQuoteParity() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [
+            .command(.insertText("'")),
+            .text("quoted"),
+            .command(.insertText("'")),
+            .text("next")
+        ])
+
+        XCTAssertEqual(
+            planner.plan(transcript, documentContextBeforeInput: "don't"),
+            [
+                .insertText(" '"),
+                .insertText("quoted"),
+                .insertText("'"),
+                .insertText(" next")
+            ]
+        )
+    }
+
     func testOpeningCommandDoesNotDuplicateExistingWhitespace() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [

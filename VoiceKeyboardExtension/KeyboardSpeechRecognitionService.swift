@@ -164,7 +164,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         private func performTeardown() {
-            engine.inputNode.removeTap(onBus: 0)
+            _ = VKRemoveAudioInputTap(engine.inputNode)
             engine.stop()
             request.endAudio()
         }
@@ -192,6 +192,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     }
 
     private final class RecognitionOutputBridge: @unchecked Sendable {
+        private static let maximumPendingUpdates = 64
         private let lock = NSLock()
         private var continuation: SpeechRecognitionUpdateStream.Continuation?
         private var pendingUpdates: [SpeechRecognitionUpdate] = []
@@ -223,6 +224,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             if let continuation {
                 continuation.yield(update)
             } else {
+                if pendingUpdates.count >= Self.maximumPendingUpdates {
+                    pendingUpdates.removeFirst()
+                }
                 pendingUpdates.append(update)
             }
         }
@@ -245,6 +249,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     }
 
     private final class AnalyzerInputBridge: @unchecked Sendable {
+        private static let maximumPendingInputs = 32
         private let lock = NSLock()
         private var continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
         private var pendingInputs: [AnalyzerInput] = []
@@ -276,6 +281,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             if let continuation {
                 continuation.yield(input)
             } else {
+                if pendingInputs.count >= Self.maximumPendingInputs {
+                    pendingInputs.removeFirst()
+                }
                 pendingInputs.append(input)
             }
         }
@@ -381,7 +389,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         private func performTeardown() {
-            engine.inputNode.removeTap(onBus: 0)
+            _ = VKRemoveAudioInputTap(engine.inputNode)
             engine.stop()
         }
     }
@@ -394,6 +402,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         var analyzer: SpeechAnalyzer?
         var analyzerTask: Task<Void, Never>?
         var analyzerTapGate: AnalyzerAudioTapGate?
+        var timeoutTask: Task<Void, Never>?
         var pendingUpdate: SpeechRecognitionUpdate?
         var recognitionTasks: [Task<Void, Never>] = []
         var inputBridge: AnalyzerInputBridge?
@@ -649,6 +658,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 engine: engine
             )
             guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
+            establishPreparationBaseline(
+                session: session,
+                engine: engine,
+                generation: generation
+            )
             diagnostics.event("audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -682,7 +696,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
 
         let inputBridge = AnalyzerInputBridge()
         activeRun?.inputBridge = inputBridge
-        let inputStream = AsyncThrowingStream<AnalyzerInput, Error> { continuation in
+        let inputStream = AsyncThrowingStream<AnalyzerInput, Error>(
+            bufferingPolicy: .bufferingNewest(32)
+        ) { continuation in
             inputBridge.attach(continuation)
         }
         let tapGate = AnalyzerAudioTapGate()
@@ -760,7 +776,16 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             }
         }
 
-        return SpeechRecognitionUpdateStream { continuation in
+        activeRun?.timeoutTask = Task.detached { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            await self?.failCurrentRun(
+                .recognitionFailed("Keyboard speech recognition reached its safety timeout."),
+                generation: generation
+            )
+        }
+
+        return SpeechRecognitionUpdateStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
             continuation.onTermination = { [weak self] _ in
                 Task { await self?.requestCleanup(generation: generation) }
             }
@@ -823,6 +848,11 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 engine: engine
             )
             guard isCurrent(generation) else { throw SpeechRecognitionError.cancelled }
+            establishPreparationBaseline(
+                session: session,
+                engine: engine,
+                generation: generation
+            )
             diagnostics.event("legacy-audio-session-active")
         } catch {
             let mapped = SpeechRecognitionError.audioSessionActivationFailed(String(describing: error))
@@ -961,6 +991,8 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         run.outputBridge = nil
         run.analyzerTask?.cancel()
         run.analyzerTask = nil
+        run.timeoutTask?.cancel()
+        run.timeoutTask = nil
         run.recognitionTasks.forEach { $0.cancel() }
         run.recognitionTasks.removeAll()
         let analyzerTapGate = run.analyzerTapGate
@@ -995,7 +1027,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 if let engine {
                     if let analyzerTapGate { analyzerTapGate.waitUntilDrained() }
                     if let legacyTapGate { legacyTapGate.waitUntilDrained() }
-                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                     engine.stop()
                 }
                 legacyRequestHolder?.request.endAudio()
@@ -1016,21 +1048,21 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 audioQuarantineTask = Task.detached {
                     _ = await pendingEngineOperation.value
                     analyzerTapGate.waitUntilDrained()
-                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                     engine.stop()
                 }
             } else if let legacyTapGate {
                 audioQuarantineTask = Task.detached {
                     _ = await pendingEngineOperation.value
                     legacyTapGate.waitUntilDrained()
-                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                     engine.stop()
                     legacyRequestHolder?.request.endAudio()
                 }
             } else {
                 audioQuarantineTask = Task.detached {
                     _ = await pendingEngineOperation.value
-                    if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                     engine.stop()
                     legacyRequestHolder?.request.endAudio()
                 }
@@ -1038,7 +1070,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         } else if let engine = run.engine {
             if let analyzerTapGate {
                 if analyzerTapDidDrain {
-                    if run.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    if run.tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                     engine.stop()
                 } else {
                     let cleanup = DeferredAnalyzerAudioCleanup(gate: analyzerTapGate, engine: engine)
@@ -1048,7 +1080,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 }
             } else if let legacyTapGate {
                 if legacyTapDidDrain {
-                    if run.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                    if run.tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                     engine.stop()
                 } else if let legacyRequest {
                     let cleanup = DeferredLegacyAudioCleanup(
@@ -1061,7 +1093,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     }
                 }
             } else {
-                if run.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+                if run.tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
                 engine.stop()
             }
         }
@@ -1243,7 +1275,6 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     ) {
         guard isCurrent(generation) else { return }
         let preparationMonitor = activeRun?.preparationMonitor
-        activeRun?.preparationGeneration = preparationMonitor?.changeCount ?? 0
         let notificationCenter = NotificationCenter.default
         let interruptionObserver = notificationCenter.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -1347,12 +1378,30 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     ) {
         guard isCurrent(generation) else { return }
         guard activeRun?.isPreparingAudio == false else {
-            activeRun?.preparationInvalidated = true
+            // Setup deliberately changes the route and can reconfigure the
+            // engine. The post-routing stable baseline and format validation
+            // decide whether setup succeeded.
             return
         }
         activeRun?.inputBridge?.finish(throwing: error)
         activeRun?.outputBridge?.finish(throwing: error)
         Task { await requestCleanup(generation: generation) }
+    }
+
+    private func establishPreparationBaseline(
+        session: AVAudioSession,
+        engine: AVAudioEngine,
+        generation: UInt64
+    ) {
+        guard isCurrent(generation), var run = activeRun,
+              run.generation == generation else { return }
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        run.preparationInvalidated = false
+        run.preparationGeneration = run.preparationMonitor.changeCount
+        run.preparationInputUID = session.currentRoute.inputs.first?.uid
+        run.preparationChannelCount = format.channelCount
+        run.preparationSampleRate = format.sampleRate
+        activeRun = run
     }
 
     private func record(_ update: SpeechRecognitionUpdate, generation: UInt64) {

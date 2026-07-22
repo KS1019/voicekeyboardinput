@@ -69,12 +69,18 @@ final class VoiceInputLaunchModel {
     }
 
     func handleOpenURL(_ url: URL) {
-        guard ContainingAppRoute(url: url) == .startDictation else { return }
+        guard let route = ContainingAppRoute(url: url) else { return }
         guard routeStartTask == nil else { return }
 
         routeStartTask = Task { [weak self] in
-            await self?.startDictation()
-            self?.routeStartTask = nil
+            guard let self else { return }
+            switch route {
+            case .startDictation:
+                await self.startDictation()
+            case let .startDictationForKeyboardSession(sessionID):
+                await self.startDictation(forKeyboardSessionID: sessionID)
+            }
+            self.routeStartTask = nil
         }
     }
 
@@ -82,6 +88,12 @@ final class VoiceInputLaunchModel {
         guard status != .requestingPermission else { return }
         status = .requestingPermission
         status = await sessionController.startFromContainingApp()
+    }
+
+    private func startDictation(forKeyboardSessionID sessionID: String) async {
+        guard status != .requestingPermission else { return }
+        status = .requestingPermission
+        status = await sessionController.startFromKeyboardSession(sessionID: sessionID)
     }
 
     func prepareSession() async {
@@ -94,6 +106,7 @@ final class VoiceInputLaunchModel {
 protocol DictationSessionControlling {
     func prepareSession() async -> VoiceInputLaunchStatus
     func startFromContainingApp() async -> VoiceInputLaunchStatus
+    func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus
     func cancelActiveSession() async
 }
 
@@ -221,6 +234,41 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         } onCancel: {
             activationTask.cancel()
         }
+    }
+
+    func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus {
+        guard let sessionStore = sessionStoreProvider() else {
+            return .failed("Shared App Group storage is unavailable.")
+        }
+        // A cold URL launch can arrive before SwiftUI's root .task has
+        // prepared the heartbeat and command monitor. Prepare synchronously
+        // here, then claim the exact keyboard-owned command from the URL.
+        if commandMonitorTask == nil {
+            _ = await prepareSession()
+        }
+        guard let command = sessionStore.latestCommand(),
+              command.kind == .start,
+              command.source == .keyboard,
+              command.sessionID == sessionID,
+              !command.isExpired() else {
+            return .failed("The keyboard dictation request is no longer available.")
+        }
+        if isMicrophoneActivationActive {
+            guard activeSessionID == command.sessionID,
+                  let activationTask = activeStartTask else {
+                return .failed("Voice input is already in progress.")
+            }
+            return await activationTask.value
+        }
+
+        // Claim the exact command before starting. The monitor will therefore
+        // ignore it and cannot create a second microphone activation.
+        lastClaimedCommandToken = command.token
+        startDictation(for: command, in: sessionStore)
+        guard let activationTask = activeStartTask else {
+            return .failed("Voice input could not be started.")
+        }
+        return await activationTask.value
     }
 
     func cancelActiveSession() async {

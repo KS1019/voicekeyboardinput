@@ -58,11 +58,8 @@ package struct TextInsertionPlanner: Sendable {
 
     private func shouldAddSpaceBeforeInitialText(in context: String) -> Bool {
         guard let last = context.last else { return false }
-        if last == "\"" {
-            return !isOpeningQuoteContext(String(context.dropLast()))
-        }
-        if last == "'" {
-            return !isOpeningQuoteContext(String(context.dropLast()), quote: "'")
+        if last == "\"" || last == "'" {
+            return !contextEndsWithOpeningDelimiter(context)
         }
         return !last.isWhitespace && !last.isOpeningDelimiter && !last.isJapanesePunctuation
     }
@@ -92,11 +89,44 @@ package struct TextInsertionPlanner: Sendable {
               let previous = context.last else { return false }
         return !previous.isWhitespace
             && shouldAddSpaceBetween(previous: previous, next: value.first)
-            && !previous.isOpeningDelimiter
+            && !contextEndsWithOpeningDelimiter(context)
     }
 
     private func isOpeningQuoteContext(_ context: String, quote: Character = "\"") -> Bool {
-        context.filter { $0 == quote }.count.isMultiple(of: 2)
+        guard quote == "'" else {
+            return context.filter { $0 == quote }.count.isMultiple(of: 2)
+        }
+
+        var isInsideQuote = false
+        for index in context.indices where context[index] == quote {
+            let previous = index == context.startIndex
+                ? nil
+                : context[context.index(before: index)]
+            let nextIndex = context.index(after: index)
+            let next = nextIndex == context.endIndex ? nil : context[nextIndex]
+
+            if previous?.isWordCharacter == true, next?.isWordCharacter == true {
+                continue
+            }
+            if previous?.isWordCharacter == true, !isInsideQuote {
+                continue
+            }
+            isInsideQuote.toggle()
+        }
+        return !isInsideQuote
+    }
+
+    private func contextEndsWithOpeningDelimiter(_ context: String) -> Bool {
+        guard let last = context.last else { return false }
+        guard last == "\"" || last == "'" else { return last.isOpeningDelimiter }
+
+        let precedingContext = String(context.dropLast())
+        if last == "'",
+           precedingContext.last?.isWordCharacter == true,
+           isOpeningQuoteContext(precedingContext, quote: last) {
+            return false
+        }
+        return isOpeningQuoteContext(precedingContext, quote: last)
     }
 
     private func deleteWordCount(in context: String) -> Int {
@@ -139,6 +169,10 @@ package struct TextInsertionPlanner: Sendable {
 }
 
 private extension Character {
+    var isWordCharacter: Bool {
+        isLetter || isNumber
+    }
+
     var isSentenceClosingDelimiter: Bool {
         [
             "\"", "'", "’", "”", ")", "]", "}", "）", "］", "｝", "】", "〕", "〉", "》", "」", "』", "›", "»"
