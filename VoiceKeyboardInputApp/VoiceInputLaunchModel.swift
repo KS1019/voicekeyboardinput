@@ -61,6 +61,7 @@ enum VoiceInputLaunchStatus: Equatable {
 final class VoiceInputLaunchModel {
     private let sessionController: any DictationSessionControlling
     private var routeStartTask: Task<Void, Never>?
+    private var sessionPreparationTask: Task<VoiceInputLaunchStatus, Never>?
 
     var status = VoiceInputLaunchStatus.idle
 
@@ -86,29 +87,50 @@ final class VoiceInputLaunchModel {
 
     func startDictation() async {
         guard status != .requestingPermission else { return }
-        let preparationStatus = await sessionController.prepareSession()
+        let preparationStatus = await prepareSessionResult()
         guard case .sessionReady = preparationStatus else {
             status = preparationStatus
             return
         }
+        guard status != .requestingPermission else { return }
         status = .requestingPermission
         status = await sessionController.startFromContainingApp()
     }
 
     private func startDictation(forKeyboardSessionID sessionID: String) async {
         guard status != .requestingPermission else { return }
-        let preparationStatus = await sessionController.prepareSession()
+        let preparationStatus = await prepareSessionResult()
         guard case .sessionReady = preparationStatus else {
             status = preparationStatus
             return
         }
+        guard status != .requestingPermission else { return }
         status = .requestingPermission
         status = await sessionController.startFromKeyboardSession(sessionID: sessionID)
     }
 
     func prepareSession() async {
         guard status == .idle else { return }
-        status = await sessionController.prepareSession()
+        let preparedStatus = await prepareSessionResult()
+        // A URL/button start may have advanced the UI while preparation was
+        // suspended. Do not let the older preparation completion roll the
+        // state back to `.sessionReady`.
+        guard status == .idle else { return }
+        status = preparedStatus
+    }
+
+    private func prepareSessionResult() async -> VoiceInputLaunchStatus {
+        if let sessionPreparationTask {
+            return await sessionPreparationTask.value
+        }
+        let controller = sessionController
+        let task = Task { @MainActor in
+            await controller.prepareSession()
+        }
+        sessionPreparationTask = task
+        let result = await task.value
+        sessionPreparationTask = nil
+        return result
     }
 
     func setAppAvailable(_ isAvailable: Bool) {
@@ -409,7 +431,13 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         if commandMonitorTask == nil {
             _ = await prepareSession()
         }
-        guard let command = (await sessionStoreCall({ $0.commandHistory() }) ?? []).reversed().first(where: {
+        guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }) else {
+            return .failed("Shared App Group storage is unavailable.")
+        }
+        guard case .available(let commands) = historyResolution else {
+            return .failed("Shared App Group storage is unavailable.")
+        }
+        guard let command = commands.reversed().first(where: {
             $0.kind == .start
                 && $0.source == .keyboard
                 && $0.sessionID == sessionID
@@ -558,19 +586,34 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 // claimed the pending start. Complete the mailbox state so
                 // the keyboard's stop monitor does not wait on the replaced
                 // start token until its deadline.
-                if let replacedToken = command.replacesCommandToken,
-                   let transcript = await transcriptStoreCall({
-                       $0.latestTranscript(forSessionID: command.sessionID)
-                   }) ?? nil,
-                   transcript.commandToken == replacedToken,
-                   !transcript.isConsumed,
-                   !transcript.isExpired() {
-                    // A cold restart may have completed and persisted the
-                    // transcript before the stop was observed. Do not cancel
-                    // a result that the keyboard can still deliver.
-                    _ = await saveOwnedStatus(.transcriptReady(token: replacedToken))
-                } else if let replacedToken = command.replacesCommandToken {
-                    _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                if let replacedToken = command.replacesCommandToken {
+                    guard let transcriptResolution = await transcriptStoreCall({
+                        $0.latestTranscriptResolution(forSessionID: command.sessionID)
+                    }) else {
+                        _ = await sessionStoreCall {
+                            $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
+                        }
+                        lastClaimedCommandToken = cursorBeforeClaim
+                        return
+                    }
+                    switch transcriptResolution {
+                    case .unavailable:
+                        _ = await sessionStoreCall {
+                            $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
+                        }
+                        lastClaimedCommandToken = cursorBeforeClaim
+                        return
+                    case .found(let transcript)
+                        where transcript.commandToken == replacedToken
+                            && !transcript.isConsumed
+                            && !transcript.isExpired():
+                        // A cold restart may have completed and persisted the
+                        // transcript before the stop was observed. Do not cancel
+                        // a result that the keyboard can still deliver.
+                        _ = await saveOwnedStatus(.transcriptReady(token: replacedToken))
+                    case .found, .missing:
+                        _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                    }
                 }
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
                 heartbeatState = isAppAvailable ? .armed : .unavailable
@@ -650,7 +693,8 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     private func firstUnclaimedKeyboardCommand() async -> SharedDictationSessionCommand? {
-        let commands = await sessionStoreCall { $0.commandHistory() } ?? []
+        guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }),
+              case .available(let commands) = historyResolution else { return nil }
         for command in commands.reversed().filter({
             $0.kind == .start
                 && $0.source == .keyboard
@@ -659,10 +703,17 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             guard case .idle = await sessionStoreCall({
                 $0.status(forCommandToken: command.token)
             }) ?? .idle else { continue }
-            guard await transcriptStoreCall({
-                $0.latestTranscript(forSessionID: command.sessionID)
-            }) ?? nil == nil else { continue }
-            return command
+            guard let transcriptResolution = await transcriptStoreCall({
+                $0.latestTranscriptResolution(forSessionID: command.sessionID)
+            }) else { return nil }
+            switch transcriptResolution {
+            case .missing:
+                return command
+            case .found:
+                continue
+            case .unavailable:
+                return nil
+            }
         }
         return nil
     }
@@ -922,7 +973,11 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 // The transcript is the durable completion marker. Promote
                 // it even when status publication was interrupted or a newer
                 // scene became the latest command.
-                _ = await sessionStoreCall { $0.saveStatus(.transcriptReady(token: transcript.commandToken)) }
+                guard await sessionStoreCall({
+                    $0.saveStatus(.transcriptReady(token: transcript.commandToken))
+                }) == true else {
+                    return false
+                }
             case .transcriptReady, .failed, .cancelled:
                 break
             }

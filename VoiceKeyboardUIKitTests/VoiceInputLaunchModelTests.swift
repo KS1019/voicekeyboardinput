@@ -119,6 +119,25 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(controller.recordedPrepareCallCount(), 1)
     }
 
+    func testConcurrentPreparationDoesNotOverwriteStartStatus() async {
+        let controller = SuspendedPreparationDictationSessionController()
+        let model = VoiceInputLaunchModel(sessionController: controller)
+
+        let prepareTask = Task { await model.prepareSession() }
+        for _ in 0..<20 where controller.recordedPrepareCallCount() == 0 {
+            await Task.yield()
+        }
+        let startTask = Task { await model.startDictation() }
+        controller.finishPreparation()
+
+        _ = await prepareTask.value
+        await startTask.value
+
+        XCTAssertEqual(model.status, .microphoneActive(peakPower: -10))
+        XCTAssertEqual(controller.recordedPrepareCallCount(), 1)
+        XCTAssertEqual(controller.recordedStartCallCount(), 1)
+    }
+
     func testPreparedAppSessionConsumesSharedStartCommand() async throws {
         let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -832,6 +851,47 @@ private final class DictationSessionControllerSpy: DictationSessionControlling {
 
     func recordedKeyboardSessionStartCallCount() -> Int {
         keyboardSessionStartCallCount
+    }
+}
+
+@MainActor
+private final class SuspendedPreparationDictationSessionController: DictationSessionControlling {
+    private var preparationContinuation: CheckedContinuation<VoiceInputLaunchStatus, Never>?
+    private var prepareCallCount = 0
+    private var startCallCount = 0
+
+    func prepareSession() async -> VoiceInputLaunchStatus {
+        prepareCallCount += 1
+        return await withCheckedContinuation { continuation in
+            preparationContinuation = continuation
+        }
+    }
+
+    func startFromContainingApp() async -> VoiceInputLaunchStatus {
+        startCallCount += 1
+        return .microphoneActive(peakPower: -10)
+    }
+
+    func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus {
+        startCallCount += 1
+        return .microphoneActive(peakPower: -10)
+    }
+
+    func setAppAvailable(_ isAvailable: Bool) {}
+
+    func cancelActiveSession() async {}
+
+    func finishPreparation() {
+        preparationContinuation?.resume(returning: .sessionReady)
+        preparationContinuation = nil
+    }
+
+    func recordedPrepareCallCount() -> Int {
+        prepareCallCount
+    }
+
+    func recordedStartCallCount() -> Int {
+        startCallCount
     }
 }
 

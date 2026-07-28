@@ -980,6 +980,7 @@ public final class KeyboardViewController: UIInputViewController {
             isSharedCancellationInProgress = false
             sharedCancellationTask = nil
             queuedDocumentMutations.removeAll()
+            startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: lifecycleEpoch)
             return
         }
         let canApplyMutation = documentMutationGeneration == expectedMutationGeneration
@@ -998,6 +999,7 @@ public final class KeyboardViewController: UIInputViewController {
         // taps were captured against the previous field, so never replay them
         // without a fresh document identity check.
         queuedDocumentMutations.removeAll()
+        startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: lifecycleEpoch)
     }
 
     private func isCurrentInteraction(_ epoch: UInt64?) -> Bool {

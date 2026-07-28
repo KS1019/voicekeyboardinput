@@ -417,6 +417,12 @@ public final class SharedDictationTranscriptStore {
         case unavailable
     }
 
+    public enum TranscriptLookupResolution: Equatable, Sendable {
+        case found(SharedDictationTranscript)
+        case missing
+        case unavailable
+    }
+
     public static let appGroupIdentifier = "group.com.ks1019.voicekeyboardinput"
     // Bound both the bytes read from the App Group and the aggregate text
     // retained after JSON decoding. This protects the keyboard extension from
@@ -922,6 +928,20 @@ public final class SharedDictationTranscriptStore {
 
     public func latestTranscript(forSessionID sessionID: String) -> SharedDictationTranscript? {
         withExclusiveAccess { loadLatestRecord(forSessionID: sessionID) } ?? nil
+    }
+
+    /// Resolves the latest transcript without collapsing a storage read
+    /// failure into "no transcript". Callers that may cancel or replace a
+    /// command must fail closed on `.unavailable`.
+    public func latestTranscriptResolution(
+        forSessionID sessionID: String
+    ) -> TranscriptLookupResolution {
+        withExclusiveAccess {
+            guard let transcript = loadLatestRecord(forSessionID: sessionID) else {
+                return envelopeReadBlocked ? .unavailable : .missing
+            }
+            return .found(transcript)
+        } ?? .unavailable
     }
 
     public func unconsumedTranscripts(now: Date = Date()) -> [SharedDictationTranscript] {

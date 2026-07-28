@@ -18,6 +18,45 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         XCTAssertEqual(latestTranscript, transcript)
     }
 
+    func testLatestTranscriptResolutionDistinguishesMissingFromUnavailable() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertEqual(
+            store.latestTranscriptResolution(forSessionID: "missing-session"),
+            .missing
+        )
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceKeyboardTranscriptUnreadable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let envelopeURL = root.appendingPathComponent("envelope.json")
+        let lockURL = root.appendingPathComponent("store.lock")
+        let fileStore = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: try makeDefaults(),
+            envelopeURL: envelopeURL,
+            lockFileURL: lockURL
+        ))
+        XCTAssertTrue(fileStore.save(try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "unavailable-session",
+            commandToken: "unavailable-command",
+            text: "protected result"
+        ))))
+        try Data([0xFF]).write(to: envelopeURL, options: [.atomic])
+        try Data([0xFF]).write(to: envelopeURL.appendingPathExtension("backup"), options: [.atomic])
+
+        let reopened = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: try makeDefaults(),
+            envelopeURL: envelopeURL,
+            lockFileURL: lockURL
+        ))
+        XCTAssertEqual(
+            reopened.latestTranscriptResolution(forSessionID: "unavailable-session"),
+            .unavailable
+        )
+    }
+
     func testConflictingTranscriptForSameCommandIsRejectedWriteOnce() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)
