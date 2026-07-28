@@ -11,7 +11,8 @@ extension while sharing the platform-neutral package modules.
 
 ### Included
 
-- A macOS 13 or newer application target generated from `project.yml`.
+- A macOS 13 or newer application target generated from the dedicated
+  `project-mac.yml` spec.
 - A menu bar-only SwiftUI scene using `MenuBarExtra` with the window style.
 - A transcript editor, document-context editor, locale selector, and preview action.
 - A preview showing both parsed transcript elements and planned text operations.
@@ -72,7 +73,8 @@ types part of the package's external contract.
 The package keeps its existing iOS and macOS minimums (`iOS 16`, `macOS 13`),
 but removes platform declarations for surfaces that this product does not build
 or verify. The actual iOS app and extension continue to enforce iOS 26 in
-`project.yml`; the package remains reusable by both products.
+`project.yml` and `project-mac.yml`; the package remains reusable by both
+products.
 
 ### macOS target
 
@@ -83,9 +85,10 @@ the menu bar app entry point. It depends on:
 - `VoiceKeyboardModels` for locale and text-operation value types.
 
 It does not depend on `VoiceKeyboardCore`, `VoiceKeyboardCommands`, the iOS
-containing app, or the keyboard extension. It has no entitlements, no App Group,
-no iOS frameworks, and no audio or speech adapter. `LSUIElement` keeps the
-utility in the menu bar without a Dock icon.
+containing app, or the keyboard extension. It has only the App Sandbox
+entitlement required by the macOS target; it has no App Group, microphone or
+speech entitlement, iOS frameworks, or audio or speech adapter. `LSUIElement`
+keeps the utility in the menu bar without a Dock icon.
 
 ## User flow
 
@@ -105,8 +108,10 @@ mistaken for text that will be inserted.
 
 ## Error and lifecycle behavior
 
-- The preview action is synchronous and deterministic; it does not create a
-  task, audio session, notification observer, or shared-state writer.
+- The pipeline preview remains synchronous and deterministic; it does not
+  create an audio session, notification observer, or shared-state writer. The
+  menu-bar view runs that bounded computation in a cancellable off-main worker
+  and caps the number of rows rendered in the diagnostic list.
 - The selected locale is passed to the same command facade used by
   `VoiceInputPipeline`.
 - The document context is passed to the planner so spacing and deletion behavior

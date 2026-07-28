@@ -35,6 +35,10 @@
 	<string>Voice Keyboard Input uses the microphone only when you explicitly start voice input or microphone validation.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Voice Keyboard Input may use speech recognition only during explicit voice input validation where supported.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

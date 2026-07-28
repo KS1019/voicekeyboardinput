@@ -37,6 +37,20 @@ final class TextInsertionPlannerTests: XCTestCase {
         ])
     }
 
+    func testPreservesWhitespaceAroundCommandBoundaries() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [
+            .text("hello  "),
+            .command(.insertText(",")),
+            .text("\tworld")
+        ])
+
+        XCTAssertEqual(
+            planner.plan(transcript, documentContextBeforeInput: ""),
+            [.insertText("hello  "), .insertText(","), .insertText("\tworld")]
+        )
+    }
+
     func testPlansTextInsideQuotesWithoutInnerSpaces() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [
@@ -295,6 +309,126 @@ final class TextInsertionPlannerTests: XCTestCase {
         XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(5))])
     }
 
+    func testPlansOnlyOneJapaneseCharacterForDeleteWordWithoutWhitespace() {
+        let planner = TextInsertionPlanner()
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteWord)]),
+            documentContextBeforeInput: "今日は晴れ"
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(1))])
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "今日は晴れ。"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+    }
+
+    func testPlansTheTrailingEnglishWordWhenJapaneseTextPrecedesIt() {
+        let planner = TextInsertionPlanner()
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteWord)]),
+            documentContextBeforeInput: "今日は sunny"
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(5))])
+    }
+
+    func testPlansTheTrailingEnglishWordWhenJapaneseTextTouchesIt() {
+        let planner = TextInsertionPlanner()
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteWord)]),
+            documentContextBeforeInput: "今日はSwift"
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(5))])
+    }
+
+    func testPlansDeleteWordForApostrophesAndUnderscoresAsOneWord() {
+        let planner = TextInsertionPlanner()
+
+        for context in ["don't", "user_name"] {
+            XCTAssertEqual(
+                planner.plan(
+                    ParsedTranscript(elements: [.command(.deleteWord)]),
+                    documentContextBeforeInput: context
+                ),
+                [.deleteBackward(count: deleteCount(context.count))],
+                context
+            )
+        }
+    }
+
+    func testDoesNotTreatADecimalPointAsASentenceBoundary() {
+        let planner = TextInsertionPlanner()
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteSentence)]),
+            documentContextBeforeInput: "合計は3.14"
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(7))])
+    }
+
+    func testSentenceDeletionStopsAtAmbiguousAbbreviationPeriods() {
+        let planner = TextInsertionPlanner()
+
+        for context in [
+            "Visit https://example.com/path",
+            "Email me@example.com"
+        ] {
+            XCTAssertEqual(
+                planner.plan(
+                    ParsedTranscript(elements: [.command(.deleteSentence)]),
+                    documentContextBeforeInput: context
+                ),
+                [.deleteBackward(count: deleteCount(context.count))],
+                context
+            )
+        }
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: "Read e.g. this note"
+            ),
+            [.deleteBackward(count: deleteCount(" this note".count))]
+        )
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: "Call Dr. Smith"
+            ),
+            [.deleteBackward(count: deleteCount(" Smith".count))]
+        )
+    }
+
+    func testSentenceDeletionStopsAfterSingleLetterInitial() {
+        let planner = TextInsertionPlanner()
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: "I. Next sentence"
+            ),
+            [.deleteBackward(count: deleteCount(" Next sentence".count))]
+        )
+    }
+
+    func testSentenceDeletionCanTreatIncAsAnActualSentenceBoundary() {
+        let planner = TextInsertionPlanner()
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: "Acme Inc. Next sentence."
+            ),
+            [.deleteBackward(count: deleteCount(15))]
+        )
+    }
+
     func testPlansDeleteWordIncludingTrailingWhitespace() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [.command(.deleteWord)])
@@ -469,6 +603,24 @@ final class TextInsertionPlannerTests: XCTestCase {
                 documentContextBeforeInput: "   "
             ),
             []
+        )
+    }
+
+    func testSplitsDeletionCountsBeyondSingleOperationLimit() {
+        let planner = TextInsertionPlanner()
+        let context = String(repeating: "x", count: 257)
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteSentence)]),
+            documentContextBeforeInput: context
+        )
+
+        XCTAssertEqual(operations.count, 2)
+        XCTAssertEqual(
+            operations.compactMap { operation in
+                if case let .deleteBackward(count) = operation { return count.value }
+                return nil
+            }.reduce(0, +),
+            257
         )
     }
 

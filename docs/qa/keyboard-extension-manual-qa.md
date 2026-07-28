@@ -7,7 +7,7 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 - Build and install `VoiceKeyboardInput` on an iOS 26+ simulator or device.
 - Run `make verify` first so package, UIKit, app UI, build, preview layout, and generated-file checks are green.
 - Run `make keyboard-permission-policy-check` if `Allow Full Access` is missing in Settings or App Group handoff fails.
-- Turn `Allow Full Access` on for `Voice Keyboard` when validating keyboard-side STT. The extension requests open access so Settings exposes the switch; the first STT path still records diagnostics if the platform blocks microphone or Speech access.
+- Turn `Allow Full Access` on for `Voice Keyboard` when validating the keyboard UI and App Group handoff. Direct keyboard-process STT is intentionally disabled in the product path; the containing app owns microphone and Speech authorization.
 - The signed app and keyboard extension must both have the `group.com.ks1019.voicekeyboardinput` App Group entitlement. For physical devices, also enable that App Group for both bundle identifiers in the Apple Developer portal before signing.
 - On Simulator, grant microphone access for both the containing app and keyboard extension before probing if you want to bypass the permission prompt:
   `make simulator-grant-microphone`
@@ -31,13 +31,11 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 
 ## Expected Keyboard STT Behavior
 
-- Tapping Mic in `Voice Keyboard` starts the keyboard-process STT path.
-- The keyboard first shows `Listening...`.
-- Partial recognition shows the live transcript and a Stop microphone button.
-- A final transcript is inserted into the host text field.
-- If iOS blocks microphone capture in the keyboard process, tapping Mic opens the containing app through the dictation URL route.
-- The containing app requests microphone and Speech permission, records a short utterance, transcribes it, and saves the transcript to the shared App Group.
+- Tapping Mic in `Voice Keyboard` starts the containing-app handoff path.
+- The keyboard first shows the handoff/progress state and opens the containing app through the dictation URL route.
+- The containing app requests microphone and Speech permission, records the utterance, and publishes the transcript to the shared App Group.
 - Return to the host app and show `Voice Keyboard` again; the keyboard consumes the latest shared transcript once and inserts it into the host text field.
+- The experimental keyboard-process STT implementation remains compiled for diagnostics only and is not a product-path acceptance criterion.
 - If App Group signing is missing or mismatched, the keyboard shows `Shared App Group storage is unavailable.` instead of opening the app into a handoff path that cannot return text.
 - If the current OS cannot start either the legacy Speech path or the SpeechAnalyzer path, the keyboard shows speech unavailable rather than falling back silently.
 - The diagnostic log should include permission state, locale, audio session activation, input format, audio engine start, speech recognizer availability, recognition start, and stop reason.
@@ -72,6 +70,24 @@ If the probe fails on Simulator, check macOS microphone permission for Simulator
 8. Capture the `KeyboardSpeechRecognition` logs.
 9. Repeat with `Allow Full Access` off only to record whether behavior changes; do not ship an off-state requirement without a separate design update.
 10. On iOS 26, confirm logs show the legacy audio-buffer strategy before classifying any recognition failure as a platform limitation.
+
+## External Microphone Route Matrix
+
+Run the containing-app handoff flow for each route below. Record the route
+shown by the audio diagnostics, whether the transcript is inserted exactly
+once, and whether Stop/Cancel leaves the next attempt usable.
+
+| Route | Connect/disconnect cases |
+| --- | --- |
+| AirPods or another Bluetooth HFP headset | Connected before Start; connected during Start; disconnected during recording; reconnected before the next attempt |
+| USB microphone/interface | Connected before Start; connected while the app is opening; removed during recording |
+| Wired headset microphone | Plugged in before Start; unplugged during recording |
+| Built-in microphone fallback | No external route; external route removed before the next attempt |
+
+Also repeat one case while the device is locked, while the app moves to the
+background, and after rapidly pressing Start/Stop twice. A2DP-only Bluetooth
+output is not an input route and must fall back to a microphone-capable route
+or report a controlled unavailable state.
 
 ## Known Automation Boundary
 

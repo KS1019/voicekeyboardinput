@@ -9,21 +9,63 @@ enum AppAudioSessionRoutingError: Error {
 
 enum AppAudioSessionRouting {
     static func selectPreferredInputIfAvailable(_ session: AVAudioSession) async throws {
-        guard let preferredInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) else {
-            return
-        }
-        guard session.currentRoute.inputs.first?.uid != preferredInput.uid else {
-            return
-        }
+        // Bluetooth HFP can appear in availableInputs shortly after
+        // activation/route-change notification delivery. Do not freeze a
+        // built-in microphone decision from the first snapshot.
+        for attempt in 0..<32 {
+            if let preferredInput = preferredInput(in: session.availableInputs ?? []) {
+                if let currentInput = session.currentRoute.inputs.first,
+                   currentInput.portType != .builtInMic,
+                   priority(of: currentInput.portType) <= priority(of: preferredInput.portType) {
+                    return
+                }
+                guard session.currentRoute.inputs.first?.uid != preferredInput.uid else {
+                    return
+                }
 
-        try await setPreferredInput(preferredInput, on: session)
-        for _ in 0..<20 {
-            if session.currentRoute.inputs.contains(where: { $0.uid == preferredInput.uid }) {
-                return
+                try await setPreferredInput(preferredInput, on: session)
+                for _ in 0..<32 {
+                    if session.currentRoute.inputs.contains(where: { $0.uid == preferredInput.uid }) {
+                        return
+                    }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                throw AppAudioSessionRoutingError.preferredInputDidNotBecomeCurrent
             }
+
+            guard attempt < 31 else { return }
             try await Task.sleep(for: .milliseconds(50))
         }
-        throw AppAudioSessionRoutingError.preferredInputDidNotBecomeCurrent
+    }
+
+    private static func preferredInput(
+        in inputs: [AVAudioSessionPortDescription]
+    ) -> AVAudioSessionPortDescription? {
+        // Prefer physical input routes that have just become available over
+        // HFP. In particular, avoid selecting Bluetooth while USB/wired
+        // materialization is still catching up after a route change.
+        let priority: [AVAudioSession.Port] = [
+            .usbAudio,
+            .headsetMic,
+            .lineIn,
+            .bluetoothHFP
+        ]
+        for portType in priority {
+            if let input = inputs.first(where: { $0.portType == portType }) {
+                return input
+            }
+        }
+        return nil
+    }
+
+    private static func priority(of port: AVAudioSession.Port) -> Int {
+        switch port {
+        case .usbAudio: 0
+        case .headsetMic: 1
+        case .lineIn: 2
+        case .bluetoothHFP: 3
+        default: 4
+        }
     }
 
     static func waitForStableInput(
@@ -39,6 +81,13 @@ enum AppAudioSessionRouting {
         ) { _ in
             monitor.markChanged()
         }
+        let availableInputsObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.availableInputsChangeNotification,
+            object: session,
+            queue: nil
+        ) { _ in
+            monitor.markChanged()
+        }
         let engineObserver = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -48,6 +97,7 @@ enum AppAudioSessionRouting {
         }
         defer {
             notificationCenter.removeObserver(routeObserver)
+            notificationCenter.removeObserver(availableInputsObserver)
             notificationCenter.removeObserver(engineObserver)
         }
 
@@ -55,7 +105,7 @@ enum AppAudioSessionRouting {
         var lastSignature: AudioInputSignature?
         var lastChangeCount = monitor.changeCount
 
-        for _ in 0..<20 {
+        for _ in 0..<32 {
             let input = session.currentRoute.inputs.first
             let format = engine.inputNode.outputFormat(forBus: 0)
             let signature = input.map {
@@ -82,7 +132,7 @@ enum AppAudioSessionRouting {
             lastChangeCount = changeCount
             lastSignature = signature
             stableSamples += 1
-            if stableSamples >= 2 {
+            if stableSamples >= 4 {
                 return
             }
             try await Task.sleep(for: .milliseconds(75))

@@ -6,15 +6,11 @@ final class VoiceCommandParserTests: XCTestCase {
     func testParsesPunctuationAndNewline() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 
-        let result = parser.parse("hello comma world newline next line")
+        let result = parser.parse("comma newline")
 
         XCTAssertEqual(result.elements, [
-            .text("hello"),
             .command(.insertText(",")),
-            .text("world"),
-            .command(.insertText("\n")),
-            .text("next"),
-            .text("line")
+            .command(.insertText("\n"))
         ])
     }
 
@@ -31,11 +27,69 @@ final class VoiceCommandParserTests: XCTestCase {
     func testParsesEditingCommands() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 
-        let result = parser.parse("delete word delete sentence")
+        let result = parser.parse("command delete word command delete sentence")
         XCTAssertEqual(result.elements, [
             .command(.deleteWord),
             .command(.deleteSentence)
         ])
+    }
+
+    func testDestructiveCommandsInsideARequestRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(
+            parser.parse("delete word is a phrase").elements,
+            [.text("delete word is a phrase")]
+        )
+    }
+
+    func testUnprefixedDestructiveCommandRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(parser.parse("delete word").elements, [.text("delete word")])
+        XCTAssertEqual(
+            parser.parse("command delete word").elements,
+            [.command(.deleteWord)]
+        )
+    }
+
+    func testWhitespaceOnlyTranscriptRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        let transcript = "  \n\t"
+
+        XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)])
+    }
+
+    func testJapaneseUnspacedExpansionHonorsElementLimit() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+        let transcript = String(repeating: "読点／", count: 600)
+
+        XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)])
+    }
+
+    func testDestructiveCommandsRemainLiteralWhenNaturalTextPrecedesThem() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in [
+            "the phrase delete word",
+            "say delete word",
+            "do not delete sentence"
+        ] {
+            XCTAssertEqual(
+                parser.parse(transcript).elements,
+                [.text(transcript)],
+                transcript
+            )
+        }
+    }
+
+    func testDestructiveCommandsCanBeFollowedByExplicitCommandWords() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(
+            parser.parse("command delete word comma").elements,
+            [.command(.deleteWord), .command(.insertText(","))]
+        )
     }
 
     func testRecognizesIncompleteMultiWordCommandPrefixes() {
@@ -92,22 +146,103 @@ final class VoiceCommandParserTests: XCTestCase {
         let result = parser.parse("comma, quote, newline.")
 
         XCTAssertEqual(result.elements, [
-            .text("comma,"),
-            .text("quote,"),
-            .text("newline.")
+            .text("comma, quote, newline.")
         ])
     }
 
-    func testParsesJapaneseNewlineAndPunctuationAliases() {
+    func testLiteralTranscriptPreservesWhitespaceExactly() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(
+            parser.parse("hello  \tworld\nnext").elements,
+            [.text("hello  \tworld\nnext")]
+        )
+    }
+
+    func testNaturalLanguagePunctuationAliasesRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in [
+            "I need some space",
+            "Please add a comma here",
+            "The quote was missing",
+            "This is a question mark"
+        ] {
+            XCTAssertEqual(
+                parser.parse(transcript).elements,
+                [.text(transcript)],
+                transcript
+            )
+        }
+
+        for transcript in [
+            "there is no space left",
+            "comma splice",
+            "quote me"
+        ] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testOrdinaryProseWithCommandWordsRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in [
+            "Oxford comma debate",
+            "space exploration",
+            "the command copy failed"
+        ] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testNaturalLanguageNewlineAndParenthesisAliasesRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in [
+            "new line of business",
+            "newline character",
+            "use open parenthesis"
+        ] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testLiteralizedDestructivePhraseDoesNotExecuteLaterPunctuationCommand() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(
+            parser.parse("say delete word comma").elements,
+            [.text("say delete word comma")]
+        )
+    }
+
+    func testMixedPrefixedAndUnprefixedDestructiveCommandsRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(
+            parser.parse("command delete word delete sentence").elements,
+            [.text("command delete word delete sentence")]
+        )
+    }
+
+    func testJapanesePunctuationAliasesInsideProseRemainLiteral() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         let result = parser.parse("こんにちは 読点 世界 改行")
-        XCTAssertEqual(result.elements, [
-            .text("こんにちは"),
-            .command(.insertText("、")),
-            .text("世界"),
-            .command(.insertText("\n"))
-        ])
+        XCTAssertEqual(result.elements, [.text("こんにちは 読点 世界 改行")])
+    }
+
+    func testJapaneseNewlineAliasWithFollowingCueRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in ["改行 は必要", "改行について"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+
+        for transcript in ["改行 がいる", "空白 を入れる"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
     }
 
     func testParsesJapaneseAliasesAtPunctuationBoundariesWithoutWhitespace() {
@@ -122,22 +257,27 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
-    func testParsesJapaneseUnspacedCommandSequenceWithTerminalCommand() {
+    func testJapaneseUnspacedCommandSequenceRequiresExplicitBoundaries() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         let result = parser.parse("こんにちは読点世界改行")
         XCTAssertEqual(result.elements, [
-            .text("こんにちは"),
-            .command(.insertText("、")),
-            .text("世界"),
-            .command(.insertText("\n"))
+            .text("こんにちは読点世界改行")
         ])
     }
 
     func testJapaneseAliasesEmbeddedInNaturalTextRemainLiteral() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
-        for transcript in ["改行コード", "空白文字", "読点の使い方", "この改行コード", "句読点"] {
+        for transcript in [
+            "改行コード",
+            "空白文字",
+            "読点の使い方",
+            "この改行コード",
+            "この空白について読点",
+            "句読点",
+            "空白について読点"
+        ] {
             XCTAssertEqual(
                 parser.parse(transcript).elements,
                 [.text(transcript)],
@@ -146,26 +286,35 @@ final class VoiceCommandParserTests: XCTestCase {
         }
     }
 
+    func testJapaneseAliasInsideQuotationRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        XCTAssertEqual(
+            parser.parse("「読点」について").elements,
+            [.text("「読点」について")]
+        )
+    }
+
+    func testJapaneseCommandAliasInsideMixedProseRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in ["読点 多すぎ", "改行 不要", "句点 について"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
     func testParsesJapaneseAliasesForLocaleWithExtension() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja@calendar=japanese"))
 
         let result = parser.parse("こんにちは 読点 世界")
-        XCTAssertEqual(result.elements, [
-            .text("こんにちは"),
-            .command(.insertText("、")),
-            .text("世界")
-        ])
+        XCTAssertEqual(result.elements, [.text("こんにちは 読点 世界")])
     }
 
     func testParsesJapaneseAliasesForUppercaseUnderscoreLocale() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "JA_jp"))
 
         let result = parser.parse("こんにちは 読点 世界")
-        XCTAssertEqual(result.elements, [
-            .text("こんにちは"),
-            .command(.insertText("、")),
-            .text("世界")
-        ])
+        XCTAssertEqual(result.elements, [.text("こんにちは 読点 世界")])
     }
 
     func testSingleJapaneseTerminalAliasInsideTextRemainsLiteral() {
@@ -173,8 +322,7 @@ final class VoiceCommandParserTests: XCTestCase {
 
         let result = parser.parse("こんにちは読点 世界")
         XCTAssertEqual(result.elements, [
-            .text("こんにちは読点"),
-            .text("世界")
+            .text("こんにちは読点 世界")
         ])
     }
 

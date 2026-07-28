@@ -31,7 +31,9 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
     func acquireOwnership() -> UInt64? {
         lock.lock()
         defer { lock.unlock() }
-        guard !terminal, ownerToken == nil else { return nil }
+        guard !terminal,
+              ownerToken == nil,
+              pendingOperations == 0 else { return nil }
         nextOwnerToken &+= 1
         ownerToken = nextOwnerToken
         return nextOwnerToken
@@ -42,6 +44,16 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
         if ownerToken == token {
             ownerToken = nil
         }
+        lock.unlock()
+    }
+
+    func releaseOwnershipAfterTerminal(_ token: UInt64) {
+        lock.lock()
+        if ownerToken == token {
+            ownerToken = nil
+        }
+        // Keep the terminal quarantine set. A failed cleanup must not make a
+        // new probe eligible merely because its owner token was released.
         lock.unlock()
     }
 
@@ -63,13 +75,35 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
         lock.unlock()
     }
 
+    func recoverIfIdle() {
+        lock.lock()
+        if pendingOperations == 0, ownerToken == nil {
+            terminal = false
+        }
+        lock.unlock()
+    }
+
     func waitForPendingOperations(timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while hasPendingOperation {
             guard Date() < deadline else { return false }
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return false
+            }
         }
         return true
+    }
+
+    func waitUntilPendingOperationsSettle() async {
+        while hasPendingOperation {
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+        }
     }
 
     func waitUntilAvailable(timeout: TimeInterval) async -> Bool {
@@ -81,7 +115,11 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
             if isTerminal { return false }
             if available { return true }
             if Date() >= deadline { return false }
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return false
+            }
         }
     }
 
@@ -97,21 +135,63 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
 
 enum KeyboardAudioSessionRouting {
     static func selectPreferredInputIfAvailable(_ session: AVAudioSession) async throws {
-        guard let preferredInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) else {
-            return
-        }
-        guard session.currentRoute.inputs.first?.uid != preferredInput.uid else {
-            return
-        }
+        // Bluetooth HFP can appear in availableInputs shortly after
+        // activation/route-change notification delivery. Do not freeze a
+        // built-in microphone decision from the first snapshot.
+        for attempt in 0..<32 {
+            if let preferredInput = preferredInput(in: session.availableInputs ?? []) {
+                if let currentInput = session.currentRoute.inputs.first,
+                   currentInput.portType != .builtInMic,
+                   priority(of: currentInput.portType) <= priority(of: preferredInput.portType) {
+                    return
+                }
+                guard session.currentRoute.inputs.first?.uid != preferredInput.uid else {
+                    return
+                }
 
-        try await setPreferredInput(preferredInput, on: session)
-        for _ in 0..<20 {
-            if session.currentRoute.inputs.contains(where: { $0.uid == preferredInput.uid }) {
-                return
+                try await setPreferredInput(preferredInput, on: session)
+                for _ in 0..<32 {
+                    if session.currentRoute.inputs.contains(where: { $0.uid == preferredInput.uid }) {
+                        return
+                    }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                throw KeyboardAudioSessionRoutingError.preferredInputDidNotBecomeCurrent
             }
+
+            guard attempt < 31 else { return }
             try await Task.sleep(for: .milliseconds(50))
         }
-        throw KeyboardAudioSessionRoutingError.preferredInputDidNotBecomeCurrent
+    }
+
+    private static func preferredInput(
+        in inputs: [AVAudioSessionPortDescription]
+    ) -> AVAudioSessionPortDescription? {
+        // Prefer physical input routes that have just become available over
+        // HFP. In particular, avoid selecting Bluetooth while USB/wired
+        // materialization is still catching up after a route change.
+        let priority: [AVAudioSession.Port] = [
+            .usbAudio,
+            .headsetMic,
+            .lineIn,
+            .bluetoothHFP
+        ]
+        for portType in priority {
+            if let input = inputs.first(where: { $0.portType == portType }) {
+                return input
+            }
+        }
+        return nil
+    }
+
+    private static func priority(of port: AVAudioSession.Port) -> Int {
+        switch port {
+        case .usbAudio: 0
+        case .headsetMic: 1
+        case .lineIn: 2
+        case .bluetoothHFP: 3
+        default: 4
+        }
     }
 
     static func waitForStableInput(
@@ -127,6 +207,13 @@ enum KeyboardAudioSessionRouting {
         ) { _ in
             monitor.markChanged()
         }
+        let availableInputsObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.availableInputsChangeNotification,
+            object: session,
+            queue: nil
+        ) { _ in
+            monitor.markChanged()
+        }
         let engineObserver = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -136,6 +223,7 @@ enum KeyboardAudioSessionRouting {
         }
         defer {
             notificationCenter.removeObserver(routeObserver)
+            notificationCenter.removeObserver(availableInputsObserver)
             notificationCenter.removeObserver(engineObserver)
         }
 
@@ -143,7 +231,7 @@ enum KeyboardAudioSessionRouting {
         var lastSignature: AudioInputSignature?
         var lastChangeCount = monitor.changeCount
 
-        for _ in 0..<20 {
+        for _ in 0..<32 {
             let input = session.currentRoute.inputs.first
             let format = engine.inputNode.outputFormat(forBus: 0)
             let signature = input.map {
@@ -170,7 +258,7 @@ enum KeyboardAudioSessionRouting {
             lastChangeCount = changeCount
             lastSignature = signature
             stableSamples += 1
-            if stableSamples >= 2 {
+            if stableSamples >= 4 {
                 return
             }
             try await Task.sleep(for: .milliseconds(75))

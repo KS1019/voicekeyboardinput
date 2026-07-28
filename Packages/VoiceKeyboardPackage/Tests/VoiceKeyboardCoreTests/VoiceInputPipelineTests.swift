@@ -10,14 +10,12 @@ final class VoiceInputPipelineTests: XCTestCase {
         let pipeline = VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
 
         let operations = pipeline.operations(
-            for: "hello comma world",
+            for: "hello world",
             documentContextBeforeInput: ""
         )
 
         XCTAssertEqual(operations, [
-            .insertText("hello"),
-            .insertText(","),
-            .insertText(" world")
+            .insertText("hello world")
         ])
     }
 
@@ -28,13 +26,11 @@ final class VoiceInputPipelineTests: XCTestCase {
 
         XCTAssertEqual(
             pipeline.operations(
-                for: "hello comma world",
+                for: "hello world",
                 documentContextBeforeInput: "prefix"
             ),
             [
-                .insertText(" hello"),
-                .insertText(","),
-                .insertText(" world")
+                .insertText(" hello world")
             ]
         )
     }
@@ -74,7 +70,7 @@ final class VoiceInputPipelineTests: XCTestCase {
         )
 
         let result = try await pipeline.prepareInsertedText(
-            for: "world space",
+            for: "world ",
             documentContextBeforeInput: "hello"
         )
 
@@ -89,14 +85,14 @@ final class VoiceInputPipelineTests: XCTestCase {
         )
 
         let result = try await pipeline.prepareInsertedText(
-            for: "hello comma world",
+            for: "hello world",
             documentContextBeforeInput: "prefix"
         )
         let captured = await cleanupService.capturedCall()
 
-        XCTAssertEqual(captured?.text, " hello, world")
+        XCTAssertEqual(captured?.text, " hello world")
         XCTAssertEqual(captured?.locale, VoiceKeyboardLocale(identifier: "ja-JP"))
-        XCTAssertEqual(result, .insertableText(" hello, world", cleanupApplied: true))
+        XCTAssertEqual(result, .insertableText(" hello world", cleanupApplied: true))
     }
 
     func testPipelineCleansCommandPunctuationWithoutExtraSpaces() async throws {
@@ -106,11 +102,11 @@ final class VoiceInputPipelineTests: XCTestCase {
         )
 
         let result = try await pipeline.prepareInsertedText(
-            for: "hello comma world",
+            for: "hello world",
             documentContextBeforeInput: ""
         )
 
-        XCTAssertEqual(result, .insertableText("Hello, world", cleanupApplied: true))
+        XCTAssertEqual(result, .insertableText("Hello world", cleanupApplied: true))
     }
 
     func testPipelinePreservesWhitespaceOnlyCommandsWithCleanup() async throws {
@@ -142,7 +138,7 @@ final class VoiceInputPipelineTests: XCTestCase {
 
         do {
             _ = try await pipeline.prepareInsertedText(
-                for: "hello comma world",
+                for: "hello world",
                 documentContextBeforeInput: ""
             )
             XCTFail("Expected cleanup service requirement error")
@@ -190,12 +186,11 @@ final class VoiceInputPipelineTests: XCTestCase {
         )
 
         let result = try await pipeline.prepareInsertedText(
-            for: "hello delete word",
-            documentContextBeforeInput: ""
+            for: "command delete word",
+            documentContextBeforeInput: "hello"
         )
 
         XCTAssertEqual(result, .editingOperations([
-            .insertText("hello"),
             .deleteBackward(count: deleteWordCount)
         ]))
         let callCount = await cleanupService.callCount()
@@ -229,6 +224,41 @@ final class VoiceInputPipelineTests: XCTestCase {
 
         XCTAssertEqual(result, .insertableText("", cleanupApplied: true))
     }
+
+    func testPipelineRejectsOperationOverflowInsteadOfTreatingItAsEmptyText() async throws {
+        let pipeline = VoiceInputPipeline(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            cleanupService: IdentityTextCleanupService()
+        )
+        let transcript = String(repeating: "comma ", count: VoiceInputPipeline.maximumOperationCount + 1)
+
+        do {
+            _ = try await pipeline.prepareInsertedText(
+                for: transcript,
+                documentContextBeforeInput: ""
+            )
+            XCTFail("Expected operation limit error")
+        } catch {
+            XCTAssertEqual(error as? VoiceInputPipelineError, .operationLimitExceeded)
+        }
+    }
+
+    func testPipelineRejectsOversizedCleanupOutput() async throws {
+        let pipeline = VoiceInputPipeline(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            cleanupService: OversizedTextCleanupService()
+        )
+
+        do {
+            _ = try await pipeline.prepareInsertedText(
+                for: "hello",
+                documentContextBeforeInput: ""
+            )
+            XCTFail("Expected cleanup output size error")
+        } catch {
+            XCTAssertEqual(error as? VoiceInputPipelineError, .operationLimitExceeded)
+        }
+    }
 }
 
 private enum CleanupTestError: Error {
@@ -253,6 +283,12 @@ private struct FailingTextCleanupService: TextCleanupService {
 private struct IdentityTextCleanupService: TextCleanupService {
     func cleanedText(from text: String, locale: VoiceKeyboardLocale) async throws -> String {
         text
+    }
+}
+
+private struct OversizedTextCleanupService: TextCleanupService {
+    func cleanedText(from text: String, locale: VoiceKeyboardLocale) async throws -> String {
+        String(repeating: "あ", count: VoiceKeyboardTextLimits.maximumCharacterCount + 1)
     }
 }
 

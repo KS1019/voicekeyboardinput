@@ -29,7 +29,7 @@ public enum ContainingAppRoute: Equatable, Sendable {
         }
     }
 
-    public var url: URL {
+    public var url: URL? {
         var components = URLComponents()
         components.scheme = Self.scheme
 
@@ -41,9 +41,6 @@ public enum ContainingAppRoute: Equatable, Sendable {
             components.queryItems = [URLQueryItem(name: "sessionID", value: sessionID)]
         }
 
-        guard let url = components.url else {
-            preconditionFailure("Invalid containing app route")
-        }
-        return url
+        return components.url
     }
 }

@@ -38,38 +38,67 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             let audioSessionOperation = lingeringAudioSessionOperation
             let audioEngineOperation = lingeringAudioEngineOperation
             Task.detached {
-                guard await coordinator.waitForPendingOperations(
-                    timeout: 10
-                ) else {
-                    coordinator.markTerminal()
-                    coordinator.releaseOwnership(ownershipToken)
-                    return
+                if !(await coordinator.waitForPendingOperations(timeout: 10)) {
+                    // A late AVAudioSession callback may still activate the
+                    // session. Retain the terminal fence and ownership until
+                    // the operation settles, then perform the same cleanup.
+                    await coordinator.waitUntilPendingOperationsSettle()
                 }
                 if let audioSessionOperation {
                     if await audioSessionOperation.task.value == .succeeded {
-                        _ = await DeferredAudioSessionOperation(session: session, activate: false).task.value
+                        let deactivation = DeferredAudioSessionOperation(session: session, activate: false)
+                        guard await deactivation.task.value == .succeeded else {
+                            coordinator.markTerminal()
+                            coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+                            return
+                        }
                     }
                     coordinator.releaseOwnership(ownershipToken)
+                    coordinator.recoverIfIdle()
                     return
                 }
                 if let audioEngineOperation {
                     _ = await audioEngineOperation.task.value
                 }
+                tapGate.waitUntilDrained()
                 if tapWasInstalled {
                     _ = VKRemoveAudioInputTap(engine.inputNode)
                 }
                 engine.stop()
                 guard sessionWasActive else {
                     coordinator.releaseOwnership(ownershipToken)
+                    coordinator.recoverIfIdle()
                     return
                 }
                 let deactivation = DeferredAudioSessionOperation(session: session, activate: false)
-                guard await waitForKeyboardAudioProbeOperation(deactivation.task, timeout: 2) == .succeeded else {
+                let deactivationStatus = await waitForKeyboardAudioProbeOperation(
+                    deactivation.task,
+                    timeout: 2
+                )
+                if deactivationStatus == .timedOut {
+                    // Keep the owner and terminal fence until the late
+                    // deactivation settles. A successful late teardown must
+                    // be allowed to recover the coordinator for the next
+                    // probe instead of requiring an extension restart.
+                    Task.detached {
+                        let lateStatus = await deactivation.task.value
+                        if lateStatus == .succeeded {
+                            coordinator.releaseOwnership(ownershipToken)
+                            coordinator.recoverIfIdle()
+                        } else {
+                            coordinator.markTerminal()
+                            coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+                        }
+                    }
+                    return
+                }
+                guard deactivationStatus == .succeeded else {
                     coordinator.markTerminal()
-                    coordinator.releaseOwnership(ownershipToken)
+                    coordinator.releaseOwnershipAfterTerminal(ownershipToken)
                     return
                 }
                 coordinator.releaseOwnership(ownershipToken)
+                coordinator.recoverIfIdle()
             }
         }
 
@@ -92,13 +121,13 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             )
 
             guard session.isInputAvailable else {
-                return Self.result(false, duration: duration, peakPower: nil)
+                return try Self.result(false, duration: duration, peakPower: nil)
             }
 
             let inputNode = engine.inputNode
             let format = inputNode.outputFormat(forBus: 0)
             guard format.channelCount > 0, format.sampleRate > 0 else {
-                return Self.result(false, duration: duration, peakPower: nil)
+                return try Self.result(false, duration: duration, peakPower: nil)
             }
 
             let peakTracker = KeyboardAudioPeakTracker()
@@ -125,10 +154,10 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             guard session.isInputAvailable,
                   !session.currentRoute.inputs.isEmpty,
                   engine.isRunning else {
-                return Self.result(false, duration: duration, peakPower: await peakTracker.peakPower)
+                return try Self.result(false, duration: duration, peakPower: peakTracker.peakPower)
             }
 
-            return Self.result(true, duration: duration, peakPower: await peakTracker.peakPower)
+            return try Self.result(true, duration: duration, peakPower: peakTracker.peakPower)
         } catch is CancellationError {
             throw .cancelled
         } catch {
@@ -159,13 +188,14 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
         _ microphoneCaptureAvailable: Bool,
         duration: AudioCaptureProbeDuration,
         peakPower: Float?
-    ) -> AudioCaptureProbeResult {
+    ) throws(AudioCaptureProbeError) -> AudioCaptureProbeResult {
+        let sanitizedPeakPower = peakPower?.isFinite == true ? peakPower : nil
         guard let result = AudioCaptureProbeResult(
             microphoneCaptureAvailable: microphoneCaptureAvailable,
             duration: duration,
-            peakPower: peakPower
+            peakPower: sanitizedPeakPower
         ) else {
-            preconditionFailure("Invalid audio input probe result")
+            throw .unavailableInCurrentProcess
         }
         return result
     }
@@ -185,33 +215,56 @@ private final class KeyboardAudioProbeCompletionGate: @unchecked Sendable {
 }
 
 private final class AudioInputProbeTapGate: @unchecked Sendable {
-    private let lock = NSLock()
+    private let condition = NSCondition()
     private var isActive = true
+    private var inFlightCallbacks = 0
 
     func invalidate() {
-        lock.lock()
+        condition.lock()
         isActive = false
-        lock.unlock()
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func waitUntilDrained() {
+        condition.lock()
+        while inFlightCallbacks > 0 {
+            condition.wait()
+        }
+        condition.unlock()
     }
 
     func observe(_ buffer: AVAudioPCMBuffer, using tracker: KeyboardAudioPeakTracker) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard isActive else { return }
+        condition.lock()
+        guard isActive else {
+            condition.unlock()
+            return
+        }
+        inFlightCallbacks += 1
+        condition.unlock()
+        defer {
+            condition.lock()
+            inFlightCallbacks -= 1
+            if inFlightCallbacks == 0 { condition.broadcast() }
+            condition.unlock()
+        }
         tracker.observe(buffer)
     }
 }
 
-private actor KeyboardAudioPeakTracker {
+private final class KeyboardAudioPeakTracker: @unchecked Sendable {
+    private let lock = NSLock()
     private var peakAmplitude: Float = 0
 
     var peakPower: Float? {
+        lock.lock()
+        defer { lock.unlock() }
         guard peakAmplitude > 0 else { return nil }
         let decibels = 20 * log10(peakAmplitude)
         return decibels.isFinite ? decibels : nil
     }
 
-    nonisolated func observe(_ buffer: AVAudioPCMBuffer) {
+    func observe(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData else { return }
 
         let frameLength = Int(buffer.frameLength)
@@ -219,19 +272,16 @@ private actor KeyboardAudioPeakTracker {
         guard frameLength > 0, channelCount > 0 else { return }
 
         var localPeak: Float = 0
+        let frameStride = max(1, frameLength / 64)
         for channel in 0..<channelCount {
             let samples = channelData[channel]
-            for frame in 0..<frameLength {
+            for frame in stride(from: 0, to: frameLength, by: frameStride) {
                 localPeak = max(localPeak, abs(samples[frame]))
             }
         }
 
-        Task {
-            await record(localPeak)
-        }
-    }
-
-    private func record(_ amplitude: Float) {
-        peakAmplitude = max(peakAmplitude, amplitude)
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        peakAmplitude = max(peakAmplitude, localPeak)
     }
 }

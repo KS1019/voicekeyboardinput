@@ -27,6 +27,9 @@ public struct LiteralTranscriptPreview: Equatable, Sendable {
 }
 
 public struct LiteralTranscriptCommandPipeline: Sendable {
+    public static let maximumInputCharacterCount = VoiceKeyboardTextLimits.maximumCharacterCount
+    public static let maximumInputUTF8ByteCount = VoiceKeyboardTextLimits.maximumUTF8ByteCount
+
     private let parser: VoiceCommandParser
     private let planner: TextInsertionPlanner
 
@@ -39,6 +42,13 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
         for transcript: String,
         documentContextBeforeInput: String?
     ) -> LiteralTranscriptPreview {
+        guard Self.isBounded(transcript),
+              documentContextBeforeInput.map(Self.isBounded) ?? true else {
+            return LiteralTranscriptPreview(
+                elements: [.text("Transcript is too large to preview safely.")],
+                operations: []
+            )
+        }
         let parsed = parser.parse(transcript)
         let elements = parsed.elements.map(Self.mapElement)
         return LiteralTranscriptPreview(
@@ -50,8 +60,44 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
         )
     }
 
+    public func boundedPreview(
+        for transcript: String,
+        documentContextBeforeInput: String?,
+        maximumOperationCount: Int
+    ) -> LiteralTranscriptPreview? {
+        guard Self.isBounded(transcript),
+              documentContextBeforeInput.map(Self.isBounded) ?? true else {
+            return nil
+        }
+        let parsed = parser.parse(transcript)
+        guard let operations = planner.plan(
+                  parsed,
+                  documentContextBeforeInput: documentContextBeforeInput,
+                  maximumOperationCount: maximumOperationCount
+              ) else { return nil }
+        guard operations.allSatisfy(Self.isBounded) else { return nil }
+        return LiteralTranscriptPreview(
+            elements: parsed.elements.map(Self.mapElement),
+            operations: operations
+        )
+    }
+
     public func hasIncompleteCommandPrefix(for transcript: String) -> Bool {
-        parser.hasIncompleteCommandPrefix(transcript)
+        guard Self.isBounded(transcript) else { return false }
+        return parser.hasIncompleteCommandPrefix(transcript)
+    }
+
+    private static func isBounded(_ value: String) -> Bool {
+        VoiceKeyboardTextLimits.isValid(value)
+    }
+
+    private static func isBounded(_ operation: TextOperation) -> Bool {
+        switch operation {
+        case .insertText(let value), .showUnsupportedCommand(let value):
+            return isBounded(value)
+        case .deleteBackward:
+            return true
+        }
     }
 
     private static func mapElement(

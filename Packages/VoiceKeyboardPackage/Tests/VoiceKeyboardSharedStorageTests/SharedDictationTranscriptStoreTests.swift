@@ -18,8 +18,112 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         XCTAssertEqual(latestTranscript, transcript)
     }
 
-    func testBlankTranscriptIsRejected() {
-        XCTAssertNil(SharedDictationTranscript(text: "   "))
+    func testConflictingTranscriptForSameCommandIsRejectedWriteOnce() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let first = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "write-once-session",
+            commandToken: "write-once-command",
+            text: "first result"
+        ))
+        let conflicting = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: first.sessionID,
+            commandToken: first.commandToken,
+            text: "conflicting result"
+        ))
+
+        XCTAssertTrue(store.save(first))
+        XCTAssertFalse(store.save(conflicting))
+        XCTAssertEqual(store.latestTranscript(), first)
+    }
+
+    func testFileBackedStoreRoundTripsDeliveryJournal() throws {
+        let defaults = try makeDefaults()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceKeyboardTranscriptStore-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: defaults,
+            envelopeURL: root.appendingPathComponent("envelope.json"),
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "file-backed-session",
+            commandToken: "file-backed-command",
+            text: "file-backed delivery"
+        ))
+        let context = SharedDictationDocumentContextFingerprint(
+            beforeInput: "before",
+            afterInput: "after",
+            documentIdentifier: UUID()
+        )
+
+        XCTAssertTrue(store.save(transcript))
+        XCTAssertTrue(store.beginDelivery(
+            transcript,
+            beforeContext: context,
+            afterContext: context,
+            ownerID: "file-owner"
+        ))
+        XCTAssertEqual(store.pendingDelivery(forSessionID: transcript.sessionID)?.ownerID, "file-owner")
+        XCTAssertEqual(store.latestTranscript(), transcript)
+    }
+
+    func testFileBackedStoreRecoversFromCorruptPrimaryUsingBackup() throws {
+        let defaults = try makeDefaults()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceKeyboardTranscriptRecovery-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let envelopeURL = root.appendingPathComponent("envelope.json")
+        let store = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: defaults,
+            envelopeURL: envelopeURL,
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+        let first = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "recovery-session",
+            commandToken: "first-command",
+            text: "first",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_001)
+        ))
+        let second = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "recovery-session",
+            commandToken: "second-command",
+            text: "second",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        XCTAssertTrue(store.save(first))
+        XCTAssertTrue(store.save(second))
+        try Data([0xFF]).write(to: envelopeURL, options: [.atomic])
+
+        let recoveredStore = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: try makeDefaults(),
+            envelopeURL: envelopeURL,
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+        XCTAssertEqual(recoveredStore.latestTranscript(), second)
+    }
+
+    func testEmptyTranscriptIsRejectedButWhitespaceIsPreserved() throws {
+        XCTAssertNil(SharedDictationTranscript(text: ""))
+        let transcript = try XCTUnwrap(SharedDictationTranscript(text: "  \n"))
+        XCTAssertEqual(transcript.text, "  \n")
+    }
+
+    func testCompatibilityTranscriptTokenDoesNotEmbedLongText() throws {
+        let text = String(repeating: "あ", count: 1_000)
+
+        let transcript = try XCTUnwrap(SharedDictationTranscript(text: text))
+
+        XCTAssertEqual(transcript.text, text)
+        XCTAssertLessThanOrEqual(
+            transcript.commandToken.utf8.count,
+            SharedDictationTranscript.maximumIdentifierByteCount
+        )
     }
 
     func testDefaultExpiryAllowsTimeForManualAppToKeyboardSwitch() throws {
@@ -141,7 +245,7 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         ), transcript)
         XCTAssertEqual(secondStore.claimLatestTranscript(
             afterLastConsumedToken: nil,
-            now: Date(timeIntervalSince1970: 1_720_000_016)
+            now: Date(timeIntervalSince1970: 1_720_000_041)
         ), transcript)
     }
 
@@ -166,6 +270,368 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
             afterLastConsumedToken: nil,
             now: Date(timeIntervalSince1970: 1_720_000_016)
         ))
+    }
+
+    func testAtomicClaimMarksConsumedBeforeHostMutation() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-a",
+            commandToken: "command-a",
+            text: "at most once",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        store.save(transcript)
+
+        XCTAssertEqual(store.claimAndMarkConsumedLatestTranscript(
+            forSessionID: "session-a",
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ), transcript)
+        XCTAssertEqual(store.lastConsumedToken(), transcript.token)
+        XCTAssertNil(store.claimAndMarkConsumedLatestTranscript(
+            forSessionID: "session-a",
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_020)
+        ))
+    }
+
+    func testPendingDeliveryCanBeResumedUntilMarkedDelivered() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-a",
+            commandToken: "command-a",
+            text: "recoverable delivery",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        let before = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello",
+            afterInput: nil,
+            documentIdentifier: nil,
+            selectedText: nil
+        )
+        let after = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello recoverable delivery",
+            afterInput: nil,
+            documentIdentifier: nil,
+            selectedText: nil
+        )
+        store.save(transcript)
+        XCTAssertEqual(
+            store.claimLatestTranscript(
+                forSessionID: transcript.sessionID,
+                afterLastConsumedToken: nil,
+                now: Date(timeIntervalSince1970: 1_720_000_010)
+            ),
+            transcript
+        )
+        XCTAssertTrue(store.beginDelivery(transcript, beforeContext: before, afterContext: after))
+        XCTAssertEqual(
+            store.resumePendingDelivery(
+                forSessionID: transcript.sessionID,
+                now: Date(timeIntervalSince1970: 1_720_000_010)
+            ),
+            transcript
+        )
+        XCTAssertEqual(store.pendingDelivery(forSessionID: transcript.sessionID)?.transcriptToken, transcript.token)
+        // Legacy operation-zero journals may still be resumed, but they are
+        // not allowed to consume a transcript without an explicit operation
+        // plan. The keyboard upgrades them before calling markDelivered.
+        XCTAssertFalse(store.markDelivered(transcriptToken: transcript.token))
+        XCTAssertNotNil(store.pendingDelivery(forSessionID: transcript.sessionID))
+        XCTAssertEqual(store.latestTranscript()?.isConsumed, false)
+    }
+
+    func testInFlightMutationIsNeverAutomaticallyReplayedAfterLeaseExpiry() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-in-flight",
+            commandToken: "command-in-flight",
+            text: "ambiguous host edit",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        let documentIdentifier = UUID()
+        let before = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello",
+            afterInput: nil,
+            documentIdentifier: documentIdentifier,
+            selectedText: nil
+        )
+        let after = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello ambiguous host edit",
+            afterInput: nil,
+            documentIdentifier: documentIdentifier,
+            selectedText: nil
+        )
+        store.save(transcript)
+
+        XCTAssertTrue(store.beginDelivery(
+            transcript,
+            beforeContext: before,
+            afterContext: after,
+            operations: [.insertText(" ambiguous host edit")],
+            stepContexts: [before, after],
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+        XCTAssertTrue(store.beginDeliveryMutation(
+            transcriptToken: transcript.token,
+            operationIndex: 0,
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_011)
+        ))
+        XCTAssertTrue(store.pendingDelivery(forSessionID: transcript.sessionID)?.mutationInFlight == true)
+
+        XCTAssertNil(store.resumePendingDelivery(
+            forSessionID: transcript.sessionID,
+            now: Date(timeIntervalSince1970: 1_720_000_042),
+            ownerID: "owner-b"
+        ))
+    }
+
+    func testInFlightMutationCannotBeDiscardedAndCanBeQuarantined() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-quarantine",
+            commandToken: "command-quarantine",
+            text: "ambiguous",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        let identifier = UUID()
+        let before = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello",
+            afterInput: nil,
+            documentIdentifier: identifier
+        )
+        let after = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello ambiguous",
+            afterInput: nil,
+            documentIdentifier: identifier
+        )
+        XCTAssertTrue(store.save(transcript))
+        XCTAssertTrue(store.beginDelivery(
+            transcript,
+            beforeContext: before,
+            afterContext: after,
+            operations: [.insertText(" ambiguous")],
+            stepContexts: [before, after],
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+        XCTAssertTrue(store.beginDeliveryMutation(
+            transcriptToken: transcript.token,
+            operationIndex: 0,
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_011)
+        ))
+        XCTAssertFalse(store.discardPendingDelivery(
+            transcriptToken: transcript.token,
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_011)
+        ))
+        XCTAssertTrue(store.quarantinePendingDelivery(
+            transcriptToken: transcript.token,
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_011)
+        ))
+        XCTAssertTrue(store.pendingDelivery(forSessionID: transcript.sessionID)?.isQuarantined == true)
+        XCTAssertNil(store.resumePendingDelivery(
+            forSessionID: transcript.sessionID,
+            now: Date(timeIntervalSince1970: 1_720_000_042),
+            ownerID: "owner-b"
+        ))
+    }
+
+    func testEvictedAmbiguousDeliveryLeavesATombstone() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        var firstTranscript: SharedDictationTranscript?
+
+        for index in 0..<10 {
+            let transcript = try XCTUnwrap(SharedDictationTranscript(
+                sessionID: "session-ambiguous-\(index)",
+                commandToken: "command-ambiguous-\(index)",
+                text: "ambiguous \(index)"
+            ))
+            firstTranscript = firstTranscript ?? transcript
+            let documentIdentifier = UUID()
+            let before = SharedDictationDocumentContextFingerprint(
+                beforeInput: "before \(index)",
+                afterInput: nil,
+                documentIdentifier: documentIdentifier
+            )
+            let after = SharedDictationDocumentContextFingerprint(
+                beforeInput: "after \(index)",
+                afterInput: nil,
+                documentIdentifier: documentIdentifier
+            )
+
+            XCTAssertTrue(store.save(transcript))
+            XCTAssertTrue(store.beginDelivery(
+                transcript,
+                beforeContext: before,
+                afterContext: after,
+                operations: [.insertText(" ambiguous \(index)")],
+                stepContexts: [before, after],
+                ownerID: "owner-\(index)"
+            ))
+            XCTAssertTrue(store.beginDeliveryMutation(
+                transcriptToken: transcript.token,
+                operationIndex: 0,
+                ownerID: "owner-\(index)"
+            ))
+            XCTAssertTrue(store.quarantinePendingDelivery(
+                transcriptToken: transcript.token,
+                ownerID: "owner-\(index)"
+            ))
+        }
+
+        let first = try XCTUnwrap(firstTranscript)
+        XCTAssertNil(store.pendingDelivery(forSessionID: first.sessionID))
+        XCTAssertFalse(store.save(first))
+    }
+
+    func testDeliveryWithOperationsRequiresCompleteStepContexts() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-contexts",
+            commandToken: "command-contexts",
+            text: "x"
+        ))
+        XCTAssertTrue(store.save(transcript))
+        let context = SharedDictationDocumentContextFingerprint(beforeInput: "", afterInput: nil)
+        XCTAssertFalse(store.beginDelivery(
+            transcript,
+            beforeContext: context,
+            afterContext: context,
+            operations: [.insertText("x")],
+            stepContexts: []
+        ))
+    }
+
+    func testPartiallyAppliedDeliveryCannotBeReplacedFromOperationZero() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-partial",
+            commandToken: "command-partial",
+            text: "partial"
+        ))
+        let before = SharedDictationDocumentContextFingerprint(beforeInput: "a", afterInput: nil)
+        let afterFirst = SharedDictationDocumentContextFingerprint(beforeInput: "ax", afterInput: nil)
+        let afterSecond = SharedDictationDocumentContextFingerprint(beforeInput: "axy", afterInput: nil)
+        let operations: [SharedDictationTranscriptDelivery.Operation] = [
+            .insertText("x"),
+            .insertText("y")
+        ]
+        XCTAssertTrue(store.save(transcript))
+        XCTAssertTrue(store.beginDelivery(
+            transcript,
+            beforeContext: before,
+            afterContext: afterSecond,
+            operations: operations,
+            stepContexts: [before, afterFirst, afterSecond],
+            ownerID: "owner-partial"
+        ))
+        XCTAssertTrue(store.beginDeliveryMutation(
+            transcriptToken: transcript.token,
+            operationIndex: 0,
+            ownerID: "owner-partial"
+        ))
+        XCTAssertTrue(store.markDeliveryProgress(
+            transcriptToken: transcript.token,
+            appliedOperationCount: 1,
+            ownerID: "owner-partial",
+            observedContext: afterFirst
+        ))
+        XCTAssertFalse(store.beginDelivery(
+            transcript,
+            beforeContext: before,
+            afterContext: afterSecond,
+            operations: operations,
+            stepContexts: [before, afterFirst, afterSecond],
+            ownerID: "owner-partial"
+        ))
+    }
+
+    func testPendingDeliveryCannotBeResumedByAnotherOwnerUntilLeaseExpires() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-owner",
+            commandToken: "command-owner",
+            text: "owned delivery",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        let before = SharedDictationDocumentContextFingerprint(
+            beforeInput: "hello",
+            afterInput: nil,
+            documentIdentifier: nil,
+            selectedText: nil
+        )
+        store.save(transcript)
+
+        XCTAssertTrue(store.beginDelivery(
+            transcript,
+            beforeContext: before,
+            afterContext: before,
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+        XCTAssertNil(store.resumePendingDelivery(
+            forSessionID: transcript.sessionID,
+            now: Date(timeIntervalSince1970: 1_720_000_011),
+            ownerID: "owner-b"
+        ))
+        XCTAssertEqual(
+            store.resumePendingDelivery(
+                forSessionID: transcript.sessionID,
+                now: Date(timeIntervalSince1970: 1_720_000_041),
+                ownerID: "owner-b"
+            ),
+            transcript
+        )
+        XCTAssertEqual(
+            store.pendingDelivery(forSessionID: transcript.sessionID)?.ownerID,
+            "owner-b"
+        )
+        XCTAssertFalse(store.discardPendingDelivery(
+            transcriptToken: transcript.token,
+            ownerID: "owner-a",
+            now: Date(timeIntervalSince1970: 1_720_000_041)
+        ))
+        XCTAssertTrue(store.discardPendingDelivery(
+            transcriptToken: transcript.token,
+            ownerID: "owner-b",
+            now: Date(timeIntervalSince1970: 1_720_000_041)
+        ))
+    }
+
+    func testSessionHistorySurvivesASecondSessionSave() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+        let first = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-a",
+            commandToken: "command-a",
+            text: "first session",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_001)
+        ))
+        let second = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "session-b",
+            commandToken: "command-b",
+            text: "second session",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+
+        store.save(first)
+        store.save(second)
+
+        XCTAssertEqual(store.latestTranscript(forSessionID: "session-a"), first)
+        XCTAssertEqual(store.latestTranscript(forSessionID: "session-b"), second)
     }
 
     func testConcurrentClaimsHaveSingleWinner() throws {

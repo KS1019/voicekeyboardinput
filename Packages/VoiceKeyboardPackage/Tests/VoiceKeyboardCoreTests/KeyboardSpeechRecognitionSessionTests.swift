@@ -83,7 +83,7 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
     }
 
     func testFinalCommandTranscriptDoesNotClaimTextInsertion() async {
-        let finalUpdate = SpeechRecognitionUpdate(transcript: "delete word", isFinal: true)
+        let finalUpdate = SpeechRecognitionUpdate(transcript: "command delete word", isFinal: true)
         let service = FakeSpeechRecognitionService(initialUpdates: [finalUpdate])
         let session = KeyboardSpeechRecognitionSession(
             speechService: service,
@@ -120,15 +120,92 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         ))
 
         XCTAssertEqual(events.dropFirst().map(\.actions), [
-            [.insertText("hello")],
-            [.insertText(" world")]
+            [.insertText("hello world")]
         ])
+    }
+
+    func testFinalSegmentsDoNotInsertSpaceBeforePunctuationOrCombiningMarks() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "hello", isFinal: true),
+            SpeechRecognitionUpdate(transcript: ".", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "e", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "\u{301}", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [.insertText("hello. e\u{301}")])
+    }
+
+    func testFinalSegmentsDoNotInsertSpaceBeforeUnicodePunctuation() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "wait", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "…", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "done", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "—", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "next", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [.insertText("wait… done— next")])
+    }
+
+    func testCompletedEmojiDoesNotSuppressFollowingWordSpacing() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "❤️", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "hello", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [.insertText("❤️ hello")])
+    }
+
+    func testZeroWidthJoinerOnlySuppressesSpaceBeforeAnotherEmoji() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "family\u{200D}", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "👨", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "hello", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [.insertText("family\u{200D}👨 hello")])
     }
 
     func testFinalCommandSegmentsUpdateTheVirtualContext() async {
         let service = FakeSpeechRecognitionService(initialUpdates: [
             SpeechRecognitionUpdate(transcript: "hello", isFinal: true),
-            SpeechRecognitionUpdate(transcript: "delete word", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "command delete word", isFinal: true),
             SpeechRecognitionUpdate(transcript: "world", isFinal: true)
         ])
         let session = KeyboardSpeechRecognitionSession(
@@ -142,9 +219,7 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         ))
 
         XCTAssertEqual(events.dropFirst().map(\.actions), [
-            [.insertText("hello")],
-            [.deleteBackward(count: TextDeletionCount(5)!)],
-            [.insertText("world")]
+            [.insertText("hello command delete word world")]
         ])
     }
 
@@ -165,9 +240,8 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         ))
 
         XCTAssertEqual(events.dropFirst().map(\.actions), [
-            [.insertText(" hello")],
             [],
-            [.deleteBackward(count: TextDeletionCount(5)!)]
+            [.insertText(" hello delete word")]
         ])
     }
 
@@ -185,7 +259,7 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
             documentContextBeforeInput: ""
         ))
 
-        XCTAssertEqual(events.last?.actions, [.insertText("こんにちは、世界")])
+        XCTAssertEqual(events.last?.actions, [.insertText("こんにちは 読点 世界")])
     }
 
     func testPendingFinalLiteralIsInsertedBeforeRecognitionStreamFailure() async {
@@ -246,6 +320,30 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         XCTAssertEqual(events.last?.state, .inserted("final text"))
     }
 
+    func testDelayedConsumerStillReceivesFinalEventAfterTheDeliveryWaitWindow() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "final text", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+        let stream = session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        )
+
+        try? await Task.sleep(for: .seconds(2.2))
+        let events = await collect(stream)
+
+        XCTAssertEqual(events.last?.state, .inserted("final text"))
+        XCTAssertEqual(events.last?.actions, [.insertText("final text")])
+        XCTAssertEqual(
+            events.filter { $0.actions == [.insertText("final text")] }.count,
+            1
+        )
+    }
+
     func testJapaneseFinalSegmentsDoNotGainAsciiSeparators() async {
         let service = FakeSpeechRecognitionService(initialUpdates: [
             SpeechRecognitionUpdate(transcript: "こんにちは", isFinal: true),
@@ -262,9 +360,48 @@ final class KeyboardSpeechRecognitionSessionTests: XCTestCase {
         ))
 
         XCTAssertEqual(events.dropFirst().map(\.actions), [
-            [.insertText("こんにちは")],
-            [.insertText("世界")]
+            [.insertText("こんにちは世界")]
         ])
+    }
+
+    func testMixedJapaneseAndLatinFinalSegmentsDoNotGainAsciiSeparator() async {
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: "今日は", isFinal: true),
+            SpeechRecognitionUpdate(transcript: "Swift", isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "ja-JP"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [.insertText("今日はSwift")])
+    }
+
+    func testCombiningMarkFloodIsRejectedByByteAndScalarBounds() async {
+        let oversizedSegment = "e" + String(repeating: "\u{301}", count: 300_000)
+        let service = FakeSpeechRecognitionService(initialUpdates: [
+            SpeechRecognitionUpdate(transcript: oversizedSegment, isFinal: true)
+        ])
+        let session = KeyboardSpeechRecognitionSession(
+            speechService: service,
+            pipeline: VoiceInputPipeline(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        )
+
+        let events = await collect(session.events(
+            locale: VoiceKeyboardLocale(identifier: "en-US"),
+            documentContextBeforeInput: ""
+        ))
+
+        XCTAssertEqual(events.last?.actions, [])
+        guard case let .recognitionFailed(.recognitionFailed(message)) = events.last?.state else {
+            return XCTFail("Expected transcript-size recognition failure")
+        }
+        XCTAssertTrue(message.contains("transcriptTooLong"))
     }
 
     func testUnsupportedCommandRemainsVisibleAsAnActionAndState() async {

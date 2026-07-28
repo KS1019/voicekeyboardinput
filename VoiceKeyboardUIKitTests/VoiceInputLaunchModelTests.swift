@@ -1,5 +1,6 @@
 @testable import VoiceKeyboardInput
 import VoiceKeyboardModels
+import VoiceKeyboardSharedStorage
 import XCTest
 
 typealias SharedDictationSessionStore = VoiceKeyboardInput.SharedDictationSessionStoreForTesting
@@ -36,6 +37,40 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertNil(coordinator.begin())
         XCTAssertTrue(coordinator.claimLateDeactivation(token))
         coordinator.finish(token)
+        let nextToken = coordinator.begin()
+        XCTAssertNotNil(nextToken)
+        if let nextToken {
+            coordinator.finish(nextToken)
+        }
+    }
+
+    func testLateSessionOperationCompletionDoesNotClearTerminalQuarantine() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        coordinator.beginSessionOperation()
+        coordinator.markTerminal()
+        coordinator.completeSessionOperation()
+
+        XCTAssertTrue(coordinator.isTerminal)
+        XCTAssertNil(coordinator.begin())
+
+        coordinator.finish(token)
+        XCTAssertFalse(coordinator.isTerminal)
+    }
+
+    func testFinishedAudioOperationCanReleaseAWatchdogQuarantine() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        XCTAssertTrue(coordinator.beginDeactivationPending(for: token))
+        coordinator.finish(token)
+        coordinator.completeDeactivationPendingIfOperationFinished(token)
+
         let nextToken = coordinator.begin()
         XCTAssertNotNil(nextToken)
         if let nextToken {
@@ -204,6 +239,41 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         await waitForStartCall(in: activator)
 
         XCTAssertEqual(activator.recordedCallCount(), 1)
+        XCTAssertEqual(store.status(), .transcriptReady(token: command.token))
+    }
+
+    func testPrepareSessionPromotesPersistedTranscriptWhenStatusWriteWasInterrupted() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = SharedDictationTranscriptStore(defaults: defaults)
+        let command = SharedDictationSessionCommand.start(source: .keyboard)
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: command.sessionID,
+            commandToken: command.token,
+            text: "persisted before status",
+            createdAt: Date()
+        ))
+        store.saveCommand(command)
+        store.saveStatus(.recording(
+            token: command.token,
+            startedAt: Date(),
+            timeoutSeconds: 8
+        ))
+        transcriptStore.save(transcript)
+
+        let activator = MicrophoneActivatorSpy(status: .transcriptShared("must not restart"))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
+        )
+
+        _ = await controller.prepareSession()
+        try await Task.sleep(for: .milliseconds(350))
+
+        XCTAssertEqual(activator.recordedCallCount(), 0)
         XCTAssertEqual(store.status(), .transcriptReady(token: command.token))
     }
 

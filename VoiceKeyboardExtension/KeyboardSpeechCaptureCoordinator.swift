@@ -5,6 +5,12 @@ import VoiceKeyboardModels
 import VoiceKeyboardPresentation
 
 struct KeyboardSpeechCaptureCoordinator {
+    // Apple does not guarantee microphone access for custom keyboard
+    // extensions, even with full access. Keep the experimental direct path
+    // compiled for diagnostics, but make the containing-app handoff the only
+    // product path so Bluetooth/HFP capture happens in the supported process.
+    private static let directKeyboardCaptureEnabled = false
+
     private let capabilityChecker: any CapabilityChecking
     private let readinessService: KeyboardSpeechCaptureReadinessService
     private let recognitionSession: KeyboardSpeechRecognitionSession
@@ -39,11 +45,13 @@ struct KeyboardSpeechCaptureCoordinator {
     }
 
     func shouldOpenContainingAppForDictation() -> Bool {
-        capabilityChecker.currentCapabilities().microphoneCaptureAvailable == false
+        !Self.directKeyboardCaptureEnabled
+            || capabilityChecker.currentCapabilities().microphoneCaptureAvailable == false
     }
 
     func directRecognitionIsReady() async -> Bool {
-        guard !shouldOpenContainingAppForDictation(),
+        guard Self.directKeyboardCaptureEnabled,
+              !shouldOpenContainingAppForDictation(),
               let duration = AudioCaptureProbeDuration(seconds: 0.8) else {
             return false
         }
@@ -61,7 +69,7 @@ struct KeyboardSpeechCaptureCoordinator {
         }
 
         guard let duration = AudioCaptureProbeDuration(seconds: 0.8) else {
-            preconditionFailure("Invalid audio input probe duration")
+            return .keyboardSpeechCapture(.probeFailed(.probeUnavailable))
         }
         let state = await readinessService.probeState(duration: duration)
         return .keyboardSpeechCapture(state)

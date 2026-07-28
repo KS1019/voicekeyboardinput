@@ -11,6 +11,7 @@ enum AppSpeechDictationError: LocalizedError {
     case audioInterrupted
     case audioRouteLost
     case audioConfigurationChanged
+    case audioTapDrainTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -30,6 +31,8 @@ enum AppSpeechDictationError: LocalizedError {
             "Audio input is no longer available."
         case .audioConfigurationChanged:
             "Audio input changed while recording. Please try again."
+        case .audioTapDrainTimedOut:
+            "Audio input did not stop safely. Please try voice input again."
         }
     }
 }
@@ -243,9 +246,14 @@ final class AppSpeechDictationRun {
     private var pendingError: Error?
     private var latestTranscript = ""
     private var didFinish = false
+    private var isAwaitingFinalResult = false
+    private var stopRequested = false
     private var didStart = false
     private var tapIsInstalled = false
     private var lingeringAudioEngineStartTask: Task<AppAudioEngineOperationStatus, Never>?
+    private var lingeringAudioTapCleanupTask: Task<Void, Never>?
+    private var drainWatchdogTask: Task<Void, Never>?
+    private var pendingStopTask: Task<Void, Never>?
     private var audioTapGate: AudioTapGate?
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
@@ -286,10 +294,18 @@ final class AppSpeechDictationRun {
         installAudioSessionObservers()
         do {
             try await setAudioSessionCategory(session)
+            guard !stopRequested, !Task.isCancelled else {
+                await cleanup()
+                throw CancellationError()
+            }
             try await activateAudioSession(session)
         } catch {
             await cleanup()
             throw error
+        }
+        guard !stopRequested else {
+            await cleanup()
+            throw CancellationError()
         }
         guard !Task.isCancelled else {
             await cleanup()
@@ -304,6 +320,10 @@ final class AppSpeechDictationRun {
         } catch {
             await cleanup()
             throw AppSpeechDictationError.audioConfigurationChanged
+        }
+        guard !stopRequested else {
+            await cleanup()
+            throw CancellationError()
         }
 
         // Selecting Bluetooth HFP intentionally emits route/engine
@@ -338,6 +358,10 @@ final class AppSpeechDictationRun {
         let tapGate = AudioTapGate()
         audioTapGate = tapGate
 
+        guard !stopRequested else {
+            await cleanup()
+            throw CancellationError()
+        }
         guard preparationAudioIsStable(session: session) else {
             await cleanup()
             throw AppSpeechDictationError.audioConfigurationChanged
@@ -362,6 +386,10 @@ final class AppSpeechDictationRun {
         }
 
         isPreparingAudio = false
+        guard !stopRequested else {
+            await cleanup()
+            throw CancellationError()
+        }
         guard preparationIsStable else {
             await cleanup()
             throw AppSpeechDictationError.audioConfigurationChanged
@@ -380,6 +408,10 @@ final class AppSpeechDictationRun {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
+                if stopRequested {
+                    self.complete(.failure(CancellationError()))
+                    return
+                }
                 if let pendingError {
                     self.pendingError = nil
                     self.complete(.failure(pendingError))
@@ -397,7 +429,7 @@ final class AppSpeechDictationRun {
                         return
                     }
                     await MainActor.run {
-                        self.finishWithLatestTranscript()
+                        self.requestFinalResult()
                     }
                 }
                 task = recognizer.recognitionTask(with: request) { [weak self] result, error in
@@ -436,6 +468,84 @@ final class AppSpeechDictationRun {
         complete(.success(latestTranscript))
     }
 
+    private func requestFinalResult() {
+        guard !didFinish, !isAwaitingFinalResult else { return }
+        isAwaitingFinalResult = true
+        // `endAudio()` means that no more buffers will arrive. Stop and drain
+        // the engine tap first so an in-flight callback cannot append after
+        // Speech has started finalizing the request.
+        let tapGate = audioTapGate
+        tapGate?.invalidate()
+        audioTapGate = nil
+        let requestToEnd = request
+        request = nil
+        // AVAudioEngine teardown can block on Bluetooth/HFP route work. Keep
+        // it off the main actor even when the tap has already drained, and
+        // retain the cleanup holder until both the tap and request are safe.
+        let cleanup = DeferredAudioEngineCleanup(
+            gate: tapGate,
+            engine: engine,
+            request: requestToEnd,
+            tapIsInstalled: tapIsInstalled,
+            engineStartTask: nil
+        )
+        let cleanupTask = Task.detached {
+            guard await cleanup.waitForCompletion(timeout: 2) else {
+                await cleanup.quarantine().value
+                return
+            }
+        }
+        tapIsInstalled = false
+        lingeringAudioTapCleanupTask = cleanupTask
+        // Do not wait indefinitely for a broken route or a stuck Speech
+        // append callback before completing User Stop. The normal cleanup
+        // path retains the task and keeps the audio coordinator quarantined;
+        // it never deactivates the session underneath the callback.
+        drainWatchdogTask?.cancel()
+        drainWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self,
+                      !self.didFinish,
+                      self.isAwaitingFinalResult,
+                      self.lingeringAudioTapCleanupTask != nil else { return }
+                AppAudioSessionOperationCoordinator.shared.markTerminal()
+                self.complete(.failure(AppSpeechDictationError.audioTapDrainTimedOut))
+            }
+        }
+        Task { [weak self] in
+            await cleanupTask.value
+            await MainActor.run {
+                guard let self, self.lingeringAudioTapCleanupTask != nil else { return }
+                self.lingeringAudioTapCleanupTask = nil
+                self.drainWatchdogTask?.cancel()
+                self.drainWatchdogTask = nil
+                self.startFinalizationTimeout()
+            }
+        }
+    }
+
+    private func startFinalizationTimeout() {
+        guard !didFinish else { return }
+        // Speech recognition normally emits a final callback after endAudio.
+        // Do not turn the last volatile hypothesis into a command if the
+        // recognizer never confirms it; fail safely after a bounded grace
+        // period instead.
+        timeoutTask?.cancel()
+        timeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            await MainActor.run {
+                guard let self, !self.didFinish else { return }
+                self.complete(.failure(AppSpeechDictationError.emptyTranscript))
+            }
+        }
+    }
+
     private func complete(_ result: Result<String, Error>) {
         guard !didFinish else { return }
         guard continuation != nil else {
@@ -463,7 +573,55 @@ final class AppSpeechDictationRun {
     }
 
     func finishForUserStop() {
-        finishWithLatestTranscript()
+        guard !didFinish else { return }
+        stopRequested = true
+        // During permission, route, or engine preparation there is no Speech
+        // continuation to finish yet. `start()` observes this flag after each
+        // awaited setup phase and performs the normal cleanup path.
+        guard continuation != nil, !isAwaitingFinalResult else { return }
+        // AVAudioEngine.start() runs off-main. Never call removeTap/stop on
+        // the same engine until that operation has settled; doing so can
+        // trigger an audio graph assertion or deadlock on rapid Stop.
+        if let engineStartTask = lingeringAudioEngineStartTask {
+            pendingStopTask?.cancel()
+            pendingStopTask = Task { [weak self] in
+                let didSettle = await self?.waitForAudioEngineStart(
+                    engineStartTask,
+                    timeout: 2
+                ) ?? true
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    if didSettle {
+                        self.requestFinalResult()
+                    } else {
+                        AppAudioSessionOperationCoordinator.shared.markTerminal()
+                        self.complete(.failure(AppSpeechDictationError.audioEngineStartFailed))
+                    }
+                }
+            }
+            return
+        }
+        requestFinalResult()
+    }
+
+    private func waitForAudioEngineStart(
+        _ operation: Task<AppAudioEngineOperationStatus, Never>,
+        timeout: TimeInterval
+    ) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let gate = AudioSessionCompletionGate()
+            Task {
+                _ = await operation.value
+                guard gate.finish() else { return }
+                continuation.resume(returning: true)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                guard gate.finish() else { return }
+                continuation.resume(returning: false)
+            }
+        }
     }
 
     private func installAudioSessionObservers() {
@@ -490,7 +648,7 @@ final class AppSpeechDictationRun {
             preparationMonitor.markChanged()
             Task { @MainActor in
                 guard let self else { return }
-                if self.isPreparingAudio {
+                if self.isPreparingAudio || self.isAwaitingFinalResult || self.didFinish {
                     // Route changes caused by selecting the preferred HFP
                     // input are expected during setup. The stable baseline
                     // is captured after routing settles.
@@ -500,7 +658,9 @@ final class AppSpeechDictationRun {
                 // built-in microphone. Treat any post-setup route/format UID
                 // change as a failed run instead of feeding the old tap format
                 // into the recognizer.
-                guard !self.preparationAudioIsStable(session: AVAudioSession.sharedInstance()) else {
+                guard !self.audioConfigurationMatchesPreparedRoute(
+                    session: AVAudioSession.sharedInstance()
+                ) else {
                     return
                 }
                 self.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
@@ -514,7 +674,7 @@ final class AppSpeechDictationRun {
             preparationMonitor.markChanged()
             Task { @MainActor in
                 guard let self else { return }
-                if self.isPreparingAudio {
+                if self.isPreparingAudio || self.isAwaitingFinalResult || self.didFinish {
                     // AVAudioEngine can report a configuration change while
                     // the selected HFP route is being materialized. The
                     // stable format check below is the setup-time authority.
@@ -548,8 +708,15 @@ final class AppSpeechDictationRun {
     private func cleanup() async {
         isPreparingAudio = false
         pendingError = nil
+        pendingStopTask?.cancel()
+        pendingStopTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
+        drainWatchdogTask?.cancel()
+        drainWatchdogTask = nil
+        let audioTapGate = self.audioTapGate
+        audioTapGate?.invalidate()
+        self.audioTapGate = nil
         task?.cancel()
         task = nil
         if let interruptionObserver {
@@ -574,6 +741,22 @@ final class AppSpeechDictationRun {
         }
         let session = AVAudioSession.sharedInstance()
         let coordinator = AppAudioSessionOperationCoordinator.shared
+        if let lingeringAudioTapCleanupTask {
+            let didFinish = await waitForAudioCleanup(lingeringAudioTapCleanupTask, timeout: 2)
+            if !didFinish {
+                coordinator.markTerminal()
+                coordinator.beginDeactivationPending()
+                releaseAudioSessionOwnershipIfSafe()
+                let cleanupTask = lingeringAudioTapCleanupTask
+                Task { @MainActor [self] in
+                    await cleanupTask.value
+                    self.lingeringAudioTapCleanupTask = nil
+                    await self.finishDeferredAudioTapCleanup(session)
+                }
+                return
+            }
+            self.lingeringAudioTapCleanupTask = nil
+        }
         let hasPendingSessionOperation = coordinator.hasPendingSessionOperation
         if hasPendingSessionOperation {
             // A stop racing an in-flight AVAudioSession call must not allow a
@@ -583,9 +766,6 @@ final class AppSpeechDictationRun {
         let deactivationToken = hasPendingSessionOperation
             ? nil
             : await acquireDeactivationToken()
-        let audioTapGate = self.audioTapGate
-        audioTapGate?.invalidate()
-        self.audioTapGate = nil
         let requestToEnd = self.request
         self.request = nil
         let engineCleanup = DeferredAudioEngineCleanup(
@@ -600,13 +780,17 @@ final class AppSpeechDictationRun {
         if didCompleteEngineCleanup {
             if coordinator.hasPendingSessionOperation {
                 scheduleDeferredAudioSessionDeactivation(session)
+                releaseAudioSessionOwnershipIfSafe()
                 return
             }
             guard let deactivationToken else {
                 scheduleDeferredAudioSessionDeactivation(session)
+                releaseAudioSessionOwnershipIfSafe()
                 return
             }
-            await deactivateAudioSession(session, operationToken: deactivationToken)
+            if await deactivateAudioSession(session, operationToken: deactivationToken) {
+                coordinator.completeDeactivationPending()
+            }
             releaseAudioSessionOwnershipIfSafe()
         } else {
             let quarantineTask = engineCleanup.quarantine()
@@ -618,37 +802,52 @@ final class AppSpeechDictationRun {
                     // callback is still in flight. The terminal state prevents a new
                     // run from starting; a detached continuation performs cleanup only
                     // after the engine operation has actually quiesced.
-                    Task { @MainActor [weak self] in
+                    Task { @MainActor [self] in
                         await quarantineTask.value
-                        guard let self else { return }
                         if let deactivationToken {
-                            await self.deactivateAudioSession(
+                            if await self.deactivateAudioSession(
                                 session,
                                 operationToken: deactivationToken
-                            )
+                            ) {
+                                coordinator.completeDeactivationPending()
+                            }
                             self.releaseAudioSessionOwnershipIfSafe()
                         } else {
                             self.scheduleDeferredAudioSessionDeactivation(session)
+                            self.releaseAudioSessionOwnershipIfSafe()
                         }
                     }
                     return
                 }
                 if let deactivationToken {
-                    await deactivateAudioSession(session, operationToken: deactivationToken)
+                    if await deactivateAudioSession(session, operationToken: deactivationToken) {
+                        coordinator.completeDeactivationPending()
+                    }
                     releaseAudioSessionOwnershipIfSafe()
                 } else {
                     scheduleDeferredAudioSessionDeactivation(session)
+                    releaseAudioSessionOwnershipIfSafe()
                 }
             }
         }
     }
 
     private func preparationAudioIsStable(session: AVAudioSession) -> Bool {
-        guard !preparationInvalidated,
+        guard !isAwaitingFinalResult,
+              !didFinish,
+              !preparationInvalidated,
               preparationMonitor.changeCount == preparationGeneration,
               let input = session.currentRoute.inputs.first else {
             return false
         }
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        return input.uid == preparationInputUID
+            && format.channelCount == preparationChannelCount
+            && format.sampleRate == preparationSampleRate
+    }
+
+    private func audioConfigurationMatchesPreparedRoute(session: AVAudioSession) -> Bool {
+        guard let input = session.currentRoute.inputs.first else { return false }
         let format = engine.inputNode.outputFormat(forBus: 0)
         return input.uid == preparationInputUID
             && format.channelCount == preparationChannelCount
@@ -734,31 +933,59 @@ final class AppSpeechDictationRun {
     }
 
     private func scheduleDeferredAudioSessionDeactivation(_ session: AVAudioSession) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard await AppAudioSessionOperationCoordinator.shared.waitForPendingSessionOperations(
-                timeout: 10
-            ) else {
-                AppAudioSessionOperationCoordinator.shared.markTerminal()
-                return
+        let coordinator = AppAudioSessionOperationCoordinator.shared
+        coordinator.beginDeactivationPending()
+        Task { @MainActor [self] in
+            if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
+                // A late AVAudioSession callback may still activate the
+                // session after the user-facing timeout. Keep the terminal
+                // fence and ownership until that operation actually settles;
+                // releasing here would abandon an active session with no
+                // safe deactivation path.
+                await coordinator.waitForPendingSessionOperationsUntilSettled()
             }
             for _ in 0..<40 where !Task.isCancelled {
-                if AppAudioSessionOperationCoordinator.shared.isTerminal {
-                    if let operationToken = AppAudioSessionOperationCoordinator.shared.beginForCleanup() {
-                        await self.deactivateAudioSession(session, operationToken: operationToken)
+                if coordinator.isTerminal {
+                    if let operationToken = coordinator.beginForCleanup() {
+                        let didDeactivate = await self.deactivateAudioSession(
+                            session,
+                            operationToken: operationToken
+                        )
+                        coordinator.completeDeactivationPending(
+                            deactivationSucceeded: didDeactivate
+                        )
                         self.releaseAudioSessionOwnershipIfSafe()
+                    } else {
+                        coordinator.completeDeactivationPending(deactivationSucceeded: false)
+                        coordinator.markTerminal()
+                        self.releaseAudioSessionOwnershipAfterTerminal()
                     }
                     return
                 }
-                guard let operationToken = await AppAudioSessionOperationCoordinator.shared.beginWhenAvailable() else {
+                guard let operationToken = await coordinator.beginWhenAvailable() else {
                     continue
                 }
-                await self.deactivateAudioSession(session, operationToken: operationToken)
+                let didDeactivate = await self.deactivateAudioSession(
+                    session,
+                    operationToken: operationToken
+                )
+                coordinator.completeDeactivationPending(
+                    deactivationSucceeded: didDeactivate
+                )
                 self.releaseAudioSessionOwnershipIfSafe()
                 return
             }
-            AppAudioSessionOperationCoordinator.shared.markTerminal()
+            coordinator.markTerminal()
+            coordinator.completeDeactivationPending(deactivationSucceeded: false)
+            coordinator.markTerminal()
+            self.releaseAudioSessionOwnershipAfterTerminal()
         }
+    }
+
+    private func releaseAudioSessionOwnershipAfterTerminal() {
+        guard let ownershipToken = audioSessionOwnershipToken else { return }
+        AppAudioSessionOperationCoordinator.shared.releaseOwnershipAfterTerminal(ownershipToken)
+        audioSessionOwnershipToken = nil
     }
 
     private func acquireDeactivationToken() async -> UInt64? {
@@ -771,10 +998,28 @@ final class AppSpeechDictationRun {
 
     private func releaseAudioSessionOwnershipIfSafe() {
         let coordinator = AppAudioSessionOperationCoordinator.shared
-        guard !coordinator.isTerminal, !coordinator.hasPendingSessionOperation,
-              let ownershipToken = audioSessionOwnershipToken else { return }
-        coordinator.releaseOwnership(ownershipToken)
+        guard let ownershipToken = audioSessionOwnershipToken else { return }
+        coordinator.releaseOwnershipWhenIdle(ownershipToken)
         audioSessionOwnershipToken = nil
+    }
+
+    private func finishDeferredAudioTapCleanup(_ session: AVAudioSession) async {
+        guard let operationToken = await acquireDeactivationToken() else {
+            let coordinator = AppAudioSessionOperationCoordinator.shared
+            coordinator.markTerminal()
+            coordinator.completeDeactivationPending(deactivationSucceeded: false)
+            coordinator.markTerminal()
+            releaseAudioSessionOwnershipAfterTerminal()
+            return
+        }
+        let didDeactivate = await deactivateAudioSession(
+            session,
+            operationToken: operationToken
+        )
+        AppAudioSessionOperationCoordinator.shared.completeDeactivationPending(
+            deactivationSucceeded: didDeactivate
+        )
+        releaseAudioSessionOwnershipIfSafe()
     }
 
     private func waitForAudioCleanup(
@@ -918,10 +1163,10 @@ final class AppSpeechDictationRun {
     private func deactivateAudioSession(
         _ session: AVAudioSession,
         operationToken: UInt64
-    ) async {
+    ) async -> Bool {
         let coordinator = AppAudioSessionOperationCoordinator.shared
         if #available(iOS 27.0, *) {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 let gate = AudioSessionCompletionGate()
                 Task {
                     try? await Task.sleep(for: .seconds(2))
@@ -933,7 +1178,7 @@ final class AppSpeechDictationRun {
                         coordinator: coordinator,
                         operationToken: operationToken
                     )
-                    continuation.resume()
+                    continuation.resume(returning: false)
                 }
                 coordinator.beginSessionOperation()
                 DispatchQueue.global(qos: .utility).async {
@@ -966,18 +1211,17 @@ final class AppSpeechDictationRun {
                                 coordinator: coordinator,
                                 operationToken: operationToken
                             )
-                            continuation.resume()
+                            continuation.resume(returning: false)
                             return
                         }
                         coordinator.finish(operationToken)
-                        continuation.resume()
+                        continuation.resume(returning: true)
                     }
                 }
             }
-            return
         }
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let gate = AudioSessionCompletionGate()
             Task {
                 try? await Task.sleep(for: .seconds(2))
@@ -989,7 +1233,7 @@ final class AppSpeechDictationRun {
                     coordinator: coordinator,
                     operationToken: operationToken
                 )
-                continuation.resume()
+                continuation.resume(returning: false)
             }
             coordinator.beginSessionOperation()
             DispatchQueue.global(qos: .utility).async {
@@ -1035,11 +1279,11 @@ final class AppSpeechDictationRun {
                         coordinator: coordinator,
                         operationToken: operationToken
                     )
-                    continuation.resume()
+                    continuation.resume(returning: false)
                     return
                 }
                 coordinator.finish(operationToken)
-                continuation.resume()
+                continuation.resume(returning: true)
             }
         }
     }
@@ -1104,16 +1348,25 @@ private func scheduleAudioSessionQuarantine(
     coordinator: AppAudioSessionOperationCoordinator,
     operationToken: UInt64
 ) {
+    guard coordinator.beginDeactivationPending(for: operationToken) else {
+        return
+    }
     Task {
         try? await Task.sleep(for: .seconds(2))
-        guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
-            coordinator.markTerminalAndRelease(operationToken)
+        if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
+            await coordinator.waitForPendingSessionOperationsUntilSettled()
+        }
+        guard coordinator.beginFallbackDeactivation(operationToken) else {
+            coordinator.completeDeactivationPendingIfOperationFinished(operationToken)
             return
         }
-        guard coordinator.beginFallbackDeactivation(operationToken) else { return }
         Task {
             try? await Task.sleep(for: .seconds(10))
             coordinator.terminateFallbackIfNeeded(operationToken)
+            coordinator.completeDeactivationPending(
+                for: operationToken,
+                deactivationSucceeded: false
+            )
         }
         coordinator.beginSessionOperation()
         DispatchQueue.global(qos: .utility).async {
@@ -1125,15 +1378,20 @@ private func scheduleAudioSessionQuarantine(
                 succeeded = false
             }
             coordinator.completeSessionOperation()
-            coordinator.completeFallbackDeactivation(
+            let result = coordinator.completeFallbackDeactivation(
                 operationToken,
                 succeeded: succeeded
             )
-            if succeeded {
-                Task {
-                    try? await Task.sleep(for: .seconds(10))
-                    coordinator.terminateIfNeeded(operationToken)
-                }
+            switch result {
+            case .succeeded:
+                coordinator.completeDeactivationPending(for: operationToken)
+            case .failed:
+                coordinator.completeDeactivationPending(
+                    for: operationToken,
+                    deactivationSucceeded: false
+                )
+            case .ignored:
+                break
             }
         }
     }
@@ -1188,6 +1446,12 @@ private func deactivateLateAudioSession(
     return true
 }
 
+enum AppAudioDeactivationResult {
+    case ignored
+    case succeeded
+    case failed
+}
+
 private func scheduleLateDeactivationWatchdog(
     _ session: AVAudioSession,
     coordinator: AppAudioSessionOperationCoordinator,
@@ -1195,14 +1459,24 @@ private func scheduleLateDeactivationWatchdog(
 ) {
     Task {
         try? await Task.sleep(for: .seconds(2))
-        guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
-            coordinator.terminateOperationIfNeeded(operationToken)
+        if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
+            await coordinator.waitForPendingSessionOperationsUntilSettled()
+        }
+        guard coordinator.beginLateDeactivationFallback(operationToken) else {
+            // The original late callback may have completed in the small
+            // window between the operation wait and this watchdog. It already
+            // called finish(), so release the quarantine token here as well;
+            // otherwise deactivationPending remains latched forever.
+            coordinator.completeDeactivationPendingIfOperationFinished(operationToken)
             return
         }
-        guard coordinator.beginLateDeactivationFallback(operationToken) else { return }
         Task {
             try? await Task.sleep(for: .seconds(10))
             coordinator.terminateLateFallbackIfNeeded(operationToken)
+            coordinator.completeDeactivationPending(
+                for: operationToken,
+                deactivationSucceeded: false
+            )
         }
         coordinator.beginSessionOperation()
         DispatchQueue.global(qos: .utility).async {
@@ -1214,12 +1488,19 @@ private func scheduleLateDeactivationWatchdog(
                 succeeded = false
             }
             coordinator.completeSessionOperation()
-            coordinator.completeLateDeactivationFallback(operationToken, succeeded: succeeded)
-            if succeeded {
-                Task {
-                    try? await Task.sleep(for: .seconds(10))
-                    coordinator.terminateIfNeeded(operationToken)
-                }
+            switch coordinator.completeLateDeactivationFallback(
+                operationToken,
+                succeeded: succeeded
+            ) {
+            case .succeeded:
+                coordinator.completeDeactivationPending(for: operationToken)
+            case .failed:
+                coordinator.completeDeactivationPending(
+                    for: operationToken,
+                    deactivationSucceeded: false
+                )
+            case .ignored:
+                break
             }
         }
     }
@@ -1239,15 +1520,23 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
     private var callbackObservedDuringLateFallback: Set<UInt64> = []
     private var retiredTokens: Set<UInt64> = []
     private var terminalTokens: Set<UInt64> = []
+    private var finishedTokens: Set<UInt64> = []
     private var isTerminalState = false
     private var pendingSessionOperations = 0
+    private var deactivationPending = false
+    private var anonymousDeactivationPendingCount = 0
     private var nextOwnerToken: UInt64 = 0
     private var ownerToken: UInt64?
+    private var deferredOwnerReleaseToken: UInt64?
+    private var scheduledQuarantineTokens: Set<UInt64> = []
 
     func begin() -> UInt64? {
         lock.lock()
         defer { lock.unlock() }
-        guard !isTerminalState, currentToken == nil else { return nil }
+        guard !isTerminalState,
+              currentToken == nil,
+              pendingSessionOperations == 0,
+              !deactivationPending else { return nil }
         nextToken &+= 1
         currentToken = nextToken
         return nextToken
@@ -1270,7 +1559,11 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
             if let token = begin() {
                 return token
             }
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return nil
+            }
         }
         return nil
     }
@@ -1303,15 +1596,33 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
         while hasPendingSessionOperation {
             guard ContinuousClock.now < deadline else { return false }
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return false
+            }
         }
         return true
+    }
+
+    func waitForPendingSessionOperationsUntilSettled() async {
+        while hasPendingSessionOperation {
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+        }
     }
 
     func acquireOwnership() -> UInt64? {
         lock.lock()
         defer { lock.unlock() }
-        guard !isTerminalState, ownerToken == nil else { return nil }
+        guard !isTerminalState,
+              ownerToken == nil,
+              currentToken == nil,
+              pendingSessionOperations == 0,
+              !deactivationPending else { return nil }
         nextOwnerToken &+= 1
         ownerToken = nextOwnerToken
         return nextOwnerToken
@@ -1322,12 +1633,49 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         if ownerToken == token {
             ownerToken = nil
         }
+        if deferredOwnerReleaseToken == token {
+            deferredOwnerReleaseToken = nil
+        }
+        recoverIfIdleLocked()
+        lock.unlock()
+    }
+
+    func releaseOwnershipWhenIdle(_ token: UInt64) {
+        lock.lock()
+        guard ownerToken == token else {
+            lock.unlock()
+            return
+        }
+        if currentToken == nil, pendingSessionOperations == 0, !deactivationPending {
+            ownerToken = nil
+            deferredOwnerReleaseToken = nil
+        } else {
+            deferredOwnerReleaseToken = token
+        }
+        recoverIfIdleLocked()
+        lock.unlock()
+    }
+
+    /// Releases the process owner without clearing the terminal quarantine.
+    /// A failed deactivation must keep future starts fenced, but it must not
+    /// retain an ownership token that can never become usable again.
+    func releaseOwnershipAfterTerminal(_ token: UInt64) {
+        lock.lock()
+        if ownerToken == token {
+            ownerToken = nil
+        }
+        if deferredOwnerReleaseToken == token {
+            deferredOwnerReleaseToken = nil
+        }
         lock.unlock()
     }
 
     func markTerminal() {
         lock.lock()
         isTerminalState = true
+        if let ownerToken {
+            deferredOwnerReleaseToken = ownerToken
+        }
         lock.unlock()
     }
 
@@ -1369,6 +1717,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
 
     func finish(_ token: UInt64) {
         lock.lock()
+        finishedTokens.insert(token)
         if currentToken == token {
             currentToken = nil
         }
@@ -1380,6 +1729,97 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         callbackObservedDuringLateFallback.remove(token)
         retiredTokens.remove(token)
         terminalTokens.remove(token)
+        recoverIfIdleLocked()
+        lock.unlock()
+    }
+
+    func recoverIfIdle() {
+        lock.lock()
+        recoverIfIdleLocked()
+        lock.unlock()
+    }
+
+    private func recoverIfIdleLocked(clearTerminalState: Bool = true) {
+        if currentToken == nil,
+           pendingSessionOperations == 0,
+           !deactivationPending,
+           deferredOwnerReleaseToken == ownerToken {
+            ownerToken = nil
+            deferredOwnerReleaseToken = nil
+        }
+        guard currentToken == nil,
+              pendingSessionOperations == 0,
+              !deactivationPending,
+              ownerToken == nil else { return }
+        guard clearTerminalState else { return }
+        isTerminalState = false
+        invalidatedTokens.removeAll()
+        lateDeactivationTokens.removeAll()
+        fallbackDeactivationTokens.removeAll()
+        callbackObservedDuringFallback.removeAll()
+        lateFallbackDeactivationTokens.removeAll()
+        callbackObservedDuringLateFallback.removeAll()
+        retiredTokens.removeAll()
+        terminalTokens.removeAll()
+        finishedTokens.removeAll()
+    }
+
+    func beginDeactivationPending() {
+        lock.lock()
+        anonymousDeactivationPendingCount += 1
+        deactivationPending = true
+        lock.unlock()
+    }
+
+    @discardableResult
+    func beginDeactivationPending(for token: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard scheduledQuarantineTokens.insert(token).inserted else { return false }
+        deactivationPending = true
+        return true
+    }
+
+    private func refreshDeactivationPendingLocked() {
+        deactivationPending = anonymousDeactivationPendingCount > 0
+            || !scheduledQuarantineTokens.isEmpty
+    }
+
+    func completeDeactivationPending(
+        for token: UInt64? = nil,
+        deactivationSucceeded: Bool = true
+    ) {
+        lock.lock()
+        if let token {
+            guard scheduledQuarantineTokens.remove(token) != nil else {
+                lock.unlock()
+                return
+            }
+        } else {
+            guard anonymousDeactivationPendingCount > 0 else {
+                lock.unlock()
+                return
+            }
+            anonymousDeactivationPendingCount -= 1
+        }
+        refreshDeactivationPendingLocked()
+        recoverIfIdleLocked(clearTerminalState: deactivationSucceeded)
+        lock.unlock()
+    }
+
+    func completeDeactivationPendingIfOperationFinished(_ token: UInt64) {
+        lock.lock()
+        let tokenHasSettled = terminalTokens.contains(token)
+            || finishedTokens.contains(token)
+        guard tokenHasSettled,
+              currentToken == token || currentToken == nil else {
+            lock.unlock()
+            return
+        }
+        scheduledQuarantineTokens.remove(token)
+        refreshDeactivationPendingLocked()
+        let didFinishWithoutActiveSession = finishedTokens.remove(token) != nil
+        recoverIfIdleLocked(clearTerminalState: didFinishWithoutActiveSession)
         lock.unlock()
     }
 
@@ -1412,25 +1852,40 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         return true
     }
 
-    func completeFallbackDeactivation(_ token: UInt64, succeeded: Bool) {
+    @discardableResult
+    func completeFallbackDeactivation(
+        _ token: UInt64,
+        succeeded: Bool
+    ) -> AppAudioDeactivationResult {
         lock.lock()
         guard currentToken == token,
               fallbackDeactivationTokens.remove(token) != nil else {
             lock.unlock()
-            return
+            return .ignored
         }
-        if callbackObservedDuringFallback.remove(token) != nil {
+        let result: AppAudioDeactivationResult
+        let callbackObserved = callbackObservedDuringFallback.remove(token) != nil
+        if succeeded {
+            // A successful fallback deactivation is the authoritative final
+            // state. The original callback may have arrived concurrently, but
+            // the session is now inactive and must not remain quarantined.
+            currentToken = nil
+            currentToken = nil
+            finishedTokens.insert(token)
+            result = .succeeded
+        } else if callbackObserved {
             currentToken = nil
             terminalTokens.insert(token)
             isTerminalState = true
-        } else if succeeded {
-            retiredTokens.insert(token)
+            result = .failed
         } else {
             currentToken = nil
             terminalTokens.insert(token)
             isTerminalState = true
+            result = .failed
         }
         lock.unlock()
+        return result
     }
 
     func recordCallbackDuringFallback(_ token: UInt64, succeeded: Bool) -> Bool {
@@ -1446,6 +1901,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
             terminalTokens.insert(token)
             isTerminalState = true
         }
+        recoverIfIdleLocked(clearTerminalState: false)
         return true
     }
 
@@ -1458,6 +1914,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         retiredTokens.remove(token)
         terminalTokens.insert(token)
         isTerminalState = true
+        recoverIfIdleLocked(clearTerminalState: false)
     }
 
     func terminateFallbackIfNeeded(_ token: UInt64) {
@@ -1469,6 +1926,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         currentToken = nil
         terminalTokens.insert(token)
         isTerminalState = true
+        recoverIfIdleLocked(clearTerminalState: false)
     }
 
     func beginLateDeactivationFallback(_ token: UInt64) -> Bool {
@@ -1481,25 +1939,38 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         return true
     }
 
-    func completeLateDeactivationFallback(_ token: UInt64, succeeded: Bool) {
+    func completeLateDeactivationFallback(
+        _ token: UInt64,
+        succeeded: Bool
+    ) -> AppAudioDeactivationResult {
         lock.lock()
         guard currentToken == token,
               lateFallbackDeactivationTokens.remove(token) != nil else {
             lock.unlock()
-            return
+            return .ignored
         }
-        if callbackObservedDuringLateFallback.remove(token) != nil {
+        let result: AppAudioDeactivationResult
+        let callbackObserved = callbackObservedDuringLateFallback.remove(token) != nil
+        if succeeded {
+            // The fallback itself established the safe inactive state. A late
+            // original callback is no longer grounds for permanent quarantine.
+            currentToken = nil
+            finishedTokens.insert(token)
+            result = .succeeded
+        } else if callbackObserved {
             currentToken = nil
             terminalTokens.insert(token)
             isTerminalState = true
-        } else if succeeded {
-            retiredTokens.insert(token)
+            result = .failed
         } else {
             currentToken = nil
             terminalTokens.insert(token)
             isTerminalState = true
+            result = .failed
         }
+        recoverIfIdleLocked(clearTerminalState: false)
         lock.unlock()
+        return result
     }
 
     func terminateLateFallbackIfNeeded(_ token: UInt64) {
@@ -1511,6 +1982,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         currentToken = nil
         terminalTokens.insert(token)
         isTerminalState = true
+        recoverIfIdleLocked(clearTerminalState: false)
     }
 
     func recordCallbackDuringLateFallback(_ token: UInt64, succeeded: Bool) -> Bool {
@@ -1526,6 +1998,7 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
             terminalTokens.insert(token)
             isTerminalState = true
         }
+        recoverIfIdleLocked(clearTerminalState: false)
         return true
     }
 

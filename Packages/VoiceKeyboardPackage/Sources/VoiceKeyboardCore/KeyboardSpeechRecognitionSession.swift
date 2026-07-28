@@ -21,6 +21,61 @@ public enum KeyboardTextInsertionAction: Equatable, Sendable {
 }
 
 public struct KeyboardSpeechRecognitionSession: Sendable {
+    private enum SessionError: Error {
+        case transcriptTooLong
+    }
+
+    private static let maximumTranscriptCharacterCount = 32_768
+
+    private struct TranscriptAccumulator {
+        private(set) var value = ""
+        private var characterCount = 0
+        private var scalarCount = 0
+        private var utf8ByteCount = 0
+
+        mutating func append(_ segment: String) throws {
+            guard !segment.isEmpty else { return }
+            let separator: String
+            if value.isEmpty {
+                separator = ""
+            } else if let last = value.last, let first = segment.first {
+                if last.isWhitespace || first.isWhitespace
+                    || first.isCombiningMark
+                    || first.isGraphemeContinuation
+                    || (last.isGraphemeContinuation && first.isEmojiLike)
+                    || (last.isRegionalIndicator && first.isRegionalIndicator)
+                    || first.isPunctuationLike
+                    || last.isOpeningPunctuation
+                    || last.isJapaneseTextLike
+                    || first.isJapaneseTextLike {
+                    separator = ""
+                } else {
+                    separator = " "
+                }
+            } else {
+                separator = ""
+            }
+
+            let nextCharacterCount = characterCount + separator.count + segment.count
+            let nextScalarCount = scalarCount
+                + separator.unicodeScalars.count
+                + segment.unicodeScalars.count
+            let nextUTF8ByteCount = utf8ByteCount
+                + separator.utf8.count
+                + segment.utf8.count
+            guard nextCharacterCount <= KeyboardSpeechRecognitionSession.maximumTranscriptCharacterCount,
+                  nextScalarCount <= KeyboardSpeechRecognitionSession.maximumTranscriptScalarCount,
+                  nextUTF8ByteCount <= KeyboardSpeechRecognitionSession.maximumTranscriptUTF8ByteCount else {
+                throw SessionError.transcriptTooLong
+            }
+            value.append(contentsOf: separator)
+            value.append(contentsOf: segment)
+            characterCount = nextCharacterCount
+            scalarCount = nextScalarCount
+            utf8ByteCount = nextUTF8ByteCount
+        }
+    }
+
     private let speechService: any SpeechRecognitionService
     private let pipeline: VoiceInputPipeline
 
@@ -36,7 +91,10 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         locale: VoiceKeyboardLocale,
         documentContextBeforeInput: String?
     ) -> AsyncStream<KeyboardSpeechRecognitionEvent> {
-        AsyncStream(bufferingPolicy: .bufferingOldest(1)) { continuation in
+        // Keep the newest partial update and one terminal event. A slow
+        // keyboard consumer must never cause the final insertion/error event
+        // to be rejected behind an already-buffered listening/partial event.
+        AsyncStream(bufferingPolicy: .bufferingNewest(2)) { continuation in
             let stopGate = SpeechRecognitionStopGate()
             let task = Task {
                 guard await yieldRequired(
@@ -44,26 +102,24 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                     to: continuation
                 ) else { return }
 
-                var virtualDocumentContext = documentContextBeforeInput ?? ""
-                var pendingFinalTranscript = ""
+                let virtualDocumentContext = documentContextBeforeInput ?? ""
+                var pendingFinalTranscript = TranscriptAccumulator()
                 do {
                     let updates = try await speechService.start(locale: locale)
                     for try await update in updates {
                         guard !Task.isCancelled else { break }
                         if update.isFinal {
-                            pendingFinalTranscript = appendingTranscriptSegment(
-                                update.transcript,
-                                to: pendingFinalTranscript
-                            )
+                            try pendingFinalTranscript.append(update.transcript)
+                            let transcript = pendingFinalTranscript.value
                             if pipeline.hasIncompleteCommandPrefix(
-                                for: pendingFinalTranscript,
+                                for: transcript,
                                 locale: locale
                             ) {
                                 continuation.yield(
                                     KeyboardSpeechRecognitionEvent(
                                         state: .transcribing(
                                             SpeechRecognitionUpdate(
-                                                transcript: pendingFinalTranscript,
+                                                transcript: transcript,
                                                 isFinal: false,
                                                 inputLevel: update.inputLevel?.value
                                             )
@@ -72,27 +128,22 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                                 )
                                 continue
                             }
-                            let actions = actions(
-                                transcript: pendingFinalTranscript,
-                                documentContextBeforeInput: virtualDocumentContext,
-                                locale: locale
-                            )
-                            pendingFinalTranscript = ""
-                            virtualDocumentContext = applying(actions, to: virtualDocumentContext)
-                            guard await yieldRequired(
-                                KeyboardSpeechRecognitionEvent(
-                                    state: eventState(for: update, actions: actions),
-                                    actions: actions
-                                ),
-                                to: continuation
-                            ) else { break }
+                            // Finalized SpeechAnalyzer segments are not
+                            // guaranteed to be utterance boundaries. Keep
+                            // the complete final transcript until the stream
+                            // closes so a later segment can disambiguate
+                            // natural text such as "hello delete word".
+                            // This intentionally delays document mutation;
+                            // it prevents an early destructive prefix from
+                            // being applied before the sentence is known.
+                            _ = update
                         } else {
                             continuation.yield(KeyboardSpeechRecognitionEvent(state: .transcribing(update)))
                         }
                     }
-                    if !Task.isCancelled, !pendingFinalTranscript.isEmpty {
+                    if !Task.isCancelled, !pendingFinalTranscript.value.isEmpty {
                         let event = finalEvent(
-                            transcript: pendingFinalTranscript,
+                            transcript: pendingFinalTranscript.value,
                             documentContextBeforeInput: virtualDocumentContext,
                             locale: locale
                         )
@@ -101,9 +152,19 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                     await stopGate.stop(speechService)
                     continuation.finish()
                 } catch {
-                    if !pendingFinalTranscript.isEmpty {
+                    let pendingTranscript = pendingFinalTranscript.value
+                    let pendingActions = actions(
+                        transcript: pendingTranscript,
+                        documentContextBeforeInput: virtualDocumentContext,
+                        locale: locale
+                    )
+                    if let pendingActions,
+                       !(error is SessionError),
+                       !pendingTranscript.isEmpty,
+                       !pendingActions.contains(where: isDestructiveAction),
+                       !(error is CancellationError) {
                         let event = finalEvent(
-                            transcript: pendingFinalTranscript,
+                            transcript: pendingTranscript,
                             documentContextBeforeInput: virtualDocumentContext,
                             locale: locale
                         )
@@ -140,11 +201,17 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         locale: VoiceKeyboardLocale
     ) -> KeyboardSpeechRecognitionEvent {
         let update = SpeechRecognitionUpdate(transcript: transcript, isFinal: true)
-        let actions = actions(
+        guard let actions = actions(
             transcript: transcript,
             documentContextBeforeInput: documentContextBeforeInput,
             locale: locale
-        )
+        ) else {
+            return KeyboardSpeechRecognitionEvent(
+                state: .recognitionFailed(
+                    .recognitionFailed("Voice input produced too many editing operations.")
+                )
+            )
+        }
         return KeyboardSpeechRecognitionEvent(
             state: eventState(for: update, actions: actions),
             actions: actions
@@ -155,12 +222,17 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         _ event: KeyboardSpeechRecognitionEvent,
         to continuation: AsyncStream<KeyboardSpeechRecognitionEvent>.Continuation
     ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while !Task.isCancelled {
+            guard ContinuousClock.now < deadline else { return false }
             switch continuation.yield(event) {
             case .enqueued:
                 return true
             case .dropped:
-                try? await Task.sleep(nanoseconds: 1_000_000)
+                // bufferingNewest keeps the newly yielded event and evicts
+                // an older buffered event. Retrying here would enqueue the
+                // same terminal insertion/deletion twice.
+                return true
             case .terminated:
                 return false
             @unknown default:
@@ -174,12 +246,14 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         transcript: String,
         documentContextBeforeInput: String?,
         locale: VoiceKeyboardLocale
-    ) -> [KeyboardTextInsertionAction] {
-        let mappedActions = pipeline.operations(
+    ) -> [KeyboardTextInsertionAction]? {
+        guard let operations = pipeline.boundedOperations(
             for: transcript,
             documentContextBeforeInput: documentContextBeforeInput,
+            maximumOperationCount: VoiceInputPipeline.maximumOperationCount,
             locale: locale
-        ).map { operation -> KeyboardTextInsertionAction in
+        ) else { return nil }
+        let mappedActions = operations.map { operation -> KeyboardTextInsertionAction in
             switch operation {
             case .insertText(let value):
                 return .insertText(value)
@@ -190,6 +264,11 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
             }
         }
         return coalescedInsertActions(from: mappedActions)
+    }
+
+    private func isDestructiveAction(_ action: KeyboardTextInsertionAction) -> Bool {
+        if case .deleteBackward = action { return true }
+        return false
     }
 
     private func applying(
@@ -208,23 +287,8 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
         }
     }
 
-    private func appendingTranscriptSegment(
-        _ segment: String,
-        to transcript: String
-    ) -> String {
-        guard !segment.isEmpty else { return transcript }
-        guard !transcript.isEmpty else { return segment }
-        guard let last = transcript.last, let first = segment.first else {
-            return transcript + segment
-        }
-        if last.isWhitespace || first.isWhitespace {
-            return transcript + segment
-        }
-        if last.isJapaneseTextLike && first.isJapaneseTextLike {
-            return transcript + segment
-        }
-        return transcript + " " + segment
-    }
+    private static let maximumTranscriptScalarCount = 65_536
+    private static let maximumTranscriptUTF8ByteCount = 256_000
 
     private func eventState(
         for update: SpeechRecognitionUpdate,
@@ -288,10 +352,65 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
 }
 
 private extension Character {
+    var isCombiningMark: Bool {
+        unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .nonspacingMark, .spacingMark, .enclosingMark:
+                true
+            default:
+                false
+            }
+        }
+    }
+
+    var isGraphemeContinuation: Bool {
+        unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x200D, 0xFE00...0xFE0F, 0xE0100...0xE01EF,
+                 0x1F3FB...0x1F3FF:
+                true
+            default:
+                false
+            }
+        }
+    }
+
+    var isEmojiLike: Bool {
+        unicodeScalars.contains { $0.properties.isEmoji }
+    }
+
+    var isRegionalIndicator: Bool {
+        unicodeScalars.count == 1
+            && unicodeScalars.first.map { 0x1F1E6...0x1F1FF ~= $0.value } == true
+    }
+
+    var isPunctuationLike: Bool {
+        unicodeScalars.contains { scalar in
+            switch scalar.properties.generalCategory {
+            case .connectorPunctuation,
+                 .dashPunctuation,
+                 .openPunctuation,
+                 .closePunctuation,
+                 .initialPunctuation,
+                 .finalPunctuation,
+                 .otherPunctuation:
+                true
+            default:
+                false
+            }
+        }
+    }
+
+    var isOpeningPunctuation: Bool {
+        "([{「『（［｛【〔〈《".contains(self)
+    }
+
     var isJapaneseTextLike: Bool {
         unicodeScalars.contains { scalar in
             switch scalar.value {
             case 0x3000...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xFF01...0xFF65:
+                return true
+            case 0x20000...0x2FA1F:
                 return true
             default:
                 return false

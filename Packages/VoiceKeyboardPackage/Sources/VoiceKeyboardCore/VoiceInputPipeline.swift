@@ -3,6 +3,7 @@ import VoiceKeyboardInterfaces
 import VoiceKeyboardModels
 
 public struct VoiceInputPipeline: Sendable {
+    public static let maximumOperationCount = 64
     private let commandPipeline: LiteralTranscriptCommandPipeline
     private let cleanupService: (any TextCleanupService)?
     private let locale: VoiceKeyboardLocale
@@ -20,12 +21,27 @@ public struct VoiceInputPipeline: Sendable {
         for transcript: String,
         documentContextBeforeInput: String?,
         locale: VoiceKeyboardLocale? = nil
-    ) -> [TextOperation] {
+    ) -> [TextOperation]? {
         let commandPipeline = locale.map(LiteralTranscriptCommandPipeline.init(locale:)) ?? self.commandPipeline
-        return commandPipeline.preview(
+        return commandPipeline.boundedPreview(
             for: transcript,
-            documentContextBeforeInput: documentContextBeforeInput
-        ).operations
+            documentContextBeforeInput: documentContextBeforeInput,
+            maximumOperationCount: Self.maximumOperationCount
+        )?.operations
+    }
+
+    public func boundedOperations(
+        for transcript: String,
+        documentContextBeforeInput: String?,
+        maximumOperationCount: Int,
+        locale: VoiceKeyboardLocale? = nil
+    ) -> [TextOperation]? {
+        let commandPipeline = locale.map(LiteralTranscriptCommandPipeline.init(locale:)) ?? self.commandPipeline
+        return commandPipeline.boundedPreview(
+            for: transcript,
+            documentContextBeforeInput: documentContextBeforeInput,
+            maximumOperationCount: maximumOperationCount
+        )?.operations
     }
 
     public func hasIncompleteCommandPrefix(
@@ -45,10 +61,13 @@ public struct VoiceInputPipeline: Sendable {
         for transcript: String,
         documentContextBeforeInput: String?
     ) async throws -> InsertedTextPreparationResult {
-        let operations = operations(
+        guard let operations = boundedOperations(
             for: transcript,
-            documentContextBeforeInput: documentContextBeforeInput
-        )
+            documentContextBeforeInput: documentContextBeforeInput,
+            maximumOperationCount: Self.maximumOperationCount
+        ) else {
+            throw VoiceInputPipelineError.operationLimitExceeded
+        }
 
         var insertedText = ""
         for operation in operations {
@@ -63,8 +82,12 @@ public struct VoiceInputPipeline: Sendable {
         guard let cleanupService else { throw VoiceInputPipelineError.textCleanupServiceRequired }
 
         let cleanedText = try await cleanupService.cleanedText(from: insertedText, locale: locale)
+        let finalText = restoreBoundaryWhitespace(from: insertedText, to: cleanedText)
+        guard VoiceKeyboardTextLimits.isValid(finalText) else {
+            throw VoiceInputPipelineError.operationLimitExceeded
+        }
         return .insertableText(
-            restoreBoundaryWhitespace(from: insertedText, to: cleanedText),
+            finalText,
             cleanupApplied: true
         )
     }
@@ -77,7 +100,7 @@ public struct VoiceInputPipeline: Sendable {
         let leadingWhitespace = original.prefix { $0.isWhitespace }
         let trailingWhitespace = original.reversed().prefix { $0.isWhitespace }.reversed()
         let cleanedCore = cleaned.trimmingWhitespace()
-        guard !cleanedCore.isEmpty else { return cleanedCore }
+        guard !cleanedCore.isEmpty else { return original }
 
         return String(leadingWhitespace) + cleanedCore + String(trailingWhitespace)
     }
@@ -85,6 +108,7 @@ public struct VoiceInputPipeline: Sendable {
 
 public enum VoiceInputPipelineError: Error, Equatable, Sendable {
     case textCleanupServiceRequired
+    case operationLimitExceeded
 }
 
 private extension String {

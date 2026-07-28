@@ -40,13 +40,18 @@ final class KeyboardRootView: UIView {
         static let returnButton = "keyboard.return"
     }
 
-    private let transcriptContainerView = UIView()
+    private let transcriptGlassEffect = UIGlassEffect(style: .clear)
+    private lazy var transcriptContainerView = UIVisualEffectView(
+        effect: transcriptGlassEffect
+    )
     private let transcriptIconView = UIImageView(image: UIImage(systemName: "waveform"))
     private let transcriptLabel = UILabel()
     private let voiceActivityLabel = UILabel()
     private let voiceActivityMeterView = VoiceActivityMeterView()
     private let voiceActivityStrip = UIStackView()
-    private let controlsContainerView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+    // The buttons are the interactive glass surfaces. Keeping their parent
+    // plain avoids stacking regular glass behind every glass button.
+    private let controlsContainerView = UIView()
     private var nextKeyboardButton: UIButton?
     private var microphoneButton: UIButton?
 
@@ -86,7 +91,10 @@ final class KeyboardRootView: UIView {
     }
 
     private func configureView() {
-        backgroundColor = .secondarySystemGroupedBackground
+        // Let Liquid Glass pick up the host keyboard/background environment.
+        // An opaque grouped background here makes every nested material look
+        // like a flat gray card instead of a translucent surface.
+        backgroundColor = .clear
 
         let stack = UIStackView()
         stack.axis = .vertical
@@ -180,7 +188,8 @@ final class KeyboardRootView: UIView {
     }
 
     private func configureTranscriptContainer() {
-        transcriptContainerView.backgroundColor = .systemBackground
+        transcriptContainerView.contentView.backgroundColor = .clear
+        transcriptContainerView.clipsToBounds = true
         transcriptContainerView.layer.cornerRadius = Metrics.transcriptCornerRadius
         transcriptContainerView.layer.cornerCurve = .continuous
         transcriptContainerView.layer.borderWidth = 1
@@ -208,7 +217,7 @@ final class KeyboardRootView: UIView {
         transcriptStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         voiceActivityStrip.setContentCompressionResistancePriority(.required, for: .horizontal)
         transcriptLabel.translatesAutoresizingMaskIntoConstraints = false
-        transcriptContainerView.addSubview(contentStack)
+        transcriptContainerView.contentView.addSubview(contentStack)
 
         NSLayoutConstraint.activate([
             transcriptIconView.widthAnchor.constraint(equalToConstant: 18),
@@ -238,23 +247,23 @@ final class KeyboardRootView: UIView {
         controlsContainerView.layer.cornerCurve = .continuous
         controlsContainerView.layer.borderWidth = 1
         controlsContainerView.layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor
-        controlsContainerView.contentView.addSubview(controls)
+        controlsContainerView.addSubview(controls)
 
         NSLayoutConstraint.activate([
             controls.leadingAnchor.constraint(
-                equalTo: controlsContainerView.contentView.leadingAnchor,
+                equalTo: controlsContainerView.leadingAnchor,
                 constant: Metrics.controlPadding
             ),
             controls.trailingAnchor.constraint(
-                equalTo: controlsContainerView.contentView.trailingAnchor,
+                equalTo: controlsContainerView.trailingAnchor,
                 constant: -Metrics.controlPadding
             ),
             controls.topAnchor.constraint(
-                equalTo: controlsContainerView.contentView.topAnchor,
+                equalTo: controlsContainerView.topAnchor,
                 constant: Metrics.controlPadding
             ),
             controls.bottomAnchor.constraint(
-                equalTo: controlsContainerView.contentView.bottomAnchor,
+                equalTo: controlsContainerView.bottomAnchor,
                 constant: -Metrics.controlPadding
             )
         ])
@@ -294,11 +303,10 @@ final class KeyboardRootView: UIView {
     }
 
     private func baseButtonConfiguration(title: String?) -> UIButton.Configuration {
-        var configuration = UIButton.Configuration.gray()
+        var configuration = UIButton.Configuration.glass()
         configuration.title = title
         configuration.baseForegroundColor = .label
-        configuration.baseBackgroundColor = .systemBackground
-        configuration.cornerStyle = .medium
+        configuration.cornerStyle = .capsule
         configuration.imagePlacement = title == nil ? .leading : .top
         configuration.imagePadding = 2
         configuration.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 4, bottom: 7, trailing: 4)
@@ -357,16 +365,16 @@ final class KeyboardRootView: UIView {
         switch tone {
         case .positive:
             configuration.baseForegroundColor = .white
-            configuration.baseBackgroundColor = .systemGreen
+            configuration.baseBackgroundColor = .systemGreen.withAlphaComponent(0.82)
         case .warning:
             configuration.baseForegroundColor = .systemOrange
-            configuration.baseBackgroundColor = .systemOrange.withAlphaComponent(0.14)
+            configuration.baseBackgroundColor = .systemOrange.withAlphaComponent(0.22)
         case .critical:
             configuration.baseForegroundColor = .systemRed
-            configuration.baseBackgroundColor = .systemRed.withAlphaComponent(0.12)
+            configuration.baseBackgroundColor = .systemRed.withAlphaComponent(0.20)
         case .muted:
             configuration.baseForegroundColor = .label
-            configuration.baseBackgroundColor = .secondarySystemFill
+            configuration.baseBackgroundColor = .clear
         }
         return configuration
     }
@@ -393,7 +401,7 @@ final class KeyboardRootView: UIView {
         let color = tone.uiColor
         transcriptIconView.tintColor = color
         transcriptContainerView.layer.borderColor = color.withAlphaComponent(0.22).cgColor
-        transcriptContainerView.backgroundColor = color.withAlphaComponent(0.055)
+        transcriptGlassEffect.tintColor = color.withAlphaComponent(0.12)
     }
 
     private func updateVoiceInputAccessibilityValue(activity: String?) {

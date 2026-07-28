@@ -5,7 +5,7 @@ import VoiceKeyboardModels
 import VoiceKeyboardPresentation
 
 struct ContentView: View {
-    @State private var sampleTranscript = "hello comma world newline"
+    @State private var sampleTranscript = "comma newline"
     @State private var commandPreview = CommandPreviewPresentationSnapshot.empty
     @State private var keyboardQAText = ""
     @State private var showsDeveloperDetails = false

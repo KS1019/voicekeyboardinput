@@ -33,10 +33,11 @@ struct ExtensionContextContainingAppOpener: ContainingAppOpening {
             return
         }
 
-        extensionContext.open(
-            (sessionID.map(ContainingAppRoute.startDictationForKeyboardSession)
-                ?? .startDictation).url,
-            completionHandler: completion
-        )
+        guard let url = (sessionID.map(ContainingAppRoute.startDictationForKeyboardSession)
+            ?? .startDictation).url else {
+            completion(false)
+            return
+        }
+        extensionContext.open(url, completionHandler: completion)
     }
 }

@@ -1,0 +1,448 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1584F1D2760B09C5D517F018 /* VoiceKeyboardMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F53D3510147EA6B672C7252 /* VoiceKeyboardMenuBarApp.swift */; };
+		68A342EAB9185693240BCD18 /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 5D0625900EC4396264AFE708 /* VoiceKeyboardModels */; };
+		7C4DB358A7D37970A42BF396 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 774689B7419C5CDA9D99280F /* MenuBarContentView.swift */; };
+		8AD7B8C09F51BFC158D29FB5 /* MenuBarDebugTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEDAB563988843C986785467 /* MenuBarDebugTextTests.swift */; };
+		BBFAF245C1CE248459CB45C5 /* VoiceKeyboardCommandPipeline in Frameworks */ = {isa = PBXBuildFile; productRef = 3950AC9AA451E38B0BD546F8 /* VoiceKeyboardCommandPipeline */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		FFFBE4A85B9462ED85925A58 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E3AA011269A73B8ACE8A1C28 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2ED1E70C0FDD5C41BAA3787C;
+			remoteInfo = VoiceKeyboardMenuBar;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		00E021E6739178A38AF05A8B /* VoiceKeyboardPackage */ = {isa = PBXFileReference; lastKnownFileType = folder; name = VoiceKeyboardPackage; path = Packages/VoiceKeyboardPackage; sourceTree = SOURCE_ROOT; };
+		1F53D3510147EA6B672C7252 /* VoiceKeyboardMenuBarApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardMenuBarApp.swift; sourceTree = "<group>"; };
+		2EAC3B1D99ECF8B3F3259D8A /* VoiceKeyboardMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceKeyboardMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4243642F8AAC1133D5C77DDD /* VoiceKeyboardMenuBarTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VoiceKeyboardMenuBarTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		774689B7419C5CDA9D99280F /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
+		937D20FB6380179CDFCFBD56 /* VoiceKeyboardMenuBar.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VoiceKeyboardMenuBar.entitlements; sourceTree = "<group>"; };
+		A27C535F41D41C9C63F98C04 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		FEDAB563988843C986785467 /* MenuBarDebugTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarDebugTextTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		6E35E5F276E67314E56019D6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BBFAF245C1CE248459CB45C5 /* VoiceKeyboardCommandPipeline in Frameworks */,
+				68A342EAB9185693240BCD18 /* VoiceKeyboardModels in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0A3F822846F261EF7255142B /* VoiceKeyboardMenuBar */ = {
+			isa = PBXGroup;
+			children = (
+				A27C535F41D41C9C63F98C04 /* Info.plist */,
+				774689B7419C5CDA9D99280F /* MenuBarContentView.swift */,
+				937D20FB6380179CDFCFBD56 /* VoiceKeyboardMenuBar.entitlements */,
+				1F53D3510147EA6B672C7252 /* VoiceKeyboardMenuBarApp.swift */,
+			);
+			path = VoiceKeyboardMenuBar;
+			sourceTree = "<group>";
+		};
+		4EE18689F8AD9585511EA819 = {
+			isa = PBXGroup;
+			children = (
+				7AB144E34FC87FD3951D70D4 /* Packages */,
+				0A3F822846F261EF7255142B /* VoiceKeyboardMenuBar */,
+				E2527F941D0BBF33CFC50387 /* VoiceKeyboardMenuBarTests */,
+				EC5767181B2175B73C8CD7CE /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		7AB144E34FC87FD3951D70D4 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				00E021E6739178A38AF05A8B /* VoiceKeyboardPackage */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+		E2527F941D0BBF33CFC50387 /* VoiceKeyboardMenuBarTests */ = {
+			isa = PBXGroup;
+			children = (
+				FEDAB563988843C986785467 /* MenuBarDebugTextTests.swift */,
+			);
+			path = VoiceKeyboardMenuBarTests;
+			sourceTree = "<group>";
+		};
+		EC5767181B2175B73C8CD7CE /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				2EAC3B1D99ECF8B3F3259D8A /* VoiceKeyboardMenuBar.app */,
+				4243642F8AAC1133D5C77DDD /* VoiceKeyboardMenuBarTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2ED1E70C0FDD5C41BAA3787C /* VoiceKeyboardMenuBar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 07B9416CC5AFBD26FBB7B887 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBar" */;
+			buildPhases = (
+				F14B09A4A6942A11A6EA6E23 /* Sources */,
+				6E35E5F276E67314E56019D6 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VoiceKeyboardMenuBar;
+			packageProductDependencies = (
+				3950AC9AA451E38B0BD546F8 /* VoiceKeyboardCommandPipeline */,
+				5D0625900EC4396264AFE708 /* VoiceKeyboardModels */,
+			);
+			productName = VoiceKeyboardMenuBar;
+			productReference = 2EAC3B1D99ECF8B3F3259D8A /* VoiceKeyboardMenuBar.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FFEA22065455F4A0D0D6324A /* VoiceKeyboardMenuBarTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9BCEBA7E6C3F380752866370 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBarTests" */;
+			buildPhases = (
+				2C61C5433D24077F7CD4C7AF /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7E5218D501F4125B05224271 /* PBXTargetDependency */,
+			);
+			name = VoiceKeyboardMenuBarTests;
+			packageProductDependencies = (
+			);
+			productName = VoiceKeyboardMenuBarTests;
+			productReference = 4243642F8AAC1133D5C77DDD /* VoiceKeyboardMenuBarTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E3AA011269A73B8ACE8A1C28 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					2ED1E70C0FDD5C41BAA3787C = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = FEFABCD7FD8D3B98054FF043 /* Build configuration list for PBXProject "VoiceKeyboardMenuBar" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4EE18689F8AD9585511EA819;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B20F85D790488B86445144F0 /* XCLocalSwiftPackageReference "Packages/VoiceKeyboardPackage" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = EC5767181B2175B73C8CD7CE /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				2ED1E70C0FDD5C41BAA3787C /* VoiceKeyboardMenuBar */,
+				FFEA22065455F4A0D0D6324A /* VoiceKeyboardMenuBarTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2C61C5433D24077F7CD4C7AF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8AD7B8C09F51BFC158D29FB5 /* MenuBarDebugTextTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F14B09A4A6942A11A6EA6E23 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7C4DB358A7D37970A42BF396 /* MenuBarContentView.swift in Sources */,
+				1584F1D2760B09C5D517F018 /* VoiceKeyboardMenuBarApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		7E5218D501F4125B05224271 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2ED1E70C0FDD5C41BAA3787C /* VoiceKeyboardMenuBar */;
+			targetProxy = FFFBE4A85B9462ED85925A58 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0021657001B5550BD65B4DAF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardMenuBar/VoiceKeyboardMenuBar.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = VoiceKeyboardMenuBar/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput.menubar;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		0D70F7322592350AC23AA50E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		3E97B00D38B4EF58E9F05DB1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput.menubartests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VoiceKeyboardMenuBar.app/Contents/MacOS/VoiceKeyboardMenuBar";
+			};
+			name = Release;
+		};
+		944FC47894A35EC5A08AB172 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = VoiceKeyboardMenuBar/VoiceKeyboardMenuBar.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = VoiceKeyboardMenuBar/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput.menubar;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		AC2A385F08171EBAB601E47C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ks1019.voicekeyboardinput.menubartests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VoiceKeyboardMenuBar.app/Contents/MacOS/VoiceKeyboardMenuBar";
+			};
+			name = Debug;
+		};
+		C0BA7165821DF58F1BB79900 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		07B9416CC5AFBD26FBB7B887 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				944FC47894A35EC5A08AB172 /* Debug */,
+				0021657001B5550BD65B4DAF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9BCEBA7E6C3F380752866370 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBarTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC2A385F08171EBAB601E47C /* Debug */,
+				3E97B00D38B4EF58E9F05DB1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FEFABCD7FD8D3B98054FF043 /* Build configuration list for PBXProject "VoiceKeyboardMenuBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0D70F7322592350AC23AA50E /* Debug */,
+				C0BA7165821DF58F1BB79900 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B20F85D790488B86445144F0 /* XCLocalSwiftPackageReference "Packages/VoiceKeyboardPackage" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/VoiceKeyboardPackage;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3950AC9AA451E38B0BD546F8 /* VoiceKeyboardCommandPipeline */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKeyboardCommandPipeline;
+		};
+		5D0625900EC4396264AFE708 /* VoiceKeyboardModels */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKeyboardModels;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = E3AA011269A73B8ACE8A1C28 /* Project object */;
+}
