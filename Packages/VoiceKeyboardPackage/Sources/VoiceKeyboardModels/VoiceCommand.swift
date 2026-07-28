@@ -4,9 +4,9 @@ public enum VoiceKeyboardTextLimits {
     public static let maximumUTF8ByteCount = 256_000
 
     public static func isValid(_ value: String) -> Bool {
-        value.count <= maximumCharacterCount
-            && value.unicodeScalars.count <= maximumUnicodeScalarCount
-            && value.utf8.count <= maximumUTF8ByteCount
+        value.utf8.prefix(maximumUTF8ByteCount + 1).count <= maximumUTF8ByteCount
+            && value.unicodeScalars.prefix(maximumUnicodeScalarCount + 1).count <= maximumUnicodeScalarCount
+            && value.prefix(maximumCharacterCount + 1).count <= maximumCharacterCount
     }
 }
 

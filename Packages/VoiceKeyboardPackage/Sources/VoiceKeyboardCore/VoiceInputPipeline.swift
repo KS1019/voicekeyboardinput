@@ -82,6 +82,9 @@ public struct VoiceInputPipeline: Sendable {
         guard let cleanupService else { throw VoiceInputPipelineError.textCleanupServiceRequired }
 
         let cleanedText = try await cleanupService.cleanedText(from: insertedText, locale: locale)
+        guard VoiceKeyboardTextLimits.isValid(cleanedText) else {
+            throw VoiceInputPipelineError.operationLimitExceeded
+        }
         let finalText = restoreBoundaryWhitespace(from: insertedText, to: cleanedText)
         guard VoiceKeyboardTextLimits.isValid(finalText) else {
             throw VoiceInputPipelineError.operationLimitExceeded

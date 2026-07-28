@@ -48,6 +48,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var isSharedDeliveryRecoveryInProgress = false
     private var isSharedStorageResolutionUnknown = false
     private var sharedDeliveryRecoveryGeneration: UInt64 = 0
+    private var sharedDeliveryRecoveryRetryTask: Task<Void, Never>?
     private var hasSharedDeliveryLifecycleGap = false
     private var sharedCancellationTask: Task<Void, Never>?
     private var isSharedCancellationInProgress = false
@@ -141,6 +142,7 @@ public final class KeyboardViewController: UIInputViewController {
         sharedCancellationTask?.cancel()
         sharedCancellationRetryTask?.cancel()
         sharedCancellationRecoveryWaitTask?.cancel()
+        sharedDeliveryRecoveryRetryTask?.cancel()
         directRecognitionStopTask?.cancel()
     }
 
@@ -206,6 +208,8 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func startSharedDeliveryRecovery(epoch: UInt64) {
+        sharedDeliveryRecoveryRetryTask?.cancel()
+        sharedDeliveryRecoveryRetryTask = nil
         sharedDeliveryTask?.cancel()
         sharedDeliveryRecoveryGeneration &+= 1
         let recoveryGeneration = sharedDeliveryRecoveryGeneration
@@ -267,10 +271,41 @@ public final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func scheduleSharedDeliveryRecoveryRetry(epoch: UInt64) {
+        guard isViewVisible,
+              lifecycleEpoch == epoch,
+              sharedDeliveryRecoveryRetryTask == nil else { return }
+        sharedDeliveryRecoveryRetryTask = Task { [weak self] in
+            defer {
+                if let self {
+                    self.sharedDeliveryRecoveryRetryTask = nil
+                }
+            }
+            for _ in 0..<20 {
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
+                }
+                guard let self,
+                      !Task.isCancelled,
+                      self.isViewVisible,
+                      self.lifecycleEpoch == epoch else { return }
+                if !self.isSharedCancellationInProgress {
+                    self.startSharedDeliveryRecovery(epoch: epoch)
+                    return
+                }
+            }
+        }
+    }
+
     private func repairPendingCancellationIntents() async -> Bool {
         await sessionStoreCall { store in
             var allResolved = true
-            for command in store.pendingCancellationIntents() {
+            guard case .available(let intents) = store.pendingCancellationIntentsResolution() else {
+                return false
+            }
+            for command in intents {
                 guard let replacedToken = command.replacesCommandToken else {
                     _ = store.discardCancellationIntent(forToken: command.token)
                     continue
@@ -307,7 +342,9 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func repairPendingDeliveryFailures() async -> Bool {
         await sessionStoreCall { store in
-            let intents = store.pendingDeliveryFailureIntents()
+            guard case .available(let intents) = store.pendingDeliveryFailureIntentsResolution() else {
+                return false
+            }
             var allResolved = true
             for (token, message) in intents {
                 if store.saveDeliveryFailure(token: token, message: message) {
@@ -333,11 +370,11 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func repairPendingDeliveryJournals() async -> Bool {
         guard let intents = await sessionStoreCall({
-            $0.pendingDeliveryFailureIntents()
-        }) else {
+            $0.pendingDeliveryFailureIntentsResolution()
+        }), case .available(let availableIntents) = intents else {
             return false
         }
-        for commandToken in intents.keys {
+        for commandToken in availableIntents.keys {
             guard let commandResolution = await sessionStoreCall({
                 $0.commandResolution(forToken: commandToken)
             }) else {
@@ -947,6 +984,7 @@ public final class KeyboardViewController: UIInputViewController {
                         self.isSharedCancellationInProgress = false
                         self.sharedCancellationTask = nil
                         self.queuedDocumentMutations.removeAll()
+                        self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
                         guard self.lifecycleEpoch == expectedEpoch, self.isViewVisible else { return }
                         self.keyboardRootView.render(
                             speechCapture: .sharedDictationUnavailable,
@@ -2325,7 +2363,12 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func matchingActiveStartCommand(epoch: UInt64? = nil) async -> SharedDictationSessionCommand? {
         guard isSharedDeliveryCurrent(epoch) else { return nil }
-        let commands = await sessionStoreCall { $0.commandHistory() } ?? []
+        guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }),
+              case .available(let commands) = historyResolution else {
+            isSharedStorageResolutionUnknown = true
+            scheduleSharedDeliveryRecoveryRetry(epoch: epoch ?? lifecycleEpoch)
+            return nil
+        }
         guard isSharedDeliveryCurrent(epoch) else { return nil }
         var cancelledStartTokens = Set(commands.compactMap { command in
             command.kind == .cancel ? command.replacesCommandToken : nil
@@ -2434,6 +2477,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func renderSharedDictationUnavailableIfNeeded() {
+        scheduleSharedDeliveryRecoveryRetry(epoch: lifecycleEpoch)
         guard speechCaptureCoordinator.shouldOpenContainingAppForDictation() else {
             renderCurrentSpeechCapture()
             return

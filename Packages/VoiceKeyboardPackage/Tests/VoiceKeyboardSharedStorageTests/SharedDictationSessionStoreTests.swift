@@ -59,6 +59,44 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         ))
     }
 
+    func testOwnedStopCanPromoteACompletedTranscriptBeforeCancellation() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let ownerToken = "containing-app-owner"
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            sessionID: "completed-before-stop"
+        )
+        let stop = SharedDictationSessionCommand.stop(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            replacingCommandToken: start.token
+        )
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(stop))
+        XCTAssertTrue(store.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: ownerToken,
+            lastSeenAt: Date(),
+            sessionState: .armed
+        )))
+        XCTAssertEqual(
+            store.claimCommand(
+                afterLastClaimedToken: start.token,
+                ownerToken: ownerToken,
+                source: .keyboard
+            ),
+            stop
+        )
+
+        XCTAssertTrue(store.recoverCompletedTranscriptStatus(
+            sourceCommandToken: start.token,
+            throughCommandToken: stop.token,
+            ownerToken: ownerToken
+        ))
+        XCTAssertEqual(store.status(forCommandToken: start.token), .transcriptReady(token: start.token))
+        XCTAssertTrue(store.saveStatus(.cancelled(token: stop.token), ownerToken: ownerToken))
+    }
+
     func testCancellationIntentSuppressesStartUntilItCanBePublished() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)

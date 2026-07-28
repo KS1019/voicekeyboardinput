@@ -108,6 +108,9 @@ public struct KeyboardSpeechRecognitionSession: Sendable {
                     let updates = try await speechService.start(locale: locale)
                     for try await update in updates {
                         guard !Task.isCancelled else { break }
+                        guard VoiceKeyboardTextLimits.isValid(update.transcript) else {
+                            throw SessionError.transcriptTooLong
+                        }
                         if update.isFinal {
                             try pendingFinalTranscript.append(update.transcript)
                             let transcript = pendingFinalTranscript.value

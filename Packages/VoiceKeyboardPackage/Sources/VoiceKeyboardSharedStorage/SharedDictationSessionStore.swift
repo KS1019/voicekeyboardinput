@@ -14,6 +14,16 @@ public final class SharedDictationSessionStore {
         case unavailable
     }
 
+    public enum CancellationIntentResolution: Equatable, Sendable {
+        case available([SharedDictationSessionCommand])
+        case unavailable
+    }
+
+    public enum DeliveryFailureIntentResolution: Equatable, Sendable {
+        case available([String: String])
+        case unavailable
+    }
+
     private struct SessionEnvelope: Codable {
         var revision: UInt64 = 0
         var commands: [String: SharedDictationSessionCommand] = [:]
@@ -539,10 +549,27 @@ public final class SharedDictationSessionStore {
     }
 
     @discardableResult
+    public func recoverCompletedTranscriptStatus(
+        sourceCommandToken: String,
+        throughCommandToken ownerCommandToken: String,
+        ownerToken: String,
+        now: Date = Date()
+    ) -> Bool {
+        saveStatus(
+            .transcriptReady(token: sourceCommandToken),
+            ownerToken: ownerToken,
+            allowRecoveryFromTranscriptReady: true,
+            recoveryOwnerCommandToken: ownerCommandToken,
+            now: now
+        )
+    }
+
+    @discardableResult
     public func saveStatus(
         _ status: SharedDictationSessionStatus,
         ownerToken: String? = nil,
         allowRecoveryFromTranscriptReady: Bool = false,
+        recoveryOwnerCommandToken: String? = nil,
         now: Date = Date()
     ) -> Bool {
         for attempt in 0..<2 {
@@ -550,6 +577,22 @@ public final class SharedDictationSessionStore {
             if envelopeURL != nil {
                 var envelope = loadEnvelope()
                 pruneClaims(&envelope, now: now)
+                let isAuthorizedTranscriptRecovery: Bool
+                if let recoveryOwnerCommandToken {
+                    guard case .transcriptReady = status,
+                          let sourceCommandToken = status.commandToken,
+                          let ownerCommand = envelope.commands[recoveryOwnerCommandToken],
+                          (ownerCommand.kind == .stop || ownerCommand.kind == .cancel),
+                          ownerCommand.source == .keyboard,
+                          ownerCommand.replacesCommandToken == sourceCommandToken,
+                          envelope.claims[recoveryOwnerCommandToken].map({ $0 > now }) == true,
+                          envelope.claimOwners[recoveryOwnerCommandToken] == ownerToken else {
+                        return false
+                    }
+                    isAuthorizedTranscriptRecovery = true
+                } else {
+                    isAuthorizedTranscriptRecovery = false
+                }
                 let previousLatestStatus = envelope.latestStatus
                 if let commandToken = status.commandToken {
                     let currentStatus = envelope.statuses[commandToken]
@@ -575,15 +618,19 @@ public final class SharedDictationSessionStore {
                         return saveEnvelope(envelope)
                     }
                     if let ownerToken {
-                        guard let expiresAt = envelope.claims[commandToken],
+                        let claimToken = isAuthorizedTranscriptRecovery
+                            ? recoveryOwnerCommandToken!
+                            : commandToken
+                        guard let expiresAt = envelope.claims[claimToken],
                               expiresAt > now,
-                              envelope.claimOwners[commandToken] == ownerToken else {
+                              envelope.claimOwners[claimToken] == ownerToken else {
                             return false
                         }
                     }
                     if case .transcriptReady = status,
                        let command = envelope.commands[commandToken],
-                       isSuperseded(command, in: envelope) {
+                       isSuperseded(command, in: envelope),
+                       !isAuthorizedTranscriptRecovery {
                         return false
                     }
                     guard Self.isAllowedStatusTransition(
@@ -608,6 +655,25 @@ public final class SharedDictationSessionStore {
             }
             if let commandToken = status.commandToken {
                 let latestStatus = loadStatus()
+                let isAuthorizedTranscriptRecovery: Bool
+                if let recoveryOwnerCommandToken {
+                    guard case .transcriptReady = status,
+                          let ownerCommand = loadCommand(forToken: recoveryOwnerCommandToken),
+                          (ownerCommand.kind == .stop || ownerCommand.kind == .cancel),
+                          ownerCommand.source == .keyboard,
+                          ownerCommand.replacesCommandToken == commandToken else {
+                        return false
+                    }
+                    let claims = load([String: Date].self, forKey: Key.claims) ?? [:]
+                    let owners = load([String: String].self, forKey: Key.claimOwners) ?? [:]
+                    guard claims[recoveryOwnerCommandToken].map({ $0 > now }) == true,
+                          owners[recoveryOwnerCommandToken] == ownerToken else {
+                        return false
+                    }
+                    isAuthorizedTranscriptRecovery = true
+                } else {
+                    isAuthorizedTranscriptRecovery = false
+                }
                 let currentStatus = load(
                     SharedDictationSessionStatus.self,
                     forKey: Key.statusPrefix + commandToken
@@ -635,15 +701,19 @@ public final class SharedDictationSessionStore {
                 if let ownerToken {
                     let claims = load([String: Date].self, forKey: Key.claims) ?? [:]
                     let owners = load([String: String].self, forKey: Key.claimOwners) ?? [:]
-                    guard let expiresAt = claims[commandToken],
+                    let claimToken = isAuthorizedTranscriptRecovery
+                        ? recoveryOwnerCommandToken!
+                        : commandToken
+                    guard let expiresAt = claims[claimToken],
                           expiresAt > now,
-                          owners[commandToken] == ownerToken else {
+                          owners[claimToken] == ownerToken else {
                         return false
                     }
                 }
                 if case .transcriptReady = status,
                    let command = loadCommand(forToken: commandToken),
-                   isSuperseded(command, in: loadCommandHistory()) {
+                   isSuperseded(command, in: loadCommandHistory()),
+                   !isAuthorizedTranscriptRecovery {
                     return false
                 }
                 guard Self.isAllowedStatusTransition(
@@ -719,12 +789,21 @@ public final class SharedDictationSessionStore {
     }
 
     public func pendingDeliveryFailureIntents() -> [String: String] {
+        switch pendingDeliveryFailureIntentsResolution() {
+        case .available(let intents): return intents
+        case .unavailable: return [:]
+        }
+    }
+
+    public func pendingDeliveryFailureIntentsResolution() -> DeliveryFailureIntentResolution {
         withExclusiveAccess {
             if envelopeURL != nil {
-                return loadEnvelope().deliveryFailureIntents
+                let envelope = loadEnvelope()
+                guard !envelopeReadBlocked else { return .unavailable }
+                return .available(envelope.deliveryFailureIntents)
             }
-            return load([String: String].self, forKey: Key.deliveryFailureIntents) ?? [:]
-        } ?? [:]
+            return .available(load([String: String].self, forKey: Key.deliveryFailureIntents) ?? [:])
+        } ?? .unavailable
     }
 
     @discardableResult
@@ -758,8 +837,8 @@ public final class SharedDictationSessionStore {
         return withExclusiveAccess {
             if envelopeURL != nil {
                 var envelope = loadEnvelope()
-                if envelope.cancellationIntents[command.token] == command {
-                    return true
+                if let existing = envelope.cancellationIntents[command.token] {
+                    return existing == command
                 }
                 guard envelope.cancellationIntents.count < Self.historyLimit else {
                     return false
@@ -782,17 +861,26 @@ public final class SharedDictationSessionStore {
     }
 
     public func pendingCancellationIntents() -> [SharedDictationSessionCommand] {
+        switch pendingCancellationIntentsResolution() {
+        case .available(let intents): return intents
+        case .unavailable: return []
+        }
+    }
+
+    public func pendingCancellationIntentsResolution() -> CancellationIntentResolution {
         withExclusiveAccess {
             if envelopeURL != nil {
-                return Array(loadEnvelope().cancellationIntents.values)
+                let envelope = loadEnvelope()
+                guard !envelopeReadBlocked else { return .unavailable }
+                return .available(Array(envelope.cancellationIntents.values))
             }
-            return Array(
+            return .available(Array(
                 (load(
                     [String: SharedDictationSessionCommand].self,
                     forKey: Key.cancellationIntents
                 ) ?? [:]).values
-            )
-        } ?? []
+            ))
+        } ?? .unavailable
     }
 
     @discardableResult

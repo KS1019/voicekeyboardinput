@@ -62,6 +62,7 @@ final class VoiceInputLaunchModel {
     private let sessionController: any DictationSessionControlling
     private var routeStartTask: Task<Void, Never>?
     private var sessionPreparationTask: Task<VoiceInputLaunchStatus, Never>?
+    private var sessionPreparationGeneration: UInt64 = 0
 
     var status = VoiceInputLaunchStatus.idle
 
@@ -124,12 +125,16 @@ final class VoiceInputLaunchModel {
             return await sessionPreparationTask.value
         }
         let controller = sessionController
+        sessionPreparationGeneration &+= 1
+        let preparationGeneration = sessionPreparationGeneration
         let task = Task { @MainActor in
             await controller.prepareSession()
         }
         sessionPreparationTask = task
         let result = await task.value
-        sessionPreparationTask = nil
+        if sessionPreparationGeneration == preparationGeneration {
+            sessionPreparationTask = nil
+        }
         return result
     }
 
@@ -175,6 +180,12 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private var startIntentInFlight = false
     private var lastClaimedCommandToken: String?
     private var isAppAvailable = true
+
+    private enum KeyboardCommandLookup {
+        case found(SharedDictationSessionCommand)
+        case none
+        case unavailable
+    }
 
     init(
         microphoneActivator: any MicrophoneActivating = AppMicrophoneActivator(),
@@ -317,16 +328,19 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         defer { startIntentInFlight = false }
         let command: SharedDictationSessionCommand
         let shouldPublishCommand: Bool
-        if let pendingKeyboardCommand = await firstUnclaimedKeyboardCommand() {
+        switch await firstUnclaimedKeyboardCommand() {
+        case .found(let pendingKeyboardCommand):
             // If the user opened the app manually after the keyboard wrote a
             // handoff command, keep the keyboard's session identity. This
             // preserves delivery even when the extension cannot open the app
             // directly on a given iOS release.
             command = pendingKeyboardCommand
             shouldPublishCommand = false
-        } else {
+        case .none:
             command = SharedDictationSessionCommand.start(source: .containingApp)
             shouldPublishCommand = true
+        case .unavailable:
+            return .failed("Shared App Group storage is unavailable.")
         }
         if shouldPublishCommand {
             guard await sessionStoreCall({ $0.saveCommand(command) }) == true else {
@@ -556,8 +570,8 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             }
             await startDictation(for: command)
         case .stop:
+            guard let ownerToken = heartbeatToken else { return }
             guard activeSessionID == command.sessionID else {
-                let ownerToken = heartbeatToken
                 if let replacedToken = command.replacesCommandToken,
                    let owner = await sessionStoreCall({ $0.claimOwner(forCommandToken: replacedToken) }) ?? nil,
                    owner != ownerToken {
@@ -610,7 +624,19 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                         // A cold restart may have completed and persisted the
                         // transcript before the stop was observed. Do not cancel
                         // a result that the keyboard can still deliver.
-                        _ = await saveOwnedStatus(.transcriptReady(token: replacedToken))
+                        guard await sessionStoreCall({
+                            $0.recoverCompletedTranscriptStatus(
+                                sourceCommandToken: replacedToken,
+                                throughCommandToken: command.token,
+                                ownerToken: ownerToken
+                            )
+                        }) == true else {
+                            _ = await sessionStoreCall {
+                                $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
+                            }
+                            lastClaimedCommandToken = cursorBeforeClaim
+                            return
+                        }
                     case .found, .missing:
                         _ = await saveOwnedStatus(.cancelled(token: replacedToken))
                     }
@@ -692,30 +718,31 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }
     }
 
-    private func firstUnclaimedKeyboardCommand() async -> SharedDictationSessionCommand? {
+    private func firstUnclaimedKeyboardCommand() async -> KeyboardCommandLookup {
         guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }),
-              case .available(let commands) = historyResolution else { return nil }
+              case .available(let commands) = historyResolution else { return .unavailable }
         for command in commands.reversed().filter({
             $0.kind == .start
                 && $0.source == .keyboard
                 && !$0.isExpired(at: Date())
         }) {
-            guard case .idle = await sessionStoreCall({
+            guard let status = await sessionStoreCall({
                 $0.status(forCommandToken: command.token)
-            }) ?? .idle else { continue }
+            }) else { return .unavailable }
+            guard case .idle = status else { continue }
             guard let transcriptResolution = await transcriptStoreCall({
                 $0.latestTranscriptResolution(forSessionID: command.sessionID)
-            }) else { return nil }
+            }) else { return .unavailable }
             switch transcriptResolution {
             case .missing:
-                return command
+                return .found(command)
             case .found:
                 continue
             case .unavailable:
-                return nil
+                return .unavailable
             }
         }
-        return nil
+        return .none
     }
 
     private func startDictation(
@@ -921,8 +948,17 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
               case .available(let commands) = history else {
             return false
         }
-        for command in commands
-        where command.source == .keyboard && command.kind == .start {
+        guard let transcriptResolution = await transcriptStoreCall({
+            $0.unconsumedTranscriptsResolution()
+        }), case .available(let transcripts) = transcriptResolution else {
+            return false
+        }
+        let completedCommandTokens = Set(transcripts.map(\.commandToken))
+        for command in commands.filter({
+            $0.source == .keyboard
+                && $0.kind == .start
+                && !completedCommandTokens.contains($0.token)
+        }) {
             _ = await sessionStoreCall {
                 $0.cancelStaleKeyboardCommand(token: command.token)
             }
@@ -976,6 +1012,13 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 guard await sessionStoreCall({
                     $0.saveStatus(.transcriptReady(token: transcript.commandToken))
                 }) == true else {
+                    let hasReplacement = commands.contains {
+                        ($0.kind == .stop || $0.kind == .cancel)
+                            && $0.replacesCommandToken == transcript.commandToken
+                    }
+                    if hasReplacement {
+                        continue
+                    }
                     return false
                 }
             case .transcriptReady, .failed, .cancelled:
