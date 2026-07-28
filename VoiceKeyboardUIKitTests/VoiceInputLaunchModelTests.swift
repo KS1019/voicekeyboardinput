@@ -124,10 +124,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = MicrophoneActivatorSpy(status: .transcriptShared("hello"))
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         let prepareStatus = await controller.prepareSession()
@@ -152,10 +154,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = MicrophoneActivatorSpy(status: .transcriptShared("cold hello"))
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
         let command = SharedDictationSessionCommand.start(source: .keyboard)
         store.saveCommand(command)
@@ -172,10 +176,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = SuspendedMicrophoneActivator()
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -199,10 +205,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = MicrophoneActivatorSpy(status: .transcriptShared("unexpected"))
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
         let staleCommand = SharedDictationSessionCommand.start(
             source: .keyboard,
@@ -218,15 +226,39 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(store.status(), .cancelled(token: staleCommand.token))
     }
 
+    func testPrepareSessionFailsClosedWhenTranscriptStoreIsUnavailable() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let staleCommand = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date().addingTimeInterval(-20)
+        )
+        store.saveCommand(staleCommand)
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: MicrophoneActivatorSpy(status: .transcriptShared("unexpected")),
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { nil }
+        )
+
+        let result = await controller.prepareSession()
+
+        XCTAssertEqual(result, .failed("Shared App Group storage is unavailable."))
+        XCTAssertEqual(store.status(), .idle)
+    }
+
     func testPrepareSessionRecoversFreshCommandWhenStatusWriteWasInterrupted() async throws {
         let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = MicrophoneActivatorSpy(status: .transcriptShared("recovered"))
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
         let command = SharedDictationSessionCommand.start(
             source: .keyboard,
@@ -282,10 +314,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = MicrophoneActivatorSpy(status: .transcriptShared("unexpected"))
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -309,6 +343,7 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let oldStart = SharedDictationSessionCommand.start(source: .keyboard)
         let stop = SharedDictationSessionCommand.stop(
             sessionID: oldStart.sessionID,
@@ -323,7 +358,8 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: MicrophoneActivatorSpy(status: .transcriptShared("unexpected")),
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -337,10 +373,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = SuspendedMicrophoneActivator()
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -363,10 +401,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = CancellableSuspendedMicrophoneActivator()
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -400,10 +440,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = CancellableSuspendedMicrophoneActivator()
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -422,10 +464,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = NonCooperativeSuspendedMicrophoneActivator()
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -467,10 +511,12 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
         let activator = SuspendedMicrophoneActivator()
         let controller = AppBackgroundDictationSessionController(
             microphoneActivator: activator,
-            sessionStoreProvider: { store }
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
         )
 
         _ = await controller.prepareSession()
@@ -631,6 +677,13 @@ final class VoiceInputLaunchModelTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(50))
         }
         XCTAssertEqual(activator.recordedCancellationCount(), 1, file: file, line: line)
+    }
+
+    private func makeTranscriptStore() throws -> SharedDictationTranscriptStore {
+        let suiteName = "VoiceInputLaunchModelTests.TranscriptStore.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        return SharedDictationTranscriptStore(defaults: defaults)
     }
 }
 

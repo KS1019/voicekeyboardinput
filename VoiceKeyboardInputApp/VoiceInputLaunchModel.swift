@@ -893,13 +893,14 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             return command.replacesCommandToken
         })
 
-        // Some compatibility/unit-test controllers intentionally omit a
-        // transcript store. In production, an existing store must be readable
-        // before stale-session cancellation is allowed to proceed.
         guard let transcriptResolution = await transcriptStoreCall({
             $0.unconsumedTranscriptsResolution()
         }) else {
-            return true
+            // SessionStore alone cannot prove that a completed transcript is
+            // absent. Refuse stale-session cancellation until both durable
+            // stores are readable; otherwise a cold-started app can turn a
+            // completed handoff into a permanent cancelled status.
+            return false
         }
         guard case .available(let transcripts) = transcriptResolution else {
             return false
