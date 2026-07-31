@@ -1257,6 +1257,35 @@ public final class KeyboardViewController: UIInputViewController {
                     let statusResolution = await self.sessionStoreCall {
                         $0.statusResolution(forCommandToken: command.token)
                     }
+                    let producerIsInActiveState: Bool
+                    switch statusResolution {
+                    case .found(.commandAcknowledged),
+                         .found(.recording),
+                         .found(.transcribing):
+                        producerIsInActiveState = true
+                    default:
+                        producerIsInActiveState = false
+                    }
+                    let didCancelStaleProducer: Bool
+                    if producerIsInActiveState, Date() >= command.expiresAt {
+                        didCancelStaleProducer = await self.sessionStoreCall {
+                            $0.cancelStaleKeyboardCommand(token: command.token)
+                        } == true
+                    } else {
+                        didCancelStaleProducer = false
+                    }
+                    if didCancelStaleProducer {
+                        self.endSharedSession(
+                            ifMatchingSessionID: command.sessionID,
+                            commandToken: command.token,
+                            pollingGeneration: pollingGeneration
+                        )
+                        self.keyboardRootView.render(
+                            speechCapture: .sharedDictationTimedOut,
+                            announce: true
+                        )
+                        return
+                    }
                     let producerMayStillFinish: Bool
                     switch statusResolution {
                     case .found(.commandPending),
@@ -2501,6 +2530,9 @@ public final class KeyboardViewController: UIInputViewController {
                 guard isSharedDeliveryCurrent(epoch) else { return nil }
                 activeSharedSessionID = command.sessionID
                 activeSharedCommandToken = command.token
+                sharedSessionDeliveryFingerprint = command.replacesCommandToken.flatMap { replacedToken in
+                    commands.first { $0.token == replacedToken }?.documentContextFingerprint
+                }
                 return command
             }
             guard let statusResolution = await sessionStoreCall({
@@ -2544,6 +2576,11 @@ public final class KeyboardViewController: UIInputViewController {
             guard isSharedDeliveryCurrent(epoch) else { return nil }
             activeSharedSessionID = command.sessionID
             activeSharedCommandToken = command.token
+            // A recreated controller may recover the command after the
+            // original controller has already cleared its in-memory context.
+            // Preserve the durable start fingerprint so the lifecycle-gap
+            // check can still prove that the host field is the same one.
+            sharedSessionDeliveryFingerprint = command.documentContextFingerprint
             return command
         }
         return nil

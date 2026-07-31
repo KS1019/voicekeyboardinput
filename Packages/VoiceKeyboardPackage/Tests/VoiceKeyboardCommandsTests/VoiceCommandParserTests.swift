@@ -267,12 +267,15 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
-    func testJapaneseUnspacedCommandSequenceRequiresExplicitBoundaries() {
+    func testJapaneseUnspacedCommandSequenceCanEndWithACommand() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         let result = parser.parse("こんにちは読点世界改行")
         XCTAssertEqual(result.elements, [
-            .text("こんにちは読点世界改行")
+            .text("こんにちは"),
+            .command(.insertText("、")),
+            .text("世界"),
+            .command(.insertText("\n"))
         ])
     }
 

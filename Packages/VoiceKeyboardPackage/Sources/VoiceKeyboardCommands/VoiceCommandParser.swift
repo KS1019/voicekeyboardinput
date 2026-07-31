@@ -365,12 +365,14 @@ package struct VoiceCommandParser: Sendable {
         var remaining = segment[...]
         var pendingText = ""
         var elements: [TranscriptElement] = []
+        let allowsImplicitSequence = canImplicitlyParseJapaneseSegment(segment)
 
         while !remaining.isEmpty {
             if let match = japaneseUnspacedAliases.first(where: {
                 remaining.hasPrefix($0.alias) &&
-                    hasCommandBoundaries(for: $0.alias, at: remaining.startIndex, in: segment) &&
-                    isSafeUnspacedJapaneseMatch($0, at: remaining.startIndex, in: segment)
+                    ((hasCommandBoundaries(for: $0.alias, at: remaining.startIndex, in: segment) &&
+                        isSafeUnspacedJapaneseMatch($0, at: remaining.startIndex, in: segment)) ||
+                        (allowsImplicitSequence && $0.command.isSafeUnspacedJapaneseCommand))
             }) {
                 if !pendingText.isEmpty {
                     guard elements.count < maximumElementCount else { return nil }
@@ -391,6 +393,26 @@ package struct VoiceCommandParser: Sendable {
         }
 
         return elements
+    }
+
+    private func canImplicitlyParseJapaneseSegment(_ segment: String) -> Bool {
+        var remaining = segment[...]
+        var matchCount = 0
+        var endsWithCommand = false
+
+        while !remaining.isEmpty {
+            guard let match = japaneseUnspacedAliases.first(where: {
+                remaining.hasPrefix($0.alias) && $0.command.isSafeUnspacedJapaneseCommand
+            }) else {
+                endsWithCommand = false
+                remaining.removeFirst()
+                continue
+            }
+            matchCount += 1
+            endsWithCommand = remaining.count == match.alias.count
+            remaining.removeFirst(match.alias.count)
+        }
+        return matchCount >= 2 && endsWithCommand
     }
 
     private func isSafeDestructiveMatch(

@@ -362,7 +362,7 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         )
     }
 
-    func testStaleCancellationNeverBlindCancelsActiveState() throws {
+    func testStaleCancellationKeepsLiveActiveStateButCleansUpDeadProducer() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)
         let requestedAt = Date(timeIntervalSince1970: 100)
@@ -385,17 +385,23 @@ final class SharedDictationSessionStoreTests: XCTestCase {
             token: command.token,
             now: requestedAt.addingTimeInterval(5)
         ))
+        XCTAssertTrue(store.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: "live-owner",
+            sessionID: command.sessionID,
+            lastSeenAt: requestedAt.addingTimeInterval(10),
+            sessionState: .recording
+        )))
         XCTAssertFalse(store.cancelStaleKeyboardCommand(
             token: command.token,
             now: requestedAt.addingTimeInterval(10)
         ))
+        XCTAssertTrue(store.cancelStaleKeyboardCommand(
+            token: command.token,
+            now: requestedAt.addingTimeInterval(16)
+        ))
         XCTAssertEqual(
             store.status(forCommandToken: command.token),
-            .recording(
-                token: command.token,
-                startedAt: requestedAt,
-                timeoutSeconds: 8
-            )
+            .cancelled(token: command.token)
         )
 
         let pendingCommand = SharedDictationSessionCommand(
@@ -630,6 +636,38 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         XCTAssertEqual(fileStore.statusResolution(forCommandToken: start.token), .found(recording))
         XCTAssertEqual(fileStore.pendingDeliveryFailureIntents(), [start.token: "delivery retry"])
         XCTAssertEqual(fileStore.pendingCancellationIntents(), [cancel])
+    }
+
+    func testFileBackedMigrationRetainsLegacyLatestStatusAfterStatusIndexWasAbsent() throws {
+        let defaults = try makeDefaults()
+        let legacyStore = SharedDictationSessionStore(defaults: defaults)
+        let start = SharedDictationSessionCommand.start(source: .keyboard)
+        let recording = SharedDictationSessionStatus.recording(
+            token: start.token,
+            startedAt: start.requestedAt,
+            timeoutSeconds: 8
+        )
+        XCTAssertTrue(legacyStore.saveCommand(start))
+        XCTAssertTrue(legacyStore.saveStatus(recording))
+        defaults.removeObject(forKey: "sharedDictation.session.status.\(start.token)")
+        defaults.removeObject(forKey: "sharedDictation.session.statusIndex")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SharedDictationSessionStoreLegacyStatus-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileStore = try XCTUnwrap(SharedDictationSessionStore(
+            defaults: defaults,
+            envelopeURL: directory.appendingPathComponent("session.json"),
+            lockFileURL: directory.appendingPathComponent("session.lock")
+        ))
+
+        XCTAssertEqual(fileStore.statusResolution(forCommandToken: start.token), .found(recording))
+        XCTAssertTrue(fileStore.saveStatus(.transcribing(token: start.token)))
+        XCTAssertEqual(
+            fileStore.statusResolution(forCommandToken: start.token),
+            .found(.transcribing(token: start.token))
+        )
     }
 
     func testTranscriptReadyCommandSurvivesHistoryChurnAfterCommandExpiry() throws {

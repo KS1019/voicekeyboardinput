@@ -218,7 +218,7 @@ package struct TextInsertionPlanner: Sendable {
         // deletion never crosses a Windows-style line boundary.
         let sentenceTerminators: Set<Character> = [
             ".", "?", "!", "\n", "\r", "\r\n", "\u{85}", "\u{2028}", "\u{2029}",
-            "。", "？", "！", "…"
+            "。", "？", "！", "…", "．", "｡", "﹒"
         ]
         var count = 0
         var hasSeenSentenceBody = false
@@ -283,7 +283,17 @@ private extension Character {
     }
 
     var isSentenceClosingDelimiter: Bool {
-        [
+        if unicodeScalars.allSatisfy({ scalar in
+            switch scalar.properties.generalCategory {
+            case .closePunctuation, .finalPunctuation:
+                true
+            default:
+                false
+            }
+        }) {
+            return true
+        }
+        return [
             "\"", "'", "’", "”", ")", "]", "}", "）", "］", "｝", "】", "〕", "〉", "》", "」", "』", "›", "»"
         ].contains(self)
     }

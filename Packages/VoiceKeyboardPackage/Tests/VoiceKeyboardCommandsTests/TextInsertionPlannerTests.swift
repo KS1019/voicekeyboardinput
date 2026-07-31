@@ -541,6 +541,35 @@ final class TextInsertionPlannerTests: XCTestCase {
         XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(4))])
     }
 
+    func testPlansDeleteSentenceAfterFullwidthSentenceTerminators() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        for terminator in ["．", "｡", "﹒"] {
+            XCTAssertEqual(
+                planner.plan(
+                    transcript,
+                    documentContextBeforeInput: "First\(terminator) Second"
+                ),
+                [.deleteBackward(count: deleteCount(7))],
+                terminator
+            )
+        }
+    }
+
+    func testPlansDeleteSentenceIncludingCJKClosingDelimiters() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        XCTAssertEqual(
+            planner.plan(
+                transcript,
+                documentContextBeforeInput: "一。〖二。〗"
+            ),
+            [.deleteBackward(count: deleteCount(4))]
+        )
+    }
+
     func testPlansDeleteSentenceIncludingTrailingClosingDelimiters() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])

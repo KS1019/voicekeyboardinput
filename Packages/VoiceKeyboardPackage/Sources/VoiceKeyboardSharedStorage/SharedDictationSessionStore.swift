@@ -973,11 +973,11 @@ public final class SharedDictationSessionStore {
         } ?? [:]
     }
 
-    /// Atomically cancels an unclaimed stale keyboard start. Recovery validates
-    /// the claim, the session-bound heartbeat, and the current status under the
-    /// same file lock as the transition. Active recording states are retained
-    /// even after command expiry because their producer may still be writing a
-    /// transcript in the separate transcript store.
+    /// Atomically cancels a stale keyboard start. Recovery validates the claim,
+    /// the session-bound heartbeat, and the current status under the same file
+    /// lock as the transition. Active recording states are cancellable only
+    /// after command expiry and when no producer claim or fresh heartbeat
+    /// remains; a live producer therefore keeps its transcript handoff alive.
     @discardableResult
     public func cancelStaleKeyboardCommand(
         token: String,
@@ -1005,8 +1005,9 @@ public final class SharedDictationSessionStore {
                 switch currentStatus {
                 case .idle, .commandPending:
                     shouldCancel = command.isExpired(at: now)
-                case .commandAcknowledged, .recording, .transcribing,
-                     .transcriptReady, .failed, .cancelled:
+                case .commandAcknowledged, .recording, .transcribing:
+                    shouldCancel = command.isExpired(at: now)
+                case .transcriptReady, .failed, .cancelled:
                     shouldCancel = false
                 }
                 guard shouldCancel else { return false }
@@ -1039,8 +1040,9 @@ public final class SharedDictationSessionStore {
             switch currentStatus {
             case .idle, .commandPending:
                 shouldCancel = command.isExpired(at: now)
-            case .commandAcknowledged, .recording, .transcribing,
-                 .transcriptReady, .failed, .cancelled:
+            case .commandAcknowledged, .recording, .transcribing:
+                shouldCancel = command.isExpired(at: now)
+            case .transcriptReady, .failed, .cancelled:
                 shouldCancel = false
             }
             guard shouldCancel else { return false }
@@ -1279,7 +1281,18 @@ public final class SharedDictationSessionStore {
             (load([String].self, forKey: Key.statusIndex) ?? [])
                 .suffix(Self.historyLimit)
         ))
-        let statuses = loadStatusHistory()
+        var statuses = loadStatusHistory()
+        var statusOrder = statusTokens.filter { statuses[$0] != nil }
+        let latestStatus = loadStatus()
+        // Older releases stored only the latest token-scoped status. Preserve
+        // it during migration so a later status cannot erase the only record
+        // from which that command can be recovered.
+        if let latestToken = latestStatus.commandToken,
+           commandHistory.contains(where: { $0.token == latestToken }),
+           statuses[latestToken] == nil {
+            statuses[latestToken] = latestStatus
+            statusOrder.append(latestToken)
+        }
         let commands = Self.dictionaryByToken(commandHistory)
         let claims = load([String: Date].self, forKey: Key.claims) ?? [:]
         let filteredClaims = claims.filter { commands[$0.key] != nil }
@@ -1289,8 +1302,8 @@ public final class SharedDictationSessionStore {
             commands: commands,
             commandOrder: Self.uniqueTokens(commandHistory.map(\.token)),
             statuses: statuses,
-            statusOrder: statusTokens.filter { statuses[$0] != nil },
-            latestStatus: loadStatus(),
+            statusOrder: Self.uniqueTokens(statusOrder),
+            latestStatus: latestStatus,
             heartbeat: load(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat),
             heartbeats: load(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat)
                 .map { [$0.token: $0] } ?? [:],

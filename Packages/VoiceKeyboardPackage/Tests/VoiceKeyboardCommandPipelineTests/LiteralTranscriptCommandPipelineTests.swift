@@ -25,7 +25,7 @@ final class LiteralTranscriptCommandPipelineTests: XCTestCase {
         ])
     }
 
-    func testJapanesePreviewKeepsAmbiguousUnspacedAliasesLiteral() {
+    func testJapanesePreviewParsesACommandTerminatedUnspacedSequence() {
         let pipeline = LiteralTranscriptCommandPipeline(
             locale: VoiceKeyboardLocale(identifier: "ja-JP")
         )
@@ -36,10 +36,16 @@ final class LiteralTranscriptCommandPipelineTests: XCTestCase {
         )
 
         XCTAssertEqual(preview.elements, [
-            .text("こんにちは読点世界改行")
+            .text("こんにちは"),
+            .command(.insertText("、")),
+            .text("世界"),
+            .command(.insertText("\n"))
         ])
         XCTAssertEqual(preview.operations, [
-            .insertText("こんにちは読点世界改行")
+            .insertText("こんにちは"),
+            .insertText("、"),
+            .insertText("世界"),
+            .insertText("\n")
         ])
     }
 

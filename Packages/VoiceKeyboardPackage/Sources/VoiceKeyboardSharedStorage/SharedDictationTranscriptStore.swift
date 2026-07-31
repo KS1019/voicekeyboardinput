@@ -969,7 +969,12 @@ public final class SharedDictationTranscriptStore {
                     applyConsumption(to: $0, consumedTokens: envelope.consumedTokens)
                 }
             } else {
-                transcripts = loadTranscriptTokens().compactMap { loadLegacyRecord(forToken: $0) }
+                var legacyTranscripts = loadTranscriptTokens().compactMap { loadLegacyRecord(forToken: $0) }
+                if let singleton = loadLegacyRecord(forToken: nil),
+                   !legacyTranscripts.contains(where: { $0.token == singleton.token }) {
+                    legacyTranscripts.append(singleton)
+                }
+                transcripts = legacyTranscripts
             }
             guard !envelopeReadBlocked else { return .unavailable }
             return .available(transcripts
@@ -1657,9 +1662,14 @@ public final class SharedDictationTranscriptStore {
 
     private func loadLegacyRecord(forToken token: String?) -> SharedDictationTranscript? {
         let key = token.map { Key.transcriptRecordPrefix + $0 } ?? Key.transcriptRecord
-        guard let data = defaults.data(forKey: key),
-              data.count <= Self.maximumEnvelopeByteCount,
+        guard let data = defaults.data(forKey: key) else {
+            return nil
+        }
+        guard data.count <= Self.maximumEnvelopeByteCount,
               let transcript = try? decoder.decode(SharedDictationTranscript.self, from: data) else {
+            // A present but malformed legacy record is a storage failure, not
+            // proof that no transcript exists. Callers must fail closed.
+            envelopeReadBlocked = true
             return nil
         }
         return applyConsumption(to: transcript, consumedTokens: loadConsumedTokenIndex())
@@ -1832,6 +1842,9 @@ public final class SharedDictationTranscriptStore {
                 records[token] = transcript
             }
         }
+        if let transcript = loadLegacyRecord(forToken: nil) {
+            records[transcript.token] = transcript
+        }
         return records
     }
 
@@ -1852,7 +1865,13 @@ public final class SharedDictationTranscriptStore {
     }
 
     private func loadTranscriptTokens() -> [String] {
-        loadTranscriptIndex()
+        var tokens = loadTranscriptIndex()
+        if let legacyTranscript = loadLegacyRecord(forToken: nil),
+           !tokens.contains(legacyTranscript.token) {
+            tokens = Array(tokens.suffix(max(0, Self.transcriptIndexLimit - 1)))
+            tokens.append(legacyTranscript.token)
+        }
+        return tokens
     }
 
     private func loadConsumedTokenIndex() -> [String] {

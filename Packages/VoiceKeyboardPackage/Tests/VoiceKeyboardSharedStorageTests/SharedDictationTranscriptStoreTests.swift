@@ -57,6 +57,35 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         )
     }
 
+    func testLegacySingletonTranscriptIsIncludedInRecoveryAndMigration() throws {
+        let defaults = try makeDefaults()
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "legacy-session",
+            commandToken: "legacy-command",
+            text: "legacy transcript"
+        ))
+        defaults.set(try JSONEncoder().encode(transcript), forKey: "sharedDictation.transcriptRecord")
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertEqual(store.latestTranscript(), transcript)
+        XCTAssertEqual(
+            store.unconsumedTranscriptsResolution(),
+            .available([transcript])
+        )
+    }
+
+    func testCorruptLegacySingletonTranscriptFailsClosed() throws {
+        let defaults = try makeDefaults()
+        defaults.set(Data([0xFF]), forKey: "sharedDictation.transcriptRecord")
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertEqual(
+            store.latestTranscriptResolution(forSessionID: "legacy-session"),
+            .unavailable
+        )
+        XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
+    }
+
     func testConflictingTranscriptForSameCommandIsRejectedWriteOnce() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)
