@@ -222,6 +222,7 @@ enum KeyboardAudioSessionRouting {
         }
 
         var stableSamples = 0
+        var builtInDiscoverySamples = 0
         var lastSignature: AudioInputSignature?
         var lastChangeCount = monitor.changeCount
 
@@ -264,11 +265,22 @@ enum KeyboardAudioSessionRouting {
 
             if changeCount != lastChangeCount || signature != lastSignature {
                 stableSamples = 0
+                builtInDiscoverySamples = 0
             }
             lastChangeCount = changeCount
             lastSignature = signature
             stableSamples += 1
             if stableSamples >= 4 {
+                if input?.portType == .builtInMic {
+                    // Give late HFP/USB availability notifications a bounded
+                    // chance to select the external route before accepting
+                    // the built-in microphone as the stable input.
+                    builtInDiscoverySamples += 1
+                    if builtInDiscoverySamples < 20 {
+                        try await Task.sleep(for: .milliseconds(75))
+                        continue
+                    }
+                }
                 return
             }
             try await Task.sleep(for: .milliseconds(75))

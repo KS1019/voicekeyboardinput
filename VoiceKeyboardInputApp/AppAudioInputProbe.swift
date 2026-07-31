@@ -59,7 +59,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                 if tapWasInstalled {
                     _ = VKRemoveAudioInputTap(engine.inputNode)
                 }
-                engine.stop()
+                _ = VKStopAudioEngine(engine)
                 // `terminateOperationIfNeeded` invalidates the token so a
                 // late engine callback cannot start new work. It must not
                 // suppress teardown of a session that was already activated.
@@ -232,13 +232,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         _ engine: AVAudioEngine
     ) -> Task<AppAudioEngineOperationStatus, Never> {
         Task.detached {
-            do {
-                engine.prepare()
-                try engine.start()
-                return .succeeded
-            } catch {
-                return .failed
-            }
+            VKPrepareAndStartAudioEngine(engine) ? .succeeded : .failed
         }
     }
 

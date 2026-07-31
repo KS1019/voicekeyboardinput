@@ -177,9 +177,10 @@ package struct TextInsertionPlanner: Sendable {
         guard !trimmed.isEmpty else { return 0 }
 
         let trailingToken = trimmed.split(whereSeparator: \.isWhitespace).last.map(String.init) ?? ""
+        let decimalSeparators: Set<Character> = [".", "．", "｡", "﹒"]
         if trailingToken.contains("@")
             || trailingToken.contains("://")
-            || (trailingToken.contains(".") && trailingToken.filter { $0 == "." }.count >= 1) {
+            || trailingToken.contains(where: { decimalSeparators.contains($0) }) {
             // Treat URLs, e-mail addresses, and decimal-like tokens as one
             // word. Removing only `com` or `14` leaves a malformed token.
             return trailingWhitespaceCount + trailingToken.count

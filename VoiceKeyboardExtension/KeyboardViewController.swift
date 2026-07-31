@@ -1681,6 +1681,35 @@ public final class KeyboardViewController: UIInputViewController {
                 return true
             }
             if pendingDelivery.operations.isEmpty {
+                // Legacy journals did not persist an operation plan. The
+                // transcript must still be tied to the exact text context
+                // captured before recording; documentIdentifier alone does
+                // not prove that the caret or selection is unchanged.
+                guard pendingDelivery.beforeContext.matches(
+                    beforeInput: beforeInput,
+                    afterInput: afterInput,
+                    documentIdentifier: documentIdentifier,
+                    selectedText: selectedText
+                ) else {
+                    guard await failSharedDelivery(
+                        sourceCommandToken: source.commandToken,
+                        transcriptToken: pendingDelivery.transcriptToken,
+                        message: "The text field changed before shared dictation could be delivered. Try again."
+                    ) else { return false }
+                    guard isCurrentDelivery() else { return false }
+                    endSharedSession(
+                        ifMatchingSessionID: source.sessionID,
+                        commandToken: command.token,
+                        pollingGeneration: deliveryPollingGeneration
+                    )
+                    keyboardRootView.render(
+                        speechCapture: .keyboardSpeechCapture(.recognitionFailed(
+                            .recognitionFailed("The text field changed before shared dictation could be delivered. Try again.")
+                        )),
+                        announce: true
+                    )
+                    return true
+                }
                 pendingTranscript = await transcriptStoreCall {
                     $0.resumePendingDelivery(
                         forSessionID: source.sessionID,

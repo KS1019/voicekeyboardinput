@@ -670,6 +670,53 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         )
     }
 
+    func testFileBackedMigrationFailsClosedForMalformedLegacySafetyRecords() throws {
+        let keys = [
+            "sharedDictation.session.statusIndex",
+            "sharedDictation.session.status",
+            "sharedDictation.session.claims",
+            "sharedDictation.session.claimOwners",
+            "sharedDictation.session.heartbeat",
+            "sharedDictation.session.deliveryFailureIntents",
+            "sharedDictation.session.cancellationIntents"
+        ]
+
+        for (index, key) in keys.enumerated() {
+            let defaults = try makeDefaults()
+            defaults.set(Data([0xFF]), forKey: key)
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SharedDictationSessionStoreMalformedLegacy-\(index)-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try XCTUnwrap(SharedDictationSessionStore(
+                defaults: defaults,
+                envelopeURL: directory.appendingPathComponent("session.json"),
+                lockFileURL: directory.appendingPathComponent("session.lock")
+            ))
+
+            XCTAssertFalse(store.storageHealth(), key)
+            XCTAssertFalse(store.saveHeartbeat(SharedDictationAppHeartbeat(
+                token: "blocked-\(index)",
+                lastSeenAt: Date(),
+                sessionState: .armed
+            )), key)
+        }
+    }
+
+    func testCancelledStatusCannotBeReanimatedWithoutReplacementClaim() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let command = SharedDictationSessionCommand.start(source: .keyboard)
+
+        XCTAssertTrue(store.saveCommand(command))
+        XCTAssertTrue(store.saveStatus(.cancelled(token: command.token)))
+        XCTAssertFalse(store.saveStatus(
+            .transcriptReady(token: command.token),
+            allowRecoveryFromTranscriptReady: true
+        ))
+        XCTAssertEqual(store.status(forCommandToken: command.token), .cancelled(token: command.token))
+    }
+
     func testTranscriptReadyCommandSurvivesHistoryChurnAfterCommandExpiry() throws {
         let defaults = try makeDefaults()
         let directory = FileManager.default.temporaryDirectory

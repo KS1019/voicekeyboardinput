@@ -39,3 +39,22 @@ AVAudioFormat * _Nullable VKAudioInputNodeOutputFormat(AVAudioInputNode *inputNo
         return nil;
     }
 }
+
+BOOL VKPrepareAndStartAudioEngine(AVAudioEngine *engine) {
+    @try {
+        [engine prepare];
+        NSError *error = nil;
+        return [engine startAndReturnError:&error];
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}
+
+BOOL VKStopAudioEngine(AVAudioEngine *engine) {
+    @try {
+        [engine stop];
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}

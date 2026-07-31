@@ -170,6 +170,12 @@ public final class SharedDictationSessionStore {
     private let decoder = JSONDecoder()
     private var envelopeReadBlocked = false
 
+    private enum LegacyValueResolution<Value> {
+        case missing
+        case found(Value)
+        case unavailable
+    }
+
     /// In-process compatibility backend for tests and legacy migration only.
     /// App Group production callers must use `appGroupStore()`, which uses a
     /// single file-backed envelope and an interprocess lock.
@@ -611,6 +617,15 @@ public final class SharedDictationSessionStore {
                 if let commandToken = status.commandToken {
                     let currentStatus = envelope.statuses[commandToken]
                         ?? (previousLatestStatus.commandToken == commandToken ? previousLatestStatus : nil)
+                    if case .cancelled = currentStatus,
+                       case .transcriptReady = status,
+                       recoveryOwnerCommandToken == nil {
+                        // A transcript written after a cancellation must not
+                        // be resurrected by the independent transcript store.
+                        // Only a live, replacement stop/cancel claim can
+                        // prove that this is an intentional recovery.
+                        return false
+                    }
                     if allowRecoveryFromTranscriptReady,
                        previousLatestStatus.commandToken != commandToken {
                         // A delivery failure may be reported after a newer
@@ -692,6 +707,14 @@ public final class SharedDictationSessionStore {
                     SharedDictationSessionStatus.self,
                     forKey: Key.statusPrefix + commandToken
                 ) ?? (latestStatus.commandToken == commandToken ? latestStatus : nil)
+                if case .cancelled = currentStatus,
+                   case .transcriptReady = status,
+                   recoveryOwnerCommandToken == nil {
+                    // See the file-backed branch above: cancellation is a
+                    // fence unless an active replacement command authorizes
+                    // recovery.
+                    return false
+                }
                 if allowRecoveryFromTranscriptReady,
                    latestStatus.commandToken != commandToken {
                     guard Self.isAllowedStatusTransition(
@@ -1321,7 +1344,9 @@ public final class SharedDictationSessionStore {
         }
         for token in Self.uniqueTokens(tokens) {
             let key = Key.commandPrefix + token
-            guard defaults.object(forKey: key) != nil else { continue }
+            guard defaults.object(forKey: key) != nil else {
+                return .unavailable
+            }
             guard load(SharedDictationSessionCommand.self, forKey: key) != nil else {
                 return .unavailable
             }
@@ -1368,14 +1393,29 @@ public final class SharedDictationSessionStore {
             envelopeReadBlocked = true
             return SessionEnvelope()
         }
-        let statusTokens = Self.uniqueTokens(Array(
-            (load([String].self, forKey: Key.statusIndex) ?? [])
-                .suffix(Self.historyLimit)
-        ))
+        let statusTokens: [String]
+        switch loadLegacyValue([String].self, forKey: Key.statusIndex) {
+        case .missing:
+            statusTokens = []
+        case .found(let tokens):
+            statusTokens = Self.uniqueTokens(Array(tokens.suffix(Self.historyLimit)))
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
         var statuses = loadStatusHistory()
         guard !envelopeReadBlocked else { return SessionEnvelope() }
         var statusOrder = statusTokens.filter { statuses[$0] != nil }
-        let latestStatus = loadStatus()
+        let latestStatus: SharedDictationSessionStatus
+        switch loadLegacyValue(SharedDictationSessionStatus.self, forKey: Key.status) {
+        case .missing:
+            latestStatus = .idle
+        case .found(let status):
+            latestStatus = status
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
         // Older releases stored only the latest token-scoped status. Preserve
         // it during migration so a later status cannot erase the only record
         // from which that command can be recovered.
@@ -1386,26 +1426,69 @@ public final class SharedDictationSessionStore {
             statusOrder.append(latestToken)
         }
         let commands = Self.dictionaryByToken(commandHistory)
-        let claims = load([String: Date].self, forKey: Key.claims) ?? [:]
+        let claims: [String: Date]
+        switch loadLegacyValue([String: Date].self, forKey: Key.claims) {
+        case .missing:
+            claims = [:]
+        case .found(let value):
+            claims = value
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
         let filteredClaims = claims.filter { commands[$0.key] != nil }
-        let claimOwners = (load([String: String].self, forKey: Key.claimOwners) ?? [:])
-            .filter { filteredClaims[$0.key] != nil }
+        let claimOwners: [String: String]
+        switch loadLegacyValue([String: String].self, forKey: Key.claimOwners) {
+        case .missing:
+            claimOwners = [:]
+        case .found(let value):
+            claimOwners = value.filter { filteredClaims[$0.key] != nil }
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
+        let heartbeat: SharedDictationAppHeartbeat?
+        switch loadLegacyValue(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat) {
+        case .missing:
+            heartbeat = nil
+        case .found(let value):
+            heartbeat = value
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
+        let deliveryFailureIntents: [String: String]
+        switch loadLegacyValue([String: String].self, forKey: Key.deliveryFailureIntents) {
+        case .missing:
+            deliveryFailureIntents = [:]
+        case .found(let value):
+            deliveryFailureIntents = value
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
+        let cancellationIntents: [String: SharedDictationSessionCommand]
+        switch loadLegacyValue([String: SharedDictationSessionCommand].self, forKey: Key.cancellationIntents) {
+        case .missing:
+            cancellationIntents = [:]
+        case .found(let value):
+            cancellationIntents = value
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
         return SessionEnvelope(
             commands: commands,
             commandOrder: Self.uniqueTokens(commandHistory.map(\.token)),
             statuses: statuses,
             statusOrder: Self.uniqueTokens(statusOrder),
             latestStatus: latestStatus,
-            heartbeat: load(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat),
-            heartbeats: load(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat)
-                .map { [$0.token: $0] } ?? [:],
+            heartbeat: heartbeat,
+            heartbeats: heartbeat.map { [$0.token: $0] } ?? [:],
             claims: filteredClaims,
             claimOwners: claimOwners,
-            deliveryFailureIntents: load([String: String].self, forKey: Key.deliveryFailureIntents) ?? [:],
-            cancellationIntents: load(
-                [String: SharedDictationSessionCommand].self,
-                forKey: Key.cancellationIntents
-            ) ?? [:]
+            deliveryFailureIntents: deliveryFailureIntents,
+            cancellationIntents: cancellationIntents
         )
     }
 
@@ -1915,6 +1998,19 @@ public final class SharedDictationSessionStore {
         guard let data = defaults.data(forKey: key),
               data.count <= Self.maximumEnvelopeByteCount else { return nil }
         return try? decoder.decode(type, from: data)
+    }
+
+    private func loadLegacyValue<Value: Decodable>(
+        _ type: Value.Type,
+        forKey key: String
+    ) -> LegacyValueResolution<Value> {
+        guard defaults.object(forKey: key) != nil else { return .missing }
+        guard let data = defaults.data(forKey: key),
+              data.count <= Self.maximumEnvelopeByteCount,
+              let value = try? decoder.decode(type, from: data) else {
+            return .unavailable
+        }
+        return .found(value)
     }
 
     private func loadCommand(forToken token: String) -> SharedDictationSessionCommand? {

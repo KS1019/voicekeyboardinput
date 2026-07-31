@@ -201,7 +201,7 @@ final class AppSpeechDictationRun {
             if tapIsInstalled {
                 _ = VKRemoveAudioInputTap(engine.inputNode)
             }
-            engine.stop()
+            _ = VKStopAudioEngine(engine)
             request?.endAudio()
         }
     }
@@ -864,13 +864,7 @@ final class AppSpeechDictationRun {
     private func prepareAndStartAudioEngine() async throws {
         let engine = self.engine
         let operation = Task.detached { () -> AppAudioEngineOperationStatus in
-            do {
-                engine.prepare()
-                try engine.start()
-                return .succeeded
-            } catch {
-                return .failed
-            }
+            VKPrepareAndStartAudioEngine(engine) ? .succeeded : .failed
         }
         lingeringAudioEngineStartTask = operation
         let status = await withCheckedContinuation { continuation in

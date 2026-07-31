@@ -102,6 +102,7 @@ enum AppAudioSessionRouting {
         }
 
         var stableSamples = 0
+        var builtInDiscoverySamples = 0
         var lastSignature: AudioInputSignature?
         var lastChangeCount = monitor.changeCount
 
@@ -144,11 +145,23 @@ enum AppAudioSessionRouting {
 
             if changeCount != lastChangeCount || signature != lastSignature {
                 stableSamples = 0
+                builtInDiscoverySamples = 0
             }
             lastChangeCount = changeCount
             lastSignature = signature
             stableSamples += 1
             if stableSamples >= 4 {
+                if input?.portType == .builtInMic {
+                    // A Bluetooth HFP/USB route can materialize just after
+                    // the preferred-input retry loop. Hold a built-in
+                    // fallback for a bounded discovery window so the first
+                    // stable sample does not permanently win the race.
+                    builtInDiscoverySamples += 1
+                    if builtInDiscoverySamples < 20 {
+                        try await Task.sleep(for: .milliseconds(75))
+                        continue
+                    }
+                }
                 return
             }
             try await Task.sleep(for: .milliseconds(75))

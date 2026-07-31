@@ -59,13 +59,7 @@ final class DeferredAudioEngineOperation: @unchecked Sendable {
 
     init(engine: AVAudioEngine) {
         task = Task.detached {
-            do {
-                engine.prepare()
-                try engine.start()
-                return .succeeded
-            } catch {
-                return .failed
-            }
+            VKPrepareAndStartAudioEngine(engine) ? .succeeded : .failed
         }
     }
 }
@@ -165,7 +159,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
 
         private func performTeardown() {
             _ = VKRemoveAudioInputTap(engine.inputNode)
-            engine.stop()
+            _ = VKStopAudioEngine(engine)
             request.endAudio()
         }
     }
@@ -538,7 +532,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
 
         private func performTeardown() {
             _ = VKRemoveAudioInputTap(engine.inputNode)
-            engine.stop()
+            _ = VKStopAudioEngine(engine)
         }
     }
 
@@ -1211,12 +1205,15 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         let analyzerTapGate = run.analyzerTapGate
         let analyzerTapDidDrain = analyzerTapGate?.invalidate() ?? true
         run.analyzerTapGate = nil
-        run.analyzerTask?.cancel()
-        run.analyzerTask = nil
         run.timeoutTask?.cancel()
         run.timeoutTask = nil
-        run.recognitionTasks.forEach { $0.cancel() }
-        run.recognitionTasks.removeAll()
+        let analyzer = run.analyzer
+        if analyzer == nil {
+            run.analyzerTask?.cancel()
+            run.analyzerTask = nil
+            run.recognitionTasks.forEach { $0.cancel() }
+            run.recognitionTasks.removeAll()
+        }
         let legacyTapGate = run.legacyTapGate
         let legacyTapDidDrain = legacyTapGate?.invalidate() ?? true
         run.legacyTapGate = nil
@@ -1234,6 +1231,19 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         run.inputDeliveryQueue = nil
         run.inputBridge?.finish()
         run.inputBridge = nil
+        let didFinalizeAnalyzer: Bool
+        if let analyzer {
+            // End-of-input is the normal stop signal for SpeechAnalyzer. It
+            // allows a volatile final segment to be emitted before the
+            // output bridge is closed.
+            didFinalizeAnalyzer = await finalizeAnalyzerWithTimeout(analyzer)
+            run.analyzerTask?.cancel()
+            run.analyzerTask = nil
+            run.recognitionTasks.forEach { $0.cancel() }
+            run.recognitionTasks.removeAll()
+        } else {
+            didFinalizeAnalyzer = false
+        }
         run.outputBridge?.finish()
         run.outputBridge = nil
         run.audioObservers.forEach { NotificationCenter.default.removeObserver($0) }
@@ -1260,7 +1270,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     if let analyzerTapGate { analyzerTapGate.waitUntilDrained() }
                     if let legacyTapGate { legacyTapGate.waitUntilDrained() }
                     if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                    engine.stop()
+                    _ = VKStopAudioEngine(engine)
                 }
                 legacyRequestHolder?.request.endAudio()
                 if !activationSucceeded {
@@ -1290,21 +1300,21 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     _ = await pendingEngineOperation.value
                     analyzerTapGate.waitUntilDrained()
                     if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                    engine.stop()
+                    _ = VKStopAudioEngine(engine)
                 }
             } else if let legacyTapGate {
                 audioQuarantineTask = Task.detached {
                     _ = await pendingEngineOperation.value
                     legacyTapGate.waitUntilDrained()
                     if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                    engine.stop()
+                    _ = VKStopAudioEngine(engine)
                     legacyRequestHolder?.request.endAudio()
                 }
             } else {
                 audioQuarantineTask = Task.detached {
                     _ = await pendingEngineOperation.value
                 if tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                    engine.stop()
+                    _ = VKStopAudioEngine(engine)
                     legacyRequestHolder?.request.endAudio()
                 }
             }
@@ -1312,7 +1322,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             if let analyzerTapGate {
                 if analyzerTapDidDrain {
                     if run.tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                    engine.stop()
+                    _ = VKStopAudioEngine(engine)
                 } else {
                     let cleanup = DeferredAnalyzerAudioCleanup(gate: analyzerTapGate, engine: engine)
                     if await cleanup.waitForCompletion(timeout: 2) == false {
@@ -1322,7 +1332,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             } else if let legacyTapGate {
                 if legacyTapDidDrain {
                     if run.tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                    engine.stop()
+                    _ = VKStopAudioEngine(engine)
                 } else if let legacyRequest {
                     let cleanup = DeferredLegacyAudioCleanup(
                         gate: legacyTapGate,
@@ -1335,7 +1345,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 }
             } else {
                 if run.tapInstalled { _ = VKRemoveAudioInputTap(engine.inputNode) }
-                engine.stop()
+                _ = VKStopAudioEngine(engine)
             }
         }
         if pendingEngineOperation == nil && pendingSessionActivation == nil
@@ -1343,7 +1353,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             legacyRequest?.endAudio()
         }
         run.engine = nil
-        if let analyzer = run.analyzer {
+        if let analyzer = run.analyzer, !didFinalizeAnalyzer {
             await cancelAnalyzerWithTimeout(analyzer)
         }
         run.analyzer = nil
@@ -1552,6 +1562,23 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         if await waitForAnalyzerCleanup(cleanupTask) {
             lingeringAnalyzerCleanupTask = nil
         }
+    }
+
+    private func finalizeAnalyzerWithTimeout(_ analyzer: SpeechAnalyzer) async -> Bool {
+        let cleanupTask = Task {
+            do {
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
+            } catch {
+                // The bounded cancellation fallback below handles an
+                // analyzer that cannot finalize after a route interruption.
+            }
+        }
+        lingeringAnalyzerCleanupTask = cleanupTask
+        if await waitForAnalyzerCleanup(cleanupTask) {
+            lingeringAnalyzerCleanupTask = nil
+            return true
+        }
+        return false
     }
 
     private func waitForAnalyzerCleanup(_ cleanupTask: Task<Void, Never>) async -> Bool {

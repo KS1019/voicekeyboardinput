@@ -1,3 +1,4 @@
+import Foundation
 import VoiceKeyboardModels
 
 package struct VoiceCommandParser: Sendable {
@@ -273,8 +274,8 @@ package struct VoiceCommandParser: Sendable {
                     if command.isUnsupportedShortcut && !isExplicitUnsupportedShortcut {
                         return true
                     }
-                    let precedingWord = prefix.last?.lowercased()
-                    let followingWord = suffix.first?.lowercased()
+                    let precedingWord = prefix.last.map(Self.normalizedNaturalLanguageCueWord)
+                    let followingWord = suffix.first.map(Self.normalizedNaturalLanguageCueWord)
                     let precedingCue = Self.naturalLanguageCueWords.contains(precedingWord ?? "")
                     let followingCue = Self.naturalLanguageCueWords.contains(followingWord ?? "")
                     if (precedingCue && !boundaries.prefix[index])
@@ -302,14 +303,14 @@ package struct VoiceCommandParser: Sendable {
     }
 
     private static func containsJapaneseNaturalLanguageCue(_ word: String) -> Bool {
-        let normalizedWord = word.lowercased()
+        let normalizedWord = normalizedNaturalLanguageCueWord(word)
         return japaneseNaturalLanguageCueWords.contains { cue in
             normalizedWord == cue || (cue.count > 1 && normalizedWord.contains(cue))
         }
     }
 
     private static func containsJapaneseLeadingNaturalLanguageCue(_ word: String) -> Bool {
-        let normalizedWord = word.lowercased()
+        let normalizedWord = normalizedNaturalLanguageCueWord(word)
         return japaneseNaturalLanguageCueWords.contains { cue in
             cue.count == 1
                 ? normalizedWord.hasPrefix(cue)
@@ -461,8 +462,8 @@ package struct VoiceCommandParser: Sendable {
         let prefix = words[..<index]
         let suffix = words[(index + length)...]
         guard command.isNaturalLanguageSensitiveAlias else { return true }
-        let precedingWord = prefix.last?.lowercased()
-        let followingWord = suffix.first?.lowercased()
+        let precedingWord = prefix.last.map(Self.normalizedNaturalLanguageCueWord)
+        let followingWord = suffix.first.map(Self.normalizedNaturalLanguageCueWord)
         let precedingCue = Self.naturalLanguageCueWords.contains(precedingWord ?? "")
         let followingCue = Self.naturalLanguageCueWords.contains(followingWord ?? "")
         if (precedingCue && !boundaries.prefix[index])
@@ -470,7 +471,7 @@ package struct VoiceCommandParser: Sendable {
             || (isJapaneseLocale && (
                 Self.japaneseNaturalLanguageCueWords.contains(precedingWord ?? "")
                     || Self.japaneseNaturalLanguageCueWords.contains(followingWord ?? "")
-                    || suffix.contains { Self.japaneseNaturalLanguageCueWords.contains($0.lowercased()) }
+                    || suffix.contains { Self.japaneseNaturalLanguageCueWords.contains(Self.normalizedNaturalLanguageCueWord($0)) }
             )) {
             return false
         }
@@ -491,8 +492,18 @@ package struct VoiceCommandParser: Sendable {
 
     private static let japaneseNaturalLanguageCueWords: Set<String> = [
         "この", "その", "あの", "これ", "それ", "は", "を", "が", "に", "の", "について", "必要", "文字", "コード",
-        "使い方", "多すぎ", "不要", "入れる", "いる"
+        "使い方", "多すぎ", "不要", "入れる", "いる",
+        // These particles connect otherwise command-looking aliases in
+        // ordinary Japanese prose. Do not execute an unspaced sequence such
+        // as "読点と句点" unless the user provides an explicit boundary.
+        "と", "や", "も", "へ", "で", "から", "まで", "って", "という"
     ]
+
+    private static func normalizedNaturalLanguageCueWord(_ word: String) -> String {
+        word
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.symbols))
+    }
 
     private func makeCommandOnlyBoundaries(for words: [String]) -> CommandOnlyBoundaries {
         var nextMatch = Array(repeating: 0, count: words.count)

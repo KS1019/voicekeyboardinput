@@ -671,6 +671,21 @@ final class TextInsertionPlannerTests: XCTestCase {
         )
     }
 
+    func testDeleteWordTreatsUnicodeDecimalTokensAsOneWord() {
+        let planner = TextInsertionPlanner()
+
+        for context in ["３．１４", "3｡14", "3﹒14"] {
+            XCTAssertEqual(
+                planner.plan(
+                    ParsedTranscript(elements: [.command(.deleteWord)]),
+                    documentContextBeforeInput: context
+                ),
+                [.deleteBackward(count: deleteCount(context.count))],
+                context
+            )
+        }
+    }
+
     func testSplitsDeletionCountsBeyondSingleOperationLimit() {
         let planner = TextInsertionPlanner()
         let context = String(repeating: "x", count: 257)

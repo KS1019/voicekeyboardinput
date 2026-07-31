@@ -202,6 +202,18 @@ final class VoiceCommandParserTests: XCTestCase {
         }
     }
 
+    func testPunctuationAroundNaturalLanguageCuesRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in [
+            "The word, period",
+            "I said, comma",
+            "I mentioned: tab"
+        ] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
     func testOrdinaryProseWithCommandWordsRemainsLiteral() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 
@@ -291,6 +303,14 @@ final class VoiceCommandParserTests: XCTestCase {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
         for transcript in ["改行コード改行", "読点の使い方読点"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testJapaneseParticlesPreventImplicitCommandSequenceParsing() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in ["読点と句点", "改行や空白", "句点から読点"] {
             XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
         }
     }

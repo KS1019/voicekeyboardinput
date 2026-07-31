@@ -17,4 +17,10 @@ FOUNDATION_EXPORT AVAudioFormat * _Nullable VKAudioInputNodeOutputFormat(
     AVAudioInputNode *inputNode
 );
 
+/// Prepares and starts an engine inside an Objective-C exception boundary.
+FOUNDATION_EXPORT BOOL VKPrepareAndStartAudioEngine(AVAudioEngine *engine);
+
+/// Stops an engine best-effort inside an Objective-C exception boundary.
+FOUNDATION_EXPORT BOOL VKStopAudioEngine(AVAudioEngine *engine);
+
 NS_ASSUME_NONNULL_END
