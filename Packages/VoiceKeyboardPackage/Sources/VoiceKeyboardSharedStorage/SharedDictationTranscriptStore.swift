@@ -423,6 +423,12 @@ public final class SharedDictationTranscriptStore {
         case unavailable
     }
 
+    public enum PendingDeliveryResolution: Equatable, Sendable {
+        case found(SharedDictationTranscriptDelivery)
+        case missing
+        case unavailable
+    }
+
     public static let appGroupIdentifier = "group.com.ks1019.voicekeyboardinput"
     // Bound both the bytes read from the App Group and the aggregate text
     // retained after JSON decoding. This protects the keyboard extension from
@@ -1271,11 +1277,49 @@ public final class SharedDictationTranscriptStore {
     }
 
     public func pendingDelivery(forSessionID sessionID: String) -> SharedDictationTranscriptDelivery? {
+        switch pendingDeliveryResolution(forSessionID: sessionID) {
+        case .found(let delivery): return delivery
+        case .missing, .unavailable: return nil
+        }
+    }
+
+    /// Resolves a delivery journal without treating a damaged or unavailable
+    /// App Group file as proof that no journal exists.
+    public func pendingDeliveryResolution(
+        forSessionID sessionID: String
+    ) -> PendingDeliveryResolution {
         withExclusiveAccess {
-            return loadTranscriptEnvelope()?.pendingDeliveries.values
-                .filter { $0.sessionID == sessionID }
-                .max { lhs, rhs in lhs.startedAt < rhs.startedAt }
-        } ?? nil
+            guard let envelope = loadTranscriptEnvelope() else {
+                return envelopeReadBlocked ? .unavailable : .missing
+            }
+            guard !envelopeReadBlocked else { return .unavailable }
+            guard let delivery = envelope.pendingDeliveries.values
+                .filter({ $0.sessionID == sessionID })
+                .max(by: { lhs, rhs in lhs.startedAt < rhs.startedAt }) else {
+                return .missing
+            }
+            return .found(delivery)
+        } ?? .unavailable
+    }
+
+    /// Resolves a journal by its source command token. Recovery uses this
+    /// identity instead of the bounded command history, because a terminal
+    /// command may have been pruned while its no-replay journal is retained.
+    public func pendingDeliveryResolution(
+        forCommandToken commandToken: String
+    ) -> PendingDeliveryResolution {
+        withExclusiveAccess {
+            guard let envelope = loadTranscriptEnvelope() else {
+                return envelopeReadBlocked ? .unavailable : .missing
+            }
+            guard !envelopeReadBlocked else { return .unavailable }
+            let matches = envelope.pendingDeliveries.values.filter { delivery in
+                envelope.records[delivery.transcriptToken]?.commandToken == commandToken
+            }
+            guard matches.count <= 1 else { return .unavailable }
+            guard let delivery = matches.first else { return .missing }
+            return .found(delivery)
+        } ?? .unavailable
     }
 
     @discardableResult

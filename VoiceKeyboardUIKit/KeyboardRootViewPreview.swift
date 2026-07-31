@@ -62,6 +62,24 @@ private struct KeyboardRootPreview: UIViewRepresentable {
     .frame(height: 220)
 }
 
+#Preview("Keyboard Root Light") {
+    KeyboardRootPreview(
+        snapshot: .listeningPreview,
+        showsNextKeyboard: true
+    )
+    .frame(height: 260)
+    .preferredColorScheme(.light)
+}
+
+#Preview("Keyboard Root Dark") {
+    KeyboardRootPreview(
+        snapshot: .listeningPreview,
+        showsNextKeyboard: true
+    )
+    .frame(height: 260)
+    .preferredColorScheme(.dark)
+}
+
 private extension SpeechCapturePresentationSnapshot {
     static let listeningPreview = SpeechCapturePresentationSnapshot(
         transcriptText: "Meeting notes: follow up with the team after lunch.",

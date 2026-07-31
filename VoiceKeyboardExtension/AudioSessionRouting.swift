@@ -242,6 +242,13 @@ enum KeyboardAudioSessionRouting {
                 )
             }
             let changeCount = monitor.changeCount
+            if changeCount != lastChangeCount {
+                // An HFP route can become available after the initial
+                // discovery loop has finished. Re-run the explicit selection
+                // when the availability notification arrives; observing the
+                // route alone does not make AVAudioSession choose it.
+                try await selectPreferredInputIfAvailable(session)
+            }
             guard let signature,
                   signature.channelCount > 0,
                   signature.sampleRate > 0 else {

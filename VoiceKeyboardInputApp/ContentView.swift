@@ -309,3 +309,13 @@ private extension VoiceInputLaunchStatus {
 #Preview("Voice Keyboard App") {
     ContentView()
 }
+
+#Preview("Voice Keyboard App Light") {
+    ContentView()
+        .preferredColorScheme(.light)
+}
+
+#Preview("Voice Keyboard App Dark") {
+    ContentView()
+        .preferredColorScheme(.dark)
+}

@@ -454,6 +454,54 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(activator.recordedCancellationCount(), 1)
     }
 
+    func testActiveStopPromotesTranscriptFinalizedByStoppableActivator() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
+        let activator = StoppableTranscriptMicrophoneActivator(transcriptStore: transcriptStore)
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
+        )
+
+        _ = await controller.prepareSession()
+        let startCommand = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        )
+        store.saveCommand(startCommand)
+        await waitForSessionStatus(in: store) { status in
+            if case .recording(token: startCommand.token, _, _) = status { return true }
+            return false
+        }
+
+        let stopCommand = SharedDictationSessionCommand.stop(
+            sessionID: startCommand.sessionID,
+            source: .keyboard,
+            requestedAt: Date(),
+            replacingCommandToken: startCommand.token
+        )
+        XCTAssertTrue(store.saveCommand(stopCommand))
+
+        await waitForSessionStatus(in: store) { status in
+            status == .cancelled(token: stopCommand.token)
+        }
+
+        XCTAssertEqual(
+            store.status(forCommandToken: startCommand.token),
+            .transcriptReady(token: startCommand.token)
+        )
+        let transcript = try XCTUnwrap(
+            transcriptStore.latestTranscript(forSessionID: startCommand.sessionID)
+        )
+        XCTAssertEqual(transcript.commandToken, startCommand.token)
+        XCTAssertEqual(transcript.text, "final words")
+        XCTAssertFalse(transcript.isConsumed)
+    }
+
     func testContainingAppStartIsCancelledBySessionCancellation() async throws {
         let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -780,6 +828,49 @@ private final class CancellableSuspendedMicrophoneActivator: MicrophoneActivatin
 
     func recordedCallCount() -> Int {
         callCount
+    }
+}
+
+@MainActor
+private final class StoppableTranscriptMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareMicrophoneActivating {
+    private let transcriptStore: SharedDictationTranscriptStore
+    private var continuation: CheckedContinuation<VoiceInputLaunchStatus, Never>?
+
+    init(transcriptStore: SharedDictationTranscriptStore) {
+        self.transcriptStore = transcriptStore
+    }
+
+    func activate() async -> VoiceInputLaunchStatus {
+        await activate(
+            sessionID: UUID().uuidString,
+            commandToken: UUID().uuidString,
+            ownerToken: ""
+        )
+    }
+
+    func activate(
+        sessionID: String,
+        commandToken: String,
+        ownerToken: String
+    ) async -> VoiceInputLaunchStatus {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func stop(sessionID: String, commandToken: String) async {
+        guard let transcript = SharedDictationTranscript(
+            sessionID: sessionID,
+            commandToken: commandToken,
+            text: "final words"
+        ) else {
+            continuation?.resume(returning: .failed("Could not create transcript"))
+            continuation = nil
+            return
+        }
+        XCTAssertTrue(transcriptStore.save(transcript))
+        continuation?.resume(returning: .transcriptShared(transcript.text))
+        continuation = nil
     }
 }
 

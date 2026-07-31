@@ -187,6 +187,12 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         case unavailable
     }
 
+    private enum ActiveStopTranscriptResolution {
+        case recovered
+        case absent
+        case unavailable
+    }
+
     init(
         microphoneActivator: any MicrophoneActivating = AppMicrophoneActivator(),
         sessionStoreProvider: @escaping @Sendable () -> SharedDictationSessionStore? = {
@@ -660,7 +666,26 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                     _ = await activationTask.value
                 }
                 if let replacedToken = command.replacesCommandToken {
-                    _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                    switch await resolveActiveStopTranscript(
+                        sessionID: command.sessionID,
+                        sourceCommandToken: replacedToken,
+                        stopCommandToken: command.token,
+                        ownerToken: ownerToken
+                    ) {
+                    case .recovered:
+                        break
+                    case .absent:
+                        _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                    case .unavailable:
+                        // The audio run has stopped, but the transcript and
+                        // command stores did not provide a safe answer. Keep
+                        // the source non-terminal so cold recovery can still
+                        // promote a transcript that was committed in the
+                        // cross-store race window.
+                        heartbeatState = isAppAvailable ? .armed : .unavailable
+                        await persistHeartbeat()
+                        return
+                    }
                 }
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
                 heartbeatState = isAppAvailable ? .armed : .unavailable
@@ -718,6 +743,41 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }
     }
 
+    private func resolveActiveStopTranscript(
+        sessionID: String,
+        sourceCommandToken: String,
+        stopCommandToken: String,
+        ownerToken: String
+    ) async -> ActiveStopTranscriptResolution {
+        guard let resolution = await transcriptStoreCall({
+            $0.latestTranscriptResolution(forSessionID: sessionID)
+        }) else {
+            return .unavailable
+        }
+        switch resolution {
+        case .unavailable:
+            return .unavailable
+        case .missing:
+            return .absent
+        case .found(let transcript):
+            guard transcript.commandToken == sourceCommandToken,
+                  !transcript.isConsumed,
+                  !transcript.isExpired() else {
+                return .absent
+            }
+            guard await sessionStoreCall({
+                $0.recoverCompletedTranscriptStatus(
+                    sourceCommandToken: sourceCommandToken,
+                    throughCommandToken: stopCommandToken,
+                    ownerToken: ownerToken
+                )
+            }) == true else {
+                return .unavailable
+            }
+            return .recovered
+        }
+    }
+
     private func firstUnclaimedKeyboardCommand() async -> KeyboardCommandLookup {
         guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }),
               case .available(let commands) = historyResolution else { return .unavailable }
@@ -726,9 +786,18 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 && $0.source == .keyboard
                 && !$0.isExpired(at: Date())
         }) {
-            guard let status = await sessionStoreCall({
-                $0.status(forCommandToken: command.token)
+            guard let statusResolution = await sessionStoreCall({
+                $0.statusResolution(forCommandToken: command.token)
             }) else { return .unavailable }
+            let status: SharedDictationSessionStatus
+            switch statusResolution {
+            case .unavailable:
+                return .unavailable
+            case .missing:
+                status = .idle
+            case .found(let resolvedStatus):
+                status = resolvedStatus
+            }
             guard case .idle = status else { continue }
             guard let transcriptResolution = await transcriptStoreCall({
                 $0.latestTranscriptResolution(forSessionID: command.sessionID)
@@ -1002,7 +1071,20 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             guard await sessionStoreCall({ $0.storageHealth() }) == true else {
                 return false
             }
-            let status = await sessionStoreCall { $0.status(forCommandToken: transcript.commandToken) } ?? .idle
+            guard let statusResolution = await sessionStoreCall({
+                $0.statusResolution(forCommandToken: transcript.commandToken)
+            }) else {
+                return false
+            }
+            let status: SharedDictationSessionStatus
+            switch statusResolution {
+            case .unavailable:
+                return false
+            case .missing:
+                status = .idle
+            case .found(let resolvedStatus):
+                status = resolvedStatus
+            }
             switch status {
             case .commandAcknowledged, .recording, .transcribing,
                  .idle, .commandPending:
@@ -1012,13 +1094,34 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 guard await sessionStoreCall({
                     $0.saveStatus(.transcriptReady(token: transcript.commandToken))
                 }) == true else {
-                    let hasReplacement = commands.contains {
+                    let replacement = commands.first {
                         ($0.kind == .stop || $0.kind == .cancel)
                             && $0.replacesCommandToken == transcript.commandToken
                     }
-                    if hasReplacement {
+                    if let replacement,
+                       let ownerToken = heartbeatToken,
+                       await sessionStoreCall({
+                           $0.claimOwner(forCommandToken: replacement.token)
+                       }) == ownerToken,
+                       await sessionStoreCall({
+                           $0.recoverCompletedTranscriptStatus(
+                               sourceCommandToken: transcript.commandToken,
+                               throughCommandToken: replacement.token,
+                               ownerToken: ownerToken
+                           )
+                       }) == true {
+                        // The replacement owns the recovery claim. Mark only
+                        // that replacement terminal; the source remains
+                        // transcriptReady and therefore deliverable.
+                        _ = await sessionStoreCall {
+                            $0.saveStatus(
+                                .cancelled(token: replacement.token),
+                                ownerToken: ownerToken
+                            )
+                        }
                         continue
                     }
+                    if replacement != nil { continue }
                     return false
                 }
             case .transcriptReady, .failed, .cancelled:

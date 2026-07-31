@@ -24,6 +24,12 @@ public final class SharedDictationSessionStore {
         case unavailable
     }
 
+    public enum StatusResolution: Equatable, Sendable {
+        case found(SharedDictationSessionStatus)
+        case missing
+        case unavailable
+    }
+
     private struct SessionEnvelope: Codable {
         var revision: UInt64 = 0
         var commands: [String: SharedDictationSessionCommand] = [:]
@@ -907,19 +913,54 @@ public final class SharedDictationSessionStore {
         } ?? .idle
     }
 
-    public func status(forCommandToken commandToken: String) -> SharedDictationSessionStatus {
+    /// Resolves a token-scoped status without collapsing a locked, corrupt, or
+    /// otherwise unreadable store into the ordinary `.idle` fallback.
+    public func statusResolution(
+        forCommandToken commandToken: String
+    ) -> StatusResolution {
         withExclusiveAccess {
             if envelopeURL != nil {
                 let envelope = loadEnvelope()
-                return envelope.statuses[commandToken]
-                    ?? (envelope.latestStatus.commandToken == commandToken ? envelope.latestStatus : .idle)
+                guard !envelopeReadBlocked else { return .unavailable }
+                if let status = envelope.statuses[commandToken]
+                    ?? (envelope.latestStatus.commandToken == commandToken
+                        ? envelope.latestStatus
+                        : nil) {
+                    return .found(status)
+                }
+                return .missing
             }
-            let latestStatus = loadStatus()
-            return load(
+
+            if let status = load(
                 SharedDictationSessionStatus.self,
                 forKey: Key.statusPrefix + commandToken
-            ) ?? (latestStatus.commandToken == commandToken ? latestStatus : .idle)
-        } ?? .idle
+            ) {
+                return .found(status)
+            }
+            let statusKey = Key.statusPrefix + commandToken
+            if defaults.object(forKey: statusKey) != nil {
+                return .unavailable
+            }
+            guard let latestStatus = load(
+                SharedDictationSessionStatus.self,
+                forKey: Key.status
+            ) else {
+                return defaults.object(forKey: Key.status) == nil
+                    ? .missing
+                    : .unavailable
+            }
+            if latestStatus.commandToken == commandToken {
+                return .found(latestStatus)
+            }
+            return .missing
+        } ?? .unavailable
+    }
+
+    public func status(forCommandToken commandToken: String) -> SharedDictationSessionStatus {
+        switch statusResolution(forCommandToken: commandToken) {
+        case .found(let status): return status
+        case .missing, .unavailable: return .idle
+        }
     }
 
     /// Returns token-scoped statuses for cold recovery. The latest status is
@@ -932,10 +973,11 @@ public final class SharedDictationSessionStore {
         } ?? [:]
     }
 
-    /// Atomically cancels a stale keyboard-owned recording state. Recovery
-    /// must validate the claim, the session-bound heartbeat, and the current
-    /// status under the same file lock as the transition; separate reads let
-    /// a briefly stale scene cancel a run that has just renewed its lease.
+    /// Atomically cancels an unclaimed stale keyboard start. Recovery validates
+    /// the claim, the session-bound heartbeat, and the current status under the
+    /// same file lock as the transition. Active recording states are retained
+    /// even after command expiry because their producer may still be writing a
+    /// transcript in the separate transcript store.
     @discardableResult
     public func cancelStaleKeyboardCommand(
         token: String,
@@ -954,15 +996,17 @@ public final class SharedDictationSessionStore {
                       }) else { return false }
                 let currentStatus = envelope.statuses[token]
                     ?? (envelope.latestStatus.commandToken == token ? envelope.latestStatus : .idle)
+                // A producer can still be committing a transcript after its
+                // short command deadline. Never blind-cancel an acknowledged,
+                // recording, or transcribing state based on a separate-store
+                // read; terminal cancellation would permanently strand a
+                // transcript that wins the race immediately afterward.
                 let shouldCancel: Bool
                 switch currentStatus {
-                case .commandAcknowledged, .recording, .transcribing:
-                    shouldCancel = true
-                case .commandPending:
+                case .idle, .commandPending:
                     shouldCancel = command.isExpired(at: now)
-                case .idle:
-                    shouldCancel = command.isExpired(at: now)
-                case .transcriptReady, .failed, .cancelled:
+                case .commandAcknowledged, .recording, .transcribing,
+                     .transcriptReady, .failed, .cancelled:
                     shouldCancel = false
                 }
                 guard shouldCancel else { return false }
@@ -993,11 +1037,10 @@ public final class SharedDictationSessionStore {
             ) ?? (loadStatus().commandToken == token ? loadStatus() : .idle)
             let shouldCancel: Bool
             switch currentStatus {
-            case .commandAcknowledged, .recording, .transcribing:
-                shouldCancel = true
-            case .commandPending, .idle:
+            case .idle, .commandPending:
                 shouldCancel = command.isExpired(at: now)
-            case .transcriptReady, .failed, .cancelled:
+            case .commandAcknowledged, .recording, .transcribing,
+                 .transcriptReady, .failed, .cancelled:
                 shouldCancel = false
             }
             guard shouldCancel else { return false }

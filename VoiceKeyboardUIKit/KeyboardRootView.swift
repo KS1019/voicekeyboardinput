@@ -54,6 +54,7 @@ final class KeyboardRootView: UIView {
     private let controlsContainerView = UIView()
     private var nextKeyboardButton: UIButton?
     private var microphoneButton: UIButton?
+    private var transcriptTone: PresentationTone = .muted
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -185,6 +186,15 @@ final class KeyboardRootView: UIView {
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             minimumHeight
         ])
+
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: KeyboardRootView, _) in
+            // CALayer stores a resolved CGColor rather than the dynamic
+            // UIColor provider. Reapply Liquid Glass chrome after an
+            // appearance change so a border resolved in light mode cannot
+            // remain in dark mode.
+            view.updateAdaptiveChromeColors()
+            view.microphoneButton?.setNeedsUpdateConfiguration()
+        }
     }
 
     private func configureTranscriptContainer() {
@@ -364,7 +374,10 @@ final class KeyboardRootView: UIView {
 
         switch tone {
         case .positive:
-            configuration.baseForegroundColor = .white
+            // `systemBackground` is a dynamic color. It keeps the positive
+            // control readable when the system appearance changes instead of
+            // pinning the glyph and title to a light-mode-only color.
+            configuration.baseForegroundColor = .systemBackground
             configuration.baseBackgroundColor = .systemGreen.withAlphaComponent(0.82)
         case .warning:
             configuration.baseForegroundColor = .systemOrange
@@ -398,10 +411,16 @@ final class KeyboardRootView: UIView {
     }
 
     private func updateTranscriptChrome(tone: PresentationTone) {
-        let color = tone.uiColor
+        transcriptTone = tone
+        updateAdaptiveChromeColors()
+    }
+
+    private func updateAdaptiveChromeColors() {
+        let color = transcriptTone.uiColor
         transcriptIconView.tintColor = color
         transcriptContainerView.layer.borderColor = color.withAlphaComponent(0.22).cgColor
         transcriptGlassEffect.tintColor = color.withAlphaComponent(0.12)
+        controlsContainerView.layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor
     }
 
     private func updateVoiceInputAccessibilityValue(activity: String?) {

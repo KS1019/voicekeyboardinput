@@ -107,6 +107,14 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
             ownerID: "file-owner"
         ))
         XCTAssertEqual(store.pendingDelivery(forSessionID: transcript.sessionID)?.ownerID, "file-owner")
+        XCTAssertEqual(
+            store.pendingDeliveryResolution(forCommandToken: transcript.commandToken),
+            .found(store.pendingDelivery(forSessionID: transcript.sessionID)!)
+        )
+        XCTAssertEqual(
+            store.pendingDeliveryResolution(forCommandToken: "missing-command"),
+            .missing
+        )
         XCTAssertEqual(store.latestTranscript(), transcript)
     }
 

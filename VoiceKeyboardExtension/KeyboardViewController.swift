@@ -307,7 +307,10 @@ public final class KeyboardViewController: UIInputViewController {
             }
             for command in intents {
                 guard let replacedToken = command.replacesCommandToken else {
-                    _ = store.discardCancellationIntent(forToken: command.token)
+                    guard store.discardCancellationIntent(forToken: command.token) else {
+                        allResolved = false
+                        continue
+                    }
                     continue
                 }
                 switch store.commandResolution(forToken: replacedToken) {
@@ -319,17 +322,30 @@ public final class KeyboardViewController: UIInputViewController {
                     // history fence. There is no durable command left that
                     // a cancel can affect, so do not leave an outbox entry
                     // that can block every future recovery forever.
-                    _ = store.discardCancellationIntent(forToken: command.token)
+                    guard store.discardCancellationIntent(forToken: command.token) else {
+                        allResolved = false
+                        continue
+                    }
                     continue
                 case .found:
                     break
                 }
-                let replacedStatus = store.status(forCommandToken: replacedToken)
-                switch replacedStatus {
-                case .failed, .cancelled:
-                    _ = store.discardCancellationIntent(forToken: command.token)
+                switch store.statusResolution(forCommandToken: replacedToken) {
+                case .unavailable:
+                    allResolved = false
                     continue
-                default:
+                case .found(let replacedStatus):
+                    switch replacedStatus {
+                    case .failed, .cancelled:
+                        guard store.discardCancellationIntent(forToken: command.token) else {
+                            allResolved = false
+                            continue
+                        }
+                        continue
+                    default:
+                        break
+                    }
+                case .missing:
                     break
                 }
                 if !store.saveCommand(command) {
@@ -350,18 +366,42 @@ public final class KeyboardViewController: UIInputViewController {
                 if store.saveDeliveryFailure(token: token, message: message) {
                     continue
                 }
-                let status = store.status(forCommandToken: token)
-                let isTerminal: Bool
-                switch status {
-                case .failed, .cancelled:
-                    isTerminal = true
-                default:
-                    isTerminal = false
-                }
-                if isTerminal || store.command(forToken: token) == nil {
-                    _ = store.discardDeliveryFailureIntent(forToken: token)
-                } else {
+                let statusResolution = store.statusResolution(forCommandToken: token)
+                switch statusResolution {
+                case .unavailable:
                     allResolved = false
+                    continue
+                case .found(let status):
+                    switch status {
+                    case .failed, .cancelled:
+                        guard store.discardDeliveryFailureIntent(forToken: token) else {
+                            allResolved = false
+                            continue
+                        }
+                    case .idle,
+                         .commandPending,
+                         .commandAcknowledged,
+                         .recording,
+                         .transcribing,
+                         .transcriptReady:
+                        // A non-terminal status cannot prove that the
+                        // failure WAL is obsolete, even if its command has
+                        // already fallen out of bounded command history.
+                        allResolved = false
+                    }
+                case .missing:
+                    // Only a normal read that proves both records are absent
+                    // can retire the intent. An unavailable command read must
+                    // remain recoverable.
+                    switch store.commandResolution(forToken: token) {
+                    case .missing:
+                        guard store.discardDeliveryFailureIntent(forToken: token) else {
+                            allResolved = false
+                            continue
+                        }
+                    case .found, .unavailable:
+                        allResolved = false
+                    }
                 }
             }
             return allResolved
@@ -375,19 +415,18 @@ public final class KeyboardViewController: UIInputViewController {
             return false
         }
         for commandToken in availableIntents.keys {
-            guard let commandResolution = await sessionStoreCall({
-                $0.commandResolution(forToken: commandToken)
-            }) else {
+            let pendingDeliveryResolution = await transcriptStoreCall {
+                $0.pendingDeliveryResolution(forCommandToken: commandToken)
+            }
+            guard let pendingDeliveryResolution else { return false }
+            let pendingDelivery: SharedDictationTranscriptDelivery
+            switch pendingDeliveryResolution {
+            case .found(let delivery):
+                pendingDelivery = delivery
+            case .missing:
+                continue
+            case .unavailable:
                 return false
-            }
-            guard case .found(let command) = commandResolution else {
-                if case .unavailable = commandResolution { return false }
-                continue
-            }
-            guard let pendingDelivery = (await transcriptStoreCall({
-                $0.pendingDelivery(forSessionID: command.sessionID)
-            })) ?? nil else {
-                continue
             }
             let repaired: Bool
             if pendingDelivery.mutationInFlight || pendingDelivery.appliedOperationCount > 0 {
@@ -919,14 +958,21 @@ public final class KeyboardViewController: UIInputViewController {
                     announce: true
                 )
             case .noActiveSession:
-                guard self.sharedCancellationOperationGeneration == operationGeneration,
-                      self.lifecycleEpoch == expectedEpoch,
-                      self.isViewVisible else { return }
-                let canApplyMutation = self.documentMutationGeneration == expectedMutationGeneration
-                    && self.currentDocumentContextFingerprint() == expectedContext
+                guard self.sharedCancellationOperationGeneration == operationGeneration else { return }
+                // Resolve the operation barrier before checking the view
+                // epoch. A cancellation that completed while the keyboard
+                // disappeared must not strand every future interaction behind
+                // a task that can no longer be observed by the old view.
                 self.isSharedCancellationInProgress = false
                 self.sharedCancellationTask = nil
                 self.cancelDirectRecognition()
+                self.queuedDocumentMutations.removeAll()
+                guard self.lifecycleEpoch == expectedEpoch, self.isViewVisible else {
+                    self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
+                    return
+                }
+                let canApplyMutation = self.documentMutationGeneration == expectedMutationGeneration
+                    && self.currentDocumentContextFingerprint() == expectedContext
                 if canApplyMutation {
                     mutation()
                 }
@@ -1411,9 +1457,19 @@ public final class KeyboardViewController: UIInputViewController {
             selectedText: selectedText
         )
         let locale = VoiceKeyboardLocale(identifier: Locale.current.identifier)
-        var pendingDelivery = await transcriptStoreCall {
-            $0.pendingDelivery(forSessionID: source.sessionID)
-        } ?? nil
+        let pendingDeliveryResolution = await transcriptStoreCall {
+            $0.pendingDeliveryResolution(forCommandToken: source.commandToken)
+        }
+        guard let pendingDeliveryResolution else { return false }
+        var pendingDelivery: SharedDictationTranscriptDelivery?
+        switch pendingDeliveryResolution {
+        case .found(let delivery):
+            pendingDelivery = delivery
+        case .missing:
+            pendingDelivery = nil
+        case .unavailable:
+            return false
+        }
         guard isCurrentDelivery() else { return false }
         if let candidate = pendingDelivery,
            candidate.transcriptToken != latestTranscript.token {
@@ -2401,9 +2457,20 @@ public final class KeyboardViewController: UIInputViewController {
                 activeSharedCommandToken = command.token
                 return command
             }
-            guard let status = await sessionStoreCall({
-                $0.status(forCommandToken: command.token)
+            guard let statusResolution = await sessionStoreCall({
+                $0.statusResolution(forCommandToken: command.token)
             }) else { continue }
+            let status: SharedDictationSessionStatus
+            switch statusResolution {
+            case .unavailable:
+                isSharedStorageResolutionUnknown = true
+                scheduleSharedDeliveryRecoveryRetry(epoch: epoch ?? lifecycleEpoch)
+                return nil
+            case .missing:
+                status = .idle
+            case .found(let resolvedStatus):
+                status = resolvedStatus
+            }
             guard isSharedDeliveryCurrent(epoch) else { return nil }
             if case .idle = status {
                 guard !command.isExpired() else { continue }
@@ -2439,17 +2506,21 @@ public final class KeyboardViewController: UIInputViewController {
     private func isConsumedSharedTranscript(
         for command: SharedDictationSessionCommand
     ) async -> Bool {
-        if let pendingDelivery = await transcriptStoreCall({
-            $0.pendingDelivery(forSessionID: command.sessionID)
-        }) ?? nil,
+        guard let source = transcriptSource(for: command) else {
+            return false
+        }
+        let pendingDeliveryResolution = await transcriptStoreCall {
+            $0.pendingDeliveryResolution(forCommandToken: source.commandToken)
+        }
+        if case .found(let pendingDelivery) = pendingDeliveryResolution,
            pendingDelivery.isQuarantined {
             // A quarantined journal carries a terminal failure that must be
             // retried even though its transcript was marked consumed as a
             // no-replay fence.
             return false
         }
-        guard let source = transcriptSource(for: command),
-              let transcript = await transcriptStoreCall({
+        if case .unavailable = pendingDeliveryResolution { return false }
+        guard let transcript = await transcriptStoreCall({
                   $0.latestTranscript(forSessionID: source.sessionID)
               }) ?? nil,
               transcript.commandToken == source.commandToken else {

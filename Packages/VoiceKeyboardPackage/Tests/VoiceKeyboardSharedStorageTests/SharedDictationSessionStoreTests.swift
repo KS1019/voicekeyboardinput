@@ -333,6 +333,90 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         }
     }
 
+    func testStatusResolutionDistinguishesMissingFoundAndMalformed() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+
+        XCTAssertEqual(
+            store.statusResolution(forCommandToken: "status-missing"),
+            .missing
+        )
+        XCTAssertTrue(store.saveStatus(.recording(
+            token: "status-found",
+            startedAt: Date(timeIntervalSince1970: 3),
+            timeoutSeconds: 8
+        )))
+        XCTAssertEqual(
+            store.statusResolution(forCommandToken: "status-found"),
+            .found(.recording(
+                token: "status-found",
+                startedAt: Date(timeIntervalSince1970: 3),
+                timeoutSeconds: 8
+            ))
+        )
+
+        defaults.set(Data([0xFF]), forKey: "sharedDictation.session.status.status-malformed")
+        XCTAssertEqual(
+            store.statusResolution(forCommandToken: "status-malformed"),
+            .unavailable
+        )
+    }
+
+    func testStaleCancellationNeverBlindCancelsActiveState() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let requestedAt = Date(timeIntervalSince1970: 100)
+        let command = SharedDictationSessionCommand(
+            token: "active-not-yet-expired",
+            kind: .start,
+            source: .keyboard,
+            requestedAt: requestedAt,
+            expiresAt: requestedAt.addingTimeInterval(10),
+            sessionID: "active-session"
+        )
+
+        XCTAssertTrue(store.saveCommand(command))
+        XCTAssertTrue(store.saveStatus(.recording(
+            token: command.token,
+            startedAt: requestedAt,
+            timeoutSeconds: 8
+        )))
+        XCTAssertFalse(store.cancelStaleKeyboardCommand(
+            token: command.token,
+            now: requestedAt.addingTimeInterval(5)
+        ))
+        XCTAssertFalse(store.cancelStaleKeyboardCommand(
+            token: command.token,
+            now: requestedAt.addingTimeInterval(10)
+        ))
+        XCTAssertEqual(
+            store.status(forCommandToken: command.token),
+            .recording(
+                token: command.token,
+                startedAt: requestedAt,
+                timeoutSeconds: 8
+            )
+        )
+
+        let pendingCommand = SharedDictationSessionCommand(
+            token: "expired-pending",
+            kind: .start,
+            source: .keyboard,
+            requestedAt: requestedAt,
+            expiresAt: requestedAt.addingTimeInterval(10),
+            sessionID: "expired-pending-session"
+        )
+        XCTAssertTrue(store.saveCommand(pendingCommand))
+        XCTAssertTrue(store.cancelStaleKeyboardCommand(
+            token: pendingCommand.token,
+            now: requestedAt.addingTimeInterval(10)
+        ))
+        XCTAssertEqual(
+            store.status(forCommandToken: pendingCommand.token),
+            .cancelled(token: pendingCommand.token)
+        )
+    }
+
     func testTerminalStatusCannotBeRegressedByLateAudioCallback() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)
