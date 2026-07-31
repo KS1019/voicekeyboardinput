@@ -72,8 +72,10 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                     // setPreferredInput can complete after the user-facing
                     // timeout, especially while a Bluetooth HFP route is
                     // materializing. Keep the fence and ownership until the
-                    // AVAudioSession operation has actually settled.
-                    await coordinator.waitForPendingSessionOperationsUntilSettled()
+                    // AVAudioSession operation has actually settled. Do not
+                    // issue a deactivation while that operation is unknown.
+                    coordinator.markTerminal()
+                    return
                 }
                 let deactivation = Self.makeSessionOperation(
                     session,
@@ -118,7 +120,9 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             )
 
             let inputNode = engine.inputNode
-            let format = inputNode.outputFormat(forBus: 0)
+            guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            }
 
             guard format.channelCount > 0, format.sampleRate > 0 else {
                 return try Self.result(

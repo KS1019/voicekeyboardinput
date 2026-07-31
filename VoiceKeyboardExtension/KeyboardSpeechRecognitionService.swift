@@ -874,7 +874,10 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         let inputNode = engine.inputNode
-        let naturalFormat = inputNode.outputFormat(forBus: 0)
+        guard let naturalFormat = VKAudioInputNodeOutputFormat(inputNode) else {
+            diagnostics.failure("audio-input", error: .audioInputUnavailable)
+            throw .audioInputUnavailable
+        }
         guard naturalFormat.channelCount > 0, naturalFormat.sampleRate > 0 else {
             diagnostics.failure("audio-input", error: .audioInputUnavailable)
             throw .audioInputUnavailable
@@ -1076,7 +1079,10 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         }
 
         let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
+        guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+            diagnostics.failure("legacy-audio-input", error: .audioInputUnavailable)
+            throw .audioInputUnavailable
+        }
         guard format.channelCount > 0, format.sampleRate > 0 else {
             diagnostics.failure("legacy-audio-input", error: .audioInputUnavailable)
             throw .audioInputUnavailable
@@ -1447,7 +1453,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             )
             diagnostics.failure("audio-route-quarantine", error: terminalAudioQuarantineError!)
             let deferredCleanup = Task { [weak self] in
-                await coordinator.waitUntilPendingOperationsSettle()
+                guard await coordinator.waitUntilPendingOperationsSettle(timeout: 10) else {
+                    return
+                }
                 let deferredDeactivation = DeferredAudioSessionOperation(
                     session: session,
                     activate: false
@@ -1694,7 +1702,12 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         guard isCurrent(generation), var run = activeRun,
               run.generation == generation else { return }
         guard run.preparationFailure == nil else { return }
-        let format = engine.inputNode.outputFormat(forBus: 0)
+        guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+            run.preparationInvalidated = true
+            run.preparationFailure = .audioInputUnavailable
+            activeRun = run
+            return
+        }
         run.preparationInvalidated = false
         run.preparationGeneration = run.preparationMonitor.changeCount
         run.preparationInputUID = session.currentRoute.inputs.first?.uid
@@ -1742,7 +1755,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
               let input = session.currentRoute.inputs.first else {
             return false
         }
-        let format = engine.inputNode.outputFormat(forBus: 0)
+        guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+            return false
+        }
         return input.uid == run.preparationInputUID
             && format.channelCount == run.preparationChannelCount
             && format.sampleRate == run.preparationSampleRate

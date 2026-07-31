@@ -339,7 +339,10 @@ final class AppSpeechDictationRun {
         }
 
         let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
+        guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+            await cleanup()
+            throw AppSpeechDictationError.audioInputUnavailable
+        }
         guard format.channelCount > 0, format.sampleRate > 0 else {
             await cleanup()
             throw AppSpeechDictationError.audioInputUnavailable
@@ -840,7 +843,9 @@ final class AppSpeechDictationRun {
               let input = session.currentRoute.inputs.first else {
             return false
         }
-        let format = engine.inputNode.outputFormat(forBus: 0)
+        guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+            return false
+        }
         return input.uid == preparationInputUID
             && format.channelCount == preparationChannelCount
             && format.sampleRate == preparationSampleRate
@@ -848,7 +853,9 @@ final class AppSpeechDictationRun {
 
     private func audioConfigurationMatchesPreparedRoute(session: AVAudioSession) -> Bool {
         guard let input = session.currentRoute.inputs.first else { return false }
-        let format = engine.inputNode.outputFormat(forBus: 0)
+        guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+            return false
+        }
         return input.uid == preparationInputUID
             && format.channelCount == preparationChannelCount
             && format.sampleRate == preparationSampleRate
@@ -942,7 +949,8 @@ final class AppSpeechDictationRun {
                 // fence and ownership until that operation actually settles;
                 // releasing here would abandon an active session with no
                 // safe deactivation path.
-                await coordinator.waitForPendingSessionOperationsUntilSettled()
+                coordinator.markTerminal()
+                return
             }
             for _ in 0..<40 where !Task.isCancelled {
                 if coordinator.isTerminal {
@@ -1353,8 +1361,9 @@ private func scheduleAudioSessionQuarantine(
     }
     Task {
         try? await Task.sleep(for: .seconds(2))
-        if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
-            await coordinator.waitForPendingSessionOperationsUntilSettled()
+        guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
+            coordinator.markTerminal()
+            return
         }
         guard coordinator.beginFallbackDeactivation(operationToken) else {
             coordinator.completeDeactivationPendingIfOperationFinished(operationToken)
@@ -1459,8 +1468,9 @@ private func scheduleLateDeactivationWatchdog(
 ) {
     Task {
         try? await Task.sleep(for: .seconds(2))
-        if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
-            await coordinator.waitForPendingSessionOperationsUntilSettled()
+        guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
+            coordinator.markTerminal()
+            return
         }
         guard coordinator.beginLateDeactivationFallback(operationToken) else {
             // The original late callback may have completed in the small
@@ -1605,14 +1615,10 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         return true
     }
 
-    func waitForPendingSessionOperationsUntilSettled() async {
-        while hasPendingSessionOperation {
-            do {
-                try await Task.sleep(for: .milliseconds(50))
-            } catch {
-                return
-            }
-        }
+    func waitForPendingSessionOperationsUntilSettled(
+        timeout: TimeInterval = 10
+    ) async -> Bool {
+        await waitForPendingSessionOperations(timeout: timeout)
     }
 
     func acquireOwnership() -> UInt64? {

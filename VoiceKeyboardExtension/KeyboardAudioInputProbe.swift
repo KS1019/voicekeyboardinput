@@ -41,8 +41,11 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
                 if !(await coordinator.waitForPendingOperations(timeout: 10)) {
                     // A late AVAudioSession callback may still activate the
                     // session. Retain the terminal fence and ownership until
-                    // the operation settles, then perform the same cleanup.
-                    await coordinator.waitUntilPendingOperationsSettle()
+                    // the operation settles; never race a fallback
+                    // deactivation against the unknown operation.
+                    coordinator.markTerminal()
+                    coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+                    return
                 }
                 if let audioSessionOperation {
                     if await audioSessionOperation.task.value == .succeeded {
@@ -125,7 +128,9 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             }
 
             let inputNode = engine.inputNode
-            let format = inputNode.outputFormat(forBus: 0)
+            guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+                throw AudioCaptureProbeError.unavailableInCurrentProcess
+            }
             guard format.channelCount > 0, format.sampleRate > 0 else {
                 return try Self.result(false, duration: duration, peakPower: nil)
             }

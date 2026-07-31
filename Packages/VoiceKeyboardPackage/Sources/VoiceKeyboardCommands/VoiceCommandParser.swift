@@ -275,8 +275,10 @@ package struct VoiceCommandParser: Sendable {
                     }
                     let precedingWord = prefix.last?.lowercased()
                     let followingWord = suffix.first?.lowercased()
-                    if Self.naturalLanguageCueWords.contains(precedingWord ?? "")
-                        || Self.naturalLanguageCueWords.contains(followingWord ?? "") {
+                    let precedingCue = Self.naturalLanguageCueWords.contains(precedingWord ?? "")
+                    let followingCue = Self.naturalLanguageCueWords.contains(followingWord ?? "")
+                    if (precedingCue && !boundaries.prefix[index])
+                        || (followingCue && !boundaries.suffix[index + length]) {
                         return true
                     }
                 } else {
@@ -399,20 +401,32 @@ package struct VoiceCommandParser: Sendable {
         var remaining = segment[...]
         var matchCount = 0
         var endsWithCommand = false
+        var hasSeenCommand = false
+        var literalSinceCommand = ""
 
         while !remaining.isEmpty {
-            guard let match = japaneseUnspacedAliases.first(where: {
+            if let match = japaneseUnspacedAliases.first(where: {
                 remaining.hasPrefix($0.alias) && $0.command.isSafeUnspacedJapaneseCommand
-            }) else {
+            }) {
+                if hasSeenCommand,
+                   (Self.containsJapaneseNaturalLanguageCue(literalSinceCommand)
+                    || Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)) {
+                    return false
+                }
+                hasSeenCommand = true
+                literalSinceCommand = ""
+                matchCount += 1
+                endsWithCommand = remaining.count == match.alias.count
+                remaining.removeFirst(match.alias.count)
+            } else {
                 endsWithCommand = false
-                remaining.removeFirst()
-                continue
+                literalSinceCommand.append(remaining.removeFirst())
             }
-            matchCount += 1
-            endsWithCommand = remaining.count == match.alias.count
-            remaining.removeFirst(match.alias.count)
         }
-        return matchCount >= 2 && endsWithCommand
+        return matchCount >= 2
+            && endsWithCommand
+            && !Self.containsJapaneseNaturalLanguageCue(literalSinceCommand)
+            && !Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)
     }
 
     private func isSafeDestructiveMatch(
@@ -449,8 +463,10 @@ package struct VoiceCommandParser: Sendable {
         guard command.isNaturalLanguageSensitiveAlias else { return true }
         let precedingWord = prefix.last?.lowercased()
         let followingWord = suffix.first?.lowercased()
-        if Self.naturalLanguageCueWords.contains(precedingWord ?? "")
-            || Self.naturalLanguageCueWords.contains(followingWord ?? "")
+        let precedingCue = Self.naturalLanguageCueWords.contains(precedingWord ?? "")
+        let followingCue = Self.naturalLanguageCueWords.contains(followingWord ?? "")
+        if (precedingCue && !boundaries.prefix[index])
+            || (followingCue && !boundaries.suffix[index + length])
             || (isJapaneseLocale && (
                 Self.japaneseNaturalLanguageCueWords.contains(precedingWord ?? "")
                     || Self.japaneseNaturalLanguageCueWords.contains(followingWord ?? "")
@@ -468,11 +484,14 @@ package struct VoiceCommandParser: Sendable {
         "explore", "travel", "separated", "values", "start", "of", "business", "use", "missing", "here",
         "new", "line", "text", "code", "means", "meaning", "character", "parenthesis", "parentheses",
         "there", "no", "left", "me", "splice", "were", "are", "isn't", "isnt",
-        "oxford", "debate", "exploration"
+        "oxford", "debate", "exploration", "word", "words", "said", "say", "says", "mentioned", "mention",
+        "called", "call", "phrase", "phrases", "literal", "literally", "type", "typed", "typing", "write",
+        "wrote", "written", "use", "using"
     ]
 
     private static let japaneseNaturalLanguageCueWords: Set<String> = [
-        "この", "その", "あの", "これ", "それ", "は", "を", "が", "に", "の", "について", "必要", "文字", "コード"
+        "この", "その", "あの", "これ", "それ", "は", "を", "が", "に", "の", "について", "必要", "文字", "コード",
+        "使い方", "多すぎ", "不要", "入れる", "いる"
     ]
 
     private func makeCommandOnlyBoundaries(for words: [String]) -> CommandOnlyBoundaries {

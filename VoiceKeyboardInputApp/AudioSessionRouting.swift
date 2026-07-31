@@ -105,9 +105,18 @@ enum AppAudioSessionRouting {
         var lastSignature: AudioInputSignature?
         var lastChangeCount = monitor.changeCount
 
-        for _ in 0..<32 {
+        // Bluetooth HFP and USB routes can materialize after several route
+        // notifications. Keep the retry bounded, but give late hardware a
+        // few extra seconds to settle before reporting unavailability.
+        for _ in 0..<80 {
             let input = session.currentRoute.inputs.first
-            let format = engine.inputNode.outputFormat(forBus: 0)
+            guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+                stableSamples = 0
+                lastSignature = nil
+                lastChangeCount = monitor.changeCount
+                try await Task.sleep(for: .milliseconds(75))
+                continue
+            }
             let signature = input.map {
                 AudioInputSignature(
                     uid: $0.uid,

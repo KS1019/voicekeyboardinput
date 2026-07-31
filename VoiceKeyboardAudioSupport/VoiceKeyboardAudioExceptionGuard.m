@@ -31,3 +31,11 @@ BOOL VKRemoveAudioInputTap(AVAudioInputNode *inputNode) {
         return NO;
     }
 }
+
+AVAudioFormat * _Nullable VKAudioInputNodeOutputFormat(AVAudioInputNode *inputNode) {
+    @try {
+        return [inputNode outputFormatForBus:0];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}

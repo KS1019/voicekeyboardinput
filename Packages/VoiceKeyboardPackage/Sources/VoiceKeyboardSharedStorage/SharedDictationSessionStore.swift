@@ -313,7 +313,15 @@ public final class SharedDictationSessionStore {
                 guard !envelopeReadBlocked else { return .unavailable }
                 return envelope.commands[token].map(CommandResolution.found) ?? .missing
             }
-            return loadCommand(forToken: token).map(CommandResolution.found) ?? .missing
+            if let command = loadCommand(forToken: token) {
+                return .found(command)
+            }
+            if defaults.object(forKey: Key.commandPrefix + token) != nil
+                || (defaults.object(forKey: Key.command) != nil
+                    && loadLatestCommand() == nil) {
+                return .unavailable
+            }
+            return .missing
         } ?? .unavailable
     }
 
@@ -338,7 +346,7 @@ public final class SharedDictationSessionStore {
 
     public func commandHistoryResolution() -> CommandHistoryResolution {
         withExclusiveAccess {
-            if envelopeURL == nil { return .available(loadCommandHistory()) }
+            if envelopeURL == nil { return loadCommandHistoryResolution() }
             let envelope = loadEnvelope()
             guard !envelopeReadBlocked else { return .unavailable }
             return .available(envelope.commandOrder.compactMap { envelope.commands[$0] })
@@ -1012,7 +1020,14 @@ public final class SharedDictationSessionStore {
                 }
                 guard shouldCancel else { return false }
                 let status = SharedDictationSessionStatus.cancelled(token: token)
-                envelope.latestStatus = status
+                let latestStatusToken = envelope.latestStatus.commandToken
+                let shouldReplaceLatestStatus = latestStatusToken == nil
+                    || latestStatusToken == token
+                    || (envelope.commands[latestStatusToken!]?.requestedAt
+                        ?? .distantPast) <= command.requestedAt
+                if shouldReplaceLatestStatus {
+                    envelope.latestStatus = status
+                }
                 envelope.statuses[token] = status
                 envelope.statusOrder.removeAll { $0 == token }
                 envelope.statusOrder.append(token)
@@ -1047,11 +1062,18 @@ public final class SharedDictationSessionStore {
             }
             guard shouldCancel else { return false }
             let status = SharedDictationSessionStatus.cancelled(token: token)
+            let latestStatus = loadStatus()
+            let shouldReplaceLatestStatus = latestStatus.commandToken == nil
+                || latestStatus.commandToken == token
+                || (loadCommand(forToken: latestStatus.commandToken ?? "")?.requestedAt
+                    ?? .distantPast) <= command.requestedAt
             claims.removeValue(forKey: token)
             claimOwners.removeValue(forKey: token)
             save(claims, forKey: Key.claims)
             save(claimOwners, forKey: Key.claimOwners)
-            save(status, forKey: Key.status)
+            if shouldReplaceLatestStatus {
+                save(status, forKey: Key.status)
+            }
             save(status, forKey: Key.statusPrefix + token)
             appendToken(token, toIndex: Key.statusIndex, removingWithPrefix: Key.statusPrefix)
             return true
@@ -1079,7 +1101,13 @@ public final class SharedDictationSessionStore {
                     return false
                 }
                 let status = SharedDictationSessionStatus.cancelled(token: token)
-                envelope.latestStatus = status
+                let latestStatusToken = envelope.latestStatus.commandToken
+                let shouldReplaceLatestStatus = latestStatusToken == nil
+                    || (envelope.commands[latestStatusToken!]?.requestedAt
+                        ?? .distantPast) <= command.requestedAt
+                if shouldReplaceLatestStatus {
+                    envelope.latestStatus = status
+                }
                 envelope.statuses[token] = status
                 envelope.statusOrder.removeAll { $0 == token }
                 envelope.statusOrder.append(token)
@@ -1235,14 +1263,70 @@ public final class SharedDictationSessionStore {
     }
 
     private func loadCommandHistory() -> [SharedDictationSessionCommand] {
-        var tokens = Array(
-            Self.uniqueTokens(load([String].self, forKey: Key.commandIndex) ?? [])
-                .suffix(Self.historyLimit)
-        )
+        var tokens = Self.uniqueTokens(load([String].self, forKey: Key.commandIndex) ?? [])
         if let latestCommand = loadLatestCommand(), !tokens.contains(latestCommand.token) {
             tokens.append(latestCommand.token)
         }
-        return tokens.compactMap { loadCommand(forToken: $0) }
+        guard tokens.count > Self.historyLimit else {
+            return tokens.compactMap { loadCommand(forToken: $0) }
+        }
+
+        // A stop/cancel command is not self-contained. Keep the referenced
+        // start command through legacy migration even when it is older than
+        // the ordinary bounded history window.
+        var requiredTokens = Set<String>()
+        for token in tokens {
+            if let command = load(
+                SharedDictationSessionCommand.self,
+                forKey: Key.commandPrefix + token
+            ), let replacement = command.replacesCommandToken {
+                requiredTokens.insert(replacement)
+            }
+        }
+        var didAddDependency = true
+        while didAddDependency {
+            didAddDependency = false
+            for token in requiredTokens {
+                guard let replacement = load(
+                    SharedDictationSessionCommand.self,
+                    forKey: Key.commandPrefix + token
+                )?.replacesCommandToken,
+                !requiredTokens.contains(replacement) else { continue }
+                requiredTokens.insert(replacement)
+                didAddDependency = true
+            }
+        }
+        guard requiredTokens.count <= Self.historyLimit else {
+            return []
+        }
+        let ordinaryCapacity = Self.historyLimit - requiredTokens.count
+        let ordinary = tokens.reversed()
+            .filter { !requiredTokens.contains($0) }
+            .prefix(ordinaryCapacity)
+        let retained = Set(requiredTokens).union(ordinary)
+        return tokens.filter(retained.contains).compactMap { loadCommand(forToken: $0) }
+    }
+
+    private func loadCommandHistoryResolution() -> CommandHistoryResolution {
+        guard let indexData = defaults.data(forKey: Key.commandIndex) else {
+            if defaults.object(forKey: Key.command) != nil,
+               loadLatestCommand() == nil {
+                return .unavailable
+            }
+            return .available(loadCommandHistory())
+        }
+        guard indexData.count <= Self.maximumEnvelopeByteCount,
+              let tokens = try? decoder.decode([String].self, from: indexData) else {
+            return .unavailable
+        }
+        for token in Self.uniqueTokens(tokens) {
+            let key = Key.commandPrefix + token
+            guard defaults.object(forKey: key) != nil else { continue }
+            guard load(SharedDictationSessionCommand.self, forKey: key) != nil else {
+                return .unavailable
+            }
+        }
+        return .available(loadCommandHistory())
     }
 
     private func loadEnvelope() -> SessionEnvelope {
@@ -1276,12 +1360,20 @@ public final class SharedDictationSessionStore {
         guard !defaults.bool(forKey: Key.envelopeMigrationMarker) else {
             return SessionEnvelope()
         }
-        let commandHistory = loadCommandHistory()
+        let commandHistory: [SharedDictationSessionCommand]
+        switch loadCommandHistoryResolution() {
+        case .available(let commands):
+            commandHistory = commands
+        case .unavailable:
+            envelopeReadBlocked = true
+            return SessionEnvelope()
+        }
         let statusTokens = Self.uniqueTokens(Array(
             (load([String].self, forKey: Key.statusIndex) ?? [])
                 .suffix(Self.historyLimit)
         ))
         var statuses = loadStatusHistory()
+        guard !envelopeReadBlocked else { return SessionEnvelope() }
         var statusOrder = statusTokens.filter { statuses[$0] != nil }
         let latestStatus = loadStatus()
         // Older releases stored only the latest token-scoped status. Preserve
@@ -1375,13 +1467,26 @@ public final class SharedDictationSessionStore {
     }
 
     private func loadStatusHistory() -> [String: SharedDictationSessionStatus] {
-        let tokens = Array(
-            (load([String].self, forKey: Key.statusIndex) ?? [])
-                .suffix(Self.historyLimit)
-        )
+        let tokens: [String]
+        if let data = defaults.data(forKey: Key.statusIndex) {
+            guard data.count <= Self.maximumEnvelopeByteCount,
+                  let decodedTokens = try? decoder.decode([String].self, from: data) else {
+                envelopeReadBlocked = true
+                return [:]
+            }
+            tokens = Array(decodedTokens.suffix(Self.historyLimit))
+        } else {
+            tokens = []
+        }
         var statuses: [String: SharedDictationSessionStatus] = [:]
         for token in Self.uniqueTokens(tokens) {
-            if let status = load(SharedDictationSessionStatus.self, forKey: Key.statusPrefix + token) {
+            let key = Key.statusPrefix + token
+            guard defaults.object(forKey: key) == nil
+                || load(SharedDictationSessionStatus.self, forKey: key) != nil else {
+                envelopeReadBlocked = true
+                return [:]
+            }
+            if let status = load(SharedDictationSessionStatus.self, forKey: key) {
                 statuses[token] = status
             }
         }
@@ -1539,6 +1644,12 @@ public final class SharedDictationSessionStore {
         if allowRecoveryFromTranscriptReady,
            case .transcriptReady(let currentToken) = current,
            case .failed(let nextToken, _) = next,
+           currentToken == nextToken {
+            return true
+        }
+        if allowRecoveryFromTranscriptReady,
+           case .cancelled(let currentToken) = current,
+           case .transcriptReady(let nextToken) = next,
            currentToken == nextToken {
             return true
         }
@@ -1866,10 +1977,21 @@ public final class SharedDictationSessionStore {
         var tokens = load([String].self, forKey: indexKey) ?? []
         tokens.removeAll { $0 == token }
         tokens.append(token)
-        let removedTokens = tokens.count > Self.historyLimit
-            ? Array(tokens.prefix(tokens.count - Self.historyLimit))
-            : []
-        tokens = Array(tokens.suffix(Self.historyLimit))
+        let requiredTokens: Set<String>
+        if indexKey == Key.commandIndex, prefix == Key.commandPrefix {
+            requiredTokens = Set(tokens.compactMap {
+                load(SharedDictationSessionCommand.self, forKey: prefix + $0)?.replacesCommandToken
+            })
+        } else {
+            requiredTokens = []
+        }
+        let ordinaryCapacity = max(0, Self.historyLimit - requiredTokens.count)
+        let ordinary = tokens.reversed()
+            .filter { !requiredTokens.contains($0) }
+            .prefix(ordinaryCapacity)
+        let retained = Set(requiredTokens).union(ordinary)
+        let removedTokens = tokens.filter { !retained.contains($0) }
+        tokens = tokens.filter(retained.contains)
         removedTokens.forEach { defaults.removeObject(forKey: prefix + $0) }
         save(tokens, forKey: indexKey)
     }

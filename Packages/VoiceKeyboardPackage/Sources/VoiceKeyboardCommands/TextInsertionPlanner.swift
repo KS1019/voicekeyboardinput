@@ -233,7 +233,7 @@ package struct TextInsertionPlanner: Sendable {
                 ? nil
                 : sentenceBody.index(before: index)
             let nextIndex = sentenceBody.index(after: index)
-            let isDecimalPoint = character == "."
+            let isDecimalPoint = [".", "．", "｡", "﹒"].contains(character)
                 && previousIndex.map { sentenceBody[$0].isNumber } == true
                 && nextIndex < sentenceBody.endIndex
                 && sentenceBody[nextIndex].isNumber

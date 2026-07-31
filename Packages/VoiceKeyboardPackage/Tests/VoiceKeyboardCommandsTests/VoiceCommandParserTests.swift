@@ -192,6 +192,14 @@ final class VoiceCommandParserTests: XCTestCase {
         ] {
             XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
         }
+
+        for transcript in [
+            "The word period",
+            "I said comma",
+            "I mentioned tab"
+        ] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
     }
 
     func testOrdinaryProseWithCommandWordsRemainsLiteral() {
@@ -277,6 +285,14 @@ final class VoiceCommandParserTests: XCTestCase {
             .text("世界"),
             .command(.insertText("\n"))
         ])
+    }
+
+    func testJapaneseImplicitCommandSequenceDoesNotParseNaturalLanguageChunks() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in ["改行コード改行", "読点の使い方読点"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
     }
 
     func testJapaneseAliasesEmbeddedInNaturalTextRemainLiteral() {

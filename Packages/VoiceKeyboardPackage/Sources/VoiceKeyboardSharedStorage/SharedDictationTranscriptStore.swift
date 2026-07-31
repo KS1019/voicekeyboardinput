@@ -1691,9 +1691,15 @@ public final class SharedDictationTranscriptStore {
     }
 
     private func loadTranscriptIndex() -> [String] {
-        guard let data = defaults.data(forKey: Key.transcriptIndex),
-              data.count <= Self.maximumEnvelopeByteCount,
-              let tokens = try? decoder.decode([String].self, from: data) else { return [] }
+        guard let data = defaults.data(forKey: Key.transcriptIndex) else { return [] }
+        guard data.count <= Self.maximumEnvelopeByteCount,
+              let tokens = try? decoder.decode([String].self, from: data) else {
+            // A present but malformed index must not be interpreted as an
+            // empty mailbox; doing so can hide an unconsumed transcript or
+            // replay one after a cold restart.
+            envelopeReadBlocked = true
+            return []
+        }
         return Array(tokens.prefix(Self.transcriptIndexLimit))
     }
 
@@ -1876,10 +1882,13 @@ public final class SharedDictationTranscriptStore {
 
     private func loadConsumedTokenIndex() -> [String] {
         if let consumedTokens = loadTranscriptEnvelope()?.consumedTokens { return consumedTokens }
-        guard let data = defaults.data(forKey: Key.consumedTokenIndex),
-              data.count <= Self.maximumEnvelopeByteCount,
-              let tokens = try? decoder.decode([String].self, from: data) else {
+        guard let data = defaults.data(forKey: Key.consumedTokenIndex) else {
             return defaults.string(forKey: Key.consumedToken).map { [$0] } ?? []
+        }
+        guard data.count <= Self.maximumEnvelopeByteCount,
+              let tokens = try? decoder.decode([String].self, from: data) else {
+            envelopeReadBlocked = true
+            return []
         }
         return Array(tokens.suffix(Self.consumedTokenIndexLimit))
     }

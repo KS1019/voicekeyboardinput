@@ -29,6 +29,7 @@ public struct LiteralTranscriptPreview: Equatable, Sendable {
 public struct LiteralTranscriptCommandPipeline: Sendable {
     public static let maximumInputCharacterCount = VoiceKeyboardTextLimits.maximumCharacterCount
     public static let maximumInputUTF8ByteCount = VoiceKeyboardTextLimits.maximumUTF8ByteCount
+    public static let maximumOperationCount = 64
 
     private let parser: VoiceCommandParser
     private let planner: TextInsertionPlanner
@@ -50,13 +51,19 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
             )
         }
         let parsed = parser.parse(transcript)
-        let elements = parsed.elements.map(Self.mapElement)
-        return LiteralTranscriptPreview(
-            elements: elements,
-            operations: planner.plan(
-                parsed,
-                documentContextBeforeInput: documentContextBeforeInput
+        guard let operations = planner.plan(
+            parsed,
+            documentContextBeforeInput: documentContextBeforeInput,
+            maximumOperationCount: Self.maximumOperationCount
+        ), operations.allSatisfy(Self.isBounded) else {
+            return LiteralTranscriptPreview(
+                elements: [.text("Transcript is too large to preview safely.")],
+                operations: []
             )
+        }
+        return LiteralTranscriptPreview(
+            elements: parsed.elements.map(Self.mapElement),
+            operations: operations
         )
     }
 

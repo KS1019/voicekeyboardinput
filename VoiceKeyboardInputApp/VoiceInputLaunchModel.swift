@@ -176,6 +176,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private var activeCommandToken: String?
     private var activationGeneration: UInt64 = 0
     private var isMicrophoneActivationActive = false
+    private var isStoppingMicrophoneActivation = false
     private var startReservationToken: String?
     private var startIntentInFlight = false
     private var lastClaimedCommandToken: String?
@@ -321,7 +322,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     func startFromContainingApp() async -> VoiceInputLaunchStatus {
-        guard !isMicrophoneActivationActive else {
+        guard !isMicrophoneActivationActive, !isStoppingMicrophoneActivation else {
             return .failed("Voice input is already in progress.")
         }
         guard heartbeatToken != nil else {
@@ -434,7 +435,9 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     func startFromKeyboardSession(sessionID: String) async -> VoiceInputLaunchStatus {
-        guard !isMicrophoneActivationActive, !startIntentInFlight else {
+        guard !isMicrophoneActivationActive,
+              !isStoppingMicrophoneActivation,
+              !startIntentInFlight else {
             return .failed("Voice input is already in progress.")
         }
         startIntentInFlight = true
@@ -503,6 +506,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         let activationTask = activeStartTask
         activeStartTask = nil
         activationTask?.cancel()
+        isStoppingMicrophoneActivation = activationTask != nil
         if let activeCommandToken {
             _ = await saveOwnedStatus(.cancelled(token: activeCommandToken))
         }
@@ -515,6 +519,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         if let activationTask {
             _ = await activationTask.value
         }
+        isStoppingMicrophoneActivation = false
     }
 
     private func startCommandMonitor() {
@@ -538,7 +543,9 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
 
     private func consumeCommandIfNeeded() async {
         guard await recoverCompletedTranscriptIfPresent() else { return }
-        guard startReservationToken == nil, !startIntentInFlight else { return }
+        guard startReservationToken == nil,
+              !isStoppingMicrophoneActivation,
+              !startIntentInFlight else { return }
         let lastClaimedToken = lastClaimedCommandToken
         let cursorBeforeClaim = lastClaimedToken
         let ownerToken = heartbeatToken
@@ -557,6 +564,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         switch command.kind {
         case .start:
             guard !isMicrophoneActivationActive,
+                  !isStoppingMicrophoneActivation,
                   !startIntentInFlight,
                   startReservationToken == nil else {
                 if startReservationToken != command.token {
@@ -658,6 +666,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 acknowledgedAt: Date()
             ))
             if let stoppableActivator = microphoneActivator as? any StoppableSessionAwareMicrophoneActivating {
+                isStoppingMicrophoneActivation = true
                 await stoppableActivator.stop(
                     sessionID: command.sessionID,
                     commandToken: activeCommandToken ?? ""
@@ -665,6 +674,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 if let activationTask {
                     _ = await activationTask.value
                 }
+                isStoppingMicrophoneActivation = false
                 if let replacedToken = command.replacesCommandToken {
                     switch await resolveActiveStopTranscript(
                         sessionID: command.sessionID,
@@ -729,6 +739,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             let activationTask = activeStartTask
             activeStartTask = nil
             activationTask?.cancel()
+            isStoppingMicrophoneActivation = true
             isMicrophoneActivationActive = false
             activeSessionID = nil
             activeCommandToken = nil
@@ -740,6 +751,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             heartbeatState = isAppAvailable ? .armed : .unavailable
             await persistHeartbeat()
             if let activationTask { _ = await activationTask.value }
+            isStoppingMicrophoneActivation = false
         }
     }
 
@@ -817,7 +829,8 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private func startDictation(
         for command: SharedDictationSessionCommand
     ) async {
-        guard !isMicrophoneActivationActive || startReservationToken == command.token else {
+        guard !isStoppingMicrophoneActivation,
+              (!isMicrophoneActivationActive || startReservationToken == command.token) else {
             _ = await saveOwnedStatus(.failed(
                 token: command.token,
                 message: "Voice input is already in progress."
@@ -983,6 +996,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
               let activeCommandToken else { return }
         activeStartTask?.cancel()
         activeStartTask = nil
+        isStoppingMicrophoneActivation = true
         isMicrophoneActivationActive = false
         self.activeSessionID = nil
         self.activeCommandToken = nil
@@ -993,6 +1007,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 commandToken: activeCommandToken
             )
         }
+        isStoppingMicrophoneActivation = false
     }
 
     /// Production app status transitions must prove that this scene still
@@ -1044,11 +1059,6 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         for command in commands {
             commandsByToken[command.token] = command
         }
-        let cancelledTranscriptTokens = Set(commands.compactMap { command -> String? in
-            guard command.kind == .cancel else { return nil }
-            return command.replacesCommandToken
-        })
-
         guard let transcriptResolution = await transcriptStoreCall({
             $0.unconsumedTranscriptsResolution()
         }) else {
@@ -1064,8 +1074,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         for transcript in transcripts {
             guard let command = commandsByToken[transcript.commandToken],
                   command.kind == .start,
-                  command.sessionID == transcript.sessionID,
-                  !cancelledTranscriptTokens.contains(transcript.commandToken) else {
+                  command.sessionID == transcript.sessionID else {
                 continue
             }
             guard await sessionStoreCall({ $0.storageHealth() }) == true else {
@@ -1087,12 +1096,15 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             }
             switch status {
             case .commandAcknowledged, .recording, .transcribing,
-                 .idle, .commandPending:
+                 .idle, .commandPending, .cancelled:
                 // The transcript is the durable completion marker. Promote
                 // it even when status publication was interrupted or a newer
                 // scene became the latest command.
                 guard await sessionStoreCall({
-                    $0.saveStatus(.transcriptReady(token: transcript.commandToken))
+                    $0.saveStatus(
+                        .transcriptReady(token: transcript.commandToken),
+                        allowRecoveryFromTranscriptReady: true
+                    )
                 }) == true else {
                     let replacement = commands.first {
                         ($0.kind == .stop || $0.kind == .cancel)
@@ -1124,7 +1136,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                     if replacement != nil { continue }
                     return false
                 }
-            case .transcriptReady, .failed, .cancelled:
+            case .transcriptReady, .failed:
                 break
             }
         }

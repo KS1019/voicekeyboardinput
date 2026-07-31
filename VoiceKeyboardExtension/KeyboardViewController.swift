@@ -1181,12 +1181,32 @@ public final class KeyboardViewController: UIInputViewController {
                       self.sharedPollingGeneration == pollingGeneration,
                       self.activeSharedCommandToken == command.token else { return }
 
-                if let status = await sessionStoreCall({
+                if var status = await sessionStoreCall({
                     $0.status(forCommandToken: command.token)
                 }) {
                     guard self.lifecycleEpoch == epoch,
                           self.sharedPollingGeneration == pollingGeneration,
                           self.activeSharedCommandToken == command.token else { return }
+                    // The transcript is a durable completion marker written
+                    // before the containing app publishes transcriptReady.
+                    // If that process died (or stale recovery published
+                    // cancelled) while the keyboard remained alive, promote
+                    // the matching unconsumed record locally so the handoff
+                    // is not lost forever.
+                    if command.kind == .start,
+                       status.commandToken == command.token,
+                       case let .found(transcript) = await self.transcriptStoreCall({
+                           $0.latestTranscriptResolution(forSessionID: command.sessionID)
+                       }),
+                       transcript.commandToken == command.token,
+                       await self.sessionStoreCall({
+                           $0.saveStatus(
+                               .transcriptReady(token: command.token),
+                               allowRecoveryFromTranscriptReady: true
+                           )
+                       }) == true {
+                        status = .transcriptReady(token: command.token)
+                    }
                     let appHeartbeatIsFresh = await sessionStoreCall {
                         $0.heartbeat()?.isFresh(maxAge: 5) == true
                     } == true
@@ -2554,6 +2574,7 @@ public final class KeyboardViewController: UIInputViewController {
                 guard !command.isExpired() else { continue }
                 activeSharedSessionID = command.sessionID
                 activeSharedCommandToken = command.token
+                sharedSessionDeliveryFingerprint = command.documentContextFingerprint
                 return command
             }
             guard status.commandToken == command.token else { continue }

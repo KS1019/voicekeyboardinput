@@ -557,6 +557,22 @@ final class TextInsertionPlannerTests: XCTestCase {
         }
     }
 
+    func testFullwidthSentenceTerminatorsInsideNumbersDoNotBecomeBoundaries() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        for separator in ["．", "｡", "﹒"] {
+            XCTAssertEqual(
+                planner.plan(
+                    transcript,
+                    documentContextBeforeInput: "合計は3\(separator)14"
+                ),
+                [.deleteBackward(count: deleteCount(7))],
+                separator
+            )
+        }
+    }
+
     func testPlansDeleteSentenceIncludingCJKClosingDelimiters() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])

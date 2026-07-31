@@ -77,4 +77,21 @@ final class LiteralTranscriptCommandPipelineTests: XCTestCase {
             maximumOperationCount: 4
         ))
     }
+
+    func testPreviewRejectsPlannerAddedBoundaryThatExceedsPayloadLimit() {
+        let pipeline = LiteralTranscriptCommandPipeline(
+            locale: VoiceKeyboardLocale(identifier: "en-US")
+        )
+        let transcript = String(
+            repeating: "a",
+            count: LiteralTranscriptCommandPipeline.maximumInputCharacterCount
+        )
+
+        let preview = pipeline.preview(
+            for: transcript,
+            documentContextBeforeInput: "existing text"
+        )
+        XCTAssertEqual(preview.operations, [])
+        XCTAssertEqual(preview.elements, [.text("Transcript is too large to preview safely.")])
+    }
 }
