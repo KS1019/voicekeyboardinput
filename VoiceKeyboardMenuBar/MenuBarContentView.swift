@@ -201,6 +201,7 @@ struct MenuBarContentView: View {
         previewGeneration &+= 1
         previewTask?.cancel()
         previewTask = nil
+        preview = LiteralTranscriptPreview(elements: [], operations: [])
     }
 
     private func elementDescription(
@@ -222,33 +223,7 @@ struct MenuBarContentView: View {
 
 enum MenuBarInputLimits {
     static func bounded(_ value: String) -> String {
-        // Limit Unicode scalars before forming Characters. A single grapheme
-        // can contain millions of combining scalars, and Character iteration
-        // would otherwise scan the complete paste synchronously on the main
-        // actor before any limit could be applied.
-        let scalarBoundedValue = String(
-            value.unicodeScalars.prefix(VoiceKeyboardTextLimits.maximumUnicodeScalarCount)
-        )
-        var bounded = String()
-        var characterCount = 0
-        var scalarCount = 0
-        var utf8ByteCount = 0
-
-        for character in scalarBoundedValue {
-            let nextScalarCount = scalarCount + character.unicodeScalars.count
-            let nextUTF8ByteCount = utf8ByteCount + character.utf8.count
-            guard characterCount < VoiceKeyboardTextLimits.maximumCharacterCount,
-                  nextScalarCount <= VoiceKeyboardTextLimits.maximumUnicodeScalarCount,
-                  nextUTF8ByteCount <= VoiceKeyboardTextLimits.maximumUTF8ByteCount else {
-                return bounded
-            }
-            bounded.append(character)
-            characterCount += 1
-            scalarCount = nextScalarCount
-            utf8ByteCount = nextUTF8ByteCount
-        }
-
-        return bounded
+        VoiceKeyboardTextLimits.bounded(value)
     }
 }
 

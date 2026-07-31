@@ -4,6 +4,12 @@ import VoiceKeyboardSharedStorage
 import XCTest
 
 final class SharedDictationTranscriptStoreTests: XCTestCase {
+    private struct LegacyDeliveryLeaseFixture: Codable {
+        let transcriptToken: String
+        let expiresAt: Date
+        let ownerID: String?
+    }
+
     func testSavesAndLoadsLatestTranscript() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)
@@ -84,6 +90,115 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
             .unavailable
         )
         XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
+    }
+
+    func testCorruptLegacyMetadataFailsClosed() throws {
+        let keys = [
+            "sharedDictation.transcriptIndex",
+            "sharedDictation.consumedTokenIndex",
+            "sharedDictation.transcriptEnvelope"
+        ]
+
+        for key in keys {
+            let defaults = try makeDefaults()
+            defaults.set("wrong-type", forKey: key)
+            let store = SharedDictationTranscriptStore(defaults: defaults)
+
+            XCTAssertEqual(
+                store.unconsumedTranscriptsResolution(),
+                .unavailable,
+                "legacy key should fail closed: \(key)"
+            )
+        }
+    }
+
+    func testCorruptLegacyDeliveryLeaseFailsClosed() throws {
+        let defaults = try makeDefaults()
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            text: "lease payload",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        defaults.set(
+            try JSONEncoder().encode(transcript),
+            forKey: "sharedDictation.transcriptRecord"
+        )
+        defaults.set("wrong-type", forKey: "sharedDictation.deliveryLease")
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertNil(store.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+        XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
+    }
+
+    func testCorruptTokenScopedLegacyDeliveryLeaseFailsClosed() throws {
+        let defaults = try makeDefaults()
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            text: "scoped lease payload",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        defaults.set(
+            try JSONEncoder().encode(transcript),
+            forKey: "sharedDictation.transcriptRecord"
+        )
+        defaults.set(
+            "wrong-type",
+            forKey: "sharedDictation.deliveryLease.\(transcript.token)"
+        )
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertNil(store.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+        XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
+    }
+
+    func testMismatchedTokenScopedLegacyDeliveryLeaseFailsClosed() throws {
+        let defaults = try makeDefaults()
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            text: "scoped lease payload",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_002)
+        ))
+        let otherTranscript = try XCTUnwrap(SharedDictationTranscript(
+            text: "other payload",
+            createdAt: Date(timeIntervalSince1970: 1_720_000_003)
+        ))
+        defaults.set(
+            try JSONEncoder().encode(transcript),
+            forKey: "sharedDictation.transcriptRecord"
+        )
+        defaults.set(
+            try JSONEncoder().encode(LegacyDeliveryLeaseFixture(
+                transcriptToken: otherTranscript.token,
+                expiresAt: Date(timeIntervalSince1970: 1_720_000_030),
+                ownerID: "other-owner"
+            )),
+            forKey: "sharedDictation.deliveryLease.\(transcript.token)"
+        )
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertNil(store.claimLatestTranscript(
+            afterLastConsumedToken: nil,
+            now: Date(timeIntervalSince1970: 1_720_000_010)
+        ))
+        XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
+    }
+
+    func testIndexedLegacyTranscriptWithoutRecordFailsClosed() throws {
+        let defaults = try makeDefaults()
+        defaults.set(
+            try JSONEncoder().encode(["missing-legacy-record"]),
+            forKey: "sharedDictation.transcriptIndex"
+        )
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
+        XCTAssertEqual(
+            store.latestTranscriptResolution(forSessionID: "missing-session"),
+            .unavailable
+        )
     }
 
     func testConflictingTranscriptForSameCommandIsRejectedWriteOnce() throws {

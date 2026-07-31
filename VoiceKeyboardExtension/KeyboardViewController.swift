@@ -1473,6 +1473,8 @@ public final class KeyboardViewController: UIInputViewController {
         epoch: UInt64? = nil
     ) async -> Bool {
         guard isSharedDeliveryCurrent(epoch) else { return false }
+        let expectedMutationGeneration = sharedSessionDocumentMutationGeneration
+            ?? documentMutationGeneration
         guard await transcriptStoreCall({ $0.storageHealth() }) == true else { return false }
         let deliveryOwnerID = sharedDeliveryOwnerID
         let resolvedCommand: SharedDictationSessionCommand?
@@ -1508,6 +1510,12 @@ public final class KeyboardViewController: UIInputViewController {
         }
         guard isCurrentDelivery() else { return false }
         guard !latestTranscript.isExpired() else {
+            guard await sessionStoreCall({
+                $0.saveDeliveryFailure(
+                    token: source.commandToken,
+                    message: "The shared dictation result expired before it could be inserted."
+                )
+            }) == true else { return false }
             endSharedSession(
                 ifMatchingSessionID: source.sessionID,
                 commandToken: command.token,
@@ -1594,7 +1602,7 @@ public final class KeyboardViewController: UIInputViewController {
         }
         var pendingTranscript: SharedDictationTranscript?
         var pendingStartIndex = 0
-        if let pendingDelivery,
+        if var pendingDelivery,
            pendingDelivery.transcriptToken == latestTranscript.token {
             if pendingDelivery.isQuarantined {
                 guard await sessionStoreCall({
@@ -1621,41 +1629,67 @@ public final class KeyboardViewController: UIInputViewController {
                 // died before persisting progress. First try the durable
                 // final-context proof; only an unprovable mutation is
                 // quarantined and reported as a failure.
-                if await transcriptStoreCall({
+                let pendingTranscriptToken = pendingDelivery.transcriptToken
+                let reconciliation = await transcriptStoreCall({
                     $0.reconcileDelivered(
-                        transcriptToken: pendingDelivery.transcriptToken,
+                        transcriptToken: pendingTranscriptToken,
                         ownerID: deliveryOwnerID,
                         observedContext: currentContextFingerprint
                     )
-                }) == true {
+                }) ?? .failed
+                var didReconcileForResume = false
+                switch reconciliation {
+                case .completed:
                     endSharedSession(
                         ifMatchingSessionID: source.sessionID,
                         commandToken: command.token,
                         pollingGeneration: deliveryPollingGeneration
                     )
                     return true
+                case .progressed:
+                    if case let .found(updatedDelivery) = await transcriptStoreCall({
+                        $0.pendingDeliveryResolution(forCommandToken: source.commandToken)
+                    }) ?? .unavailable,
+                       !updatedDelivery.mutationInFlight {
+                        pendingDelivery = updatedDelivery
+                        pendingStartIndex = updatedDelivery.appliedOperationCount
+                        pendingTranscript = await transcriptStoreCall {
+                            $0.resumePendingDelivery(
+                                forSessionID: source.sessionID,
+                                ownerID: deliveryOwnerID
+                            )
+                        } ?? nil
+                        didReconcileForResume = pendingTranscript != nil
+                    }
+                case .failed:
+                    break
                 }
-                guard await failSharedDelivery(
-                    sourceCommandToken: source.commandToken,
-                    transcriptToken: pendingDelivery.transcriptToken,
-                    message: "Shared text delivery stopped during an ambiguous host edit. Try the dictation again."
-                ) else { return false }
-                guard isCurrentDelivery() else { return false }
-                endSharedSession(
-                    ifMatchingSessionID: source.sessionID,
-                    commandToken: command.token,
-                    pollingGeneration: deliveryPollingGeneration
-                )
-                keyboardRootView.render(
-                    speechCapture: .keyboardSpeechCapture(.recognitionFailed(
-                        .recognitionFailed("Shared text delivery stopped during an ambiguous host edit. Try the dictation again.")
-                    )),
-                    announce: true
-                )
-                return true
+                if !didReconcileForResume {
+                    guard await failSharedDelivery(
+                        sourceCommandToken: source.commandToken,
+                        transcriptToken: pendingDelivery.transcriptToken,
+                        message: "Shared text delivery stopped during an ambiguous host edit. Try the dictation again."
+                    ) else { return false }
+                    guard isCurrentDelivery() else { return false }
+                    endSharedSession(
+                        ifMatchingSessionID: source.sessionID,
+                        commandToken: command.token,
+                        pollingGeneration: deliveryPollingGeneration
+                    )
+                    keyboardRootView.render(
+                        speechCapture: .keyboardSpeechCapture(.recognitionFailed(
+                            .recognitionFailed("Shared text delivery stopped during an ambiguous host edit. Try the dictation again.")
+                        )),
+                        announce: true
+                    )
+                    return true
+                }
+                // The refreshed journal is now resumable. The remainder of
+                // this recovery block validates its checkpoint and continues
+                // with the unapplied operations.
             }
             if (hasSharedDeliveryLifecycleGap || pendingDelivery.ownerID != sharedDeliveryOwnerID),
-               !pendingDelivery.beforeContext.hasDocumentIdentifier {
+               !pendingDelivery.beforeContext.hasStableMutationIdentity {
                 // A recreated keyboard cannot distinguish two identical
                 // fields when the host omitted documentIdentifier. Never
                 // replay a destructive or duplicate insertion into an
@@ -1749,11 +1783,11 @@ public final class KeyboardViewController: UIInputViewController {
                     return true
                 }
                 if appliedOperationCount == pendingDelivery.operations.count {
+                    let completedTranscriptToken = pendingDelivery.transcriptToken
                     guard await transcriptStoreCall({
-                        $0.reconcileDelivered(
-                            transcriptToken: pendingDelivery.transcriptToken,
+                        $0.markDelivered(
+                            transcriptToken: completedTranscriptToken,
                             ownerID: deliveryOwnerID,
-                            observedContext: currentContextFingerprint
                         )
                     }) == true else {
                         return false
@@ -1778,6 +1812,11 @@ public final class KeyboardViewController: UIInputViewController {
         let contextMatches = await sharedDocumentContextMatches(sourceCommandToken: source.commandToken)
         guard isCurrentDelivery() else { return false }
         guard pendingTranscript != nil || contextMatches else {
+            guard await failSharedDelivery(
+                sourceCommandToken: source.commandToken,
+                transcriptToken: nil,
+                message: "The text field changed while shared dictation was active. Try again."
+            ) else { return false }
             endSharedSession(
                 ifMatchingSessionID: source.sessionID,
                 commandToken: command.token,
@@ -1792,7 +1831,7 @@ public final class KeyboardViewController: UIInputViewController {
             return true
         }
 
-        let operations: [TextOperation]
+        var plannedOperations: [TextOperation]
         if let pendingDelivery,
            !pendingDelivery.operations.isEmpty {
             let decodedOperations = pendingDelivery.operations.map(TextOperation.init(deliveryOperation:))
@@ -1811,7 +1850,7 @@ public final class KeyboardViewController: UIInputViewController {
                 )
                 return true
             }
-            operations = restoredOperations
+            plannedOperations = restoredOperations
         } else {
             guard VoiceKeyboardTextLimits.isValid(latestTranscript.text),
                   let generatedOperations = VoiceInputPipeline(locale: locale).boundedOperations(
@@ -1832,8 +1871,17 @@ public final class KeyboardViewController: UIInputViewController {
                 )
                 return true
             }
-            operations = generatedOperations
+            plannedOperations = generatedOperations
         }
+        if plannedOperations.isEmpty {
+            // A command such as "command delete word" at the beginning of
+            // an empty field is a valid no-op. Persist a visible feedback
+            // operation so the transcript can still be delivered exactly
+            // once instead of leaving an empty journal that markDelivered
+            // cannot finalize.
+            plannedOperations = [.showUnsupportedCommand("Nothing to delete")]
+        }
+        let operations = plannedOperations
         guard operations.count <= SharedDictationTranscriptDelivery.maximumOperationCount else {
             guard await failSharedDelivery(
                 sourceCommandToken: source.commandToken,
@@ -1924,7 +1972,8 @@ public final class KeyboardViewController: UIInputViewController {
             pollingGeneration: deliveryPollingGeneration,
             sessionID: source.sessionID,
             commandToken: command.token,
-            startingContext: pendingDelivery?.checkpointContext
+            startingContext: pendingDelivery?.checkpointContext,
+            expectedMutationGeneration: expectedMutationGeneration
         ) else { return false }
         let expectedAfterInput = expectedDocumentContextBeforeInput(
             after: Array(operations.dropFirst(pendingStartIndex)),
@@ -2032,6 +2081,12 @@ public final class KeyboardViewController: UIInputViewController {
                 }
             }
         }
+        guard currentDocumentContextFingerprint().hasStableMutationIdentity else {
+            // A secure or otherwise private host may return nil for every
+            // context field. DocumentIdentifier alone cannot prove that the
+            // caret has not moved, so do not deliver into an unverified field.
+            return false
+        }
         if let expectedDocumentContext = sharedSessionDocumentContext {
             return expectedDocumentContext == textDocumentProxy.documentContextBeforeInput
                 && sharedSessionDocumentContextAfterInput == textDocumentProxy.documentContextAfterInput
@@ -2101,7 +2156,8 @@ public final class KeyboardViewController: UIInputViewController {
         pollingGeneration: UInt64,
         sessionID: String,
         commandToken: String,
-        startingContext: SharedDictationDocumentContextFingerprint? = nil
+        startingContext: SharedDictationDocumentContextFingerprint? = nil,
+        expectedMutationGeneration: UInt64
     ) async -> Bool {
         let deliveryOwnerID = sharedDeliveryOwnerID
         guard isSharedDeliveryCurrent(
@@ -2110,6 +2166,7 @@ public final class KeyboardViewController: UIInputViewController {
             sessionID: sessionID,
             commandToken: commandToken
         ) else { return false }
+        guard documentMutationGeneration == expectedMutationGeneration else { return false }
         if textDocumentProxy.selectedText != nil,
            operations.contains(where: {
                if case .deleteBackward = $0 { return true }
@@ -2142,6 +2199,7 @@ public final class KeyboardViewController: UIInputViewController {
                 sessionID: sessionID,
                 commandToken: commandToken
             ) else { return false }
+            guard documentMutationGeneration == expectedMutationGeneration else { return false }
             guard expectedContext.matches(
                 beforeInput: textDocumentProxy.documentContextBeforeInput,
                 afterInput: textDocumentProxy.documentContextAfterInput,
@@ -2158,6 +2216,7 @@ public final class KeyboardViewController: UIInputViewController {
             }) == true else {
                 return false
             }
+            guard documentMutationGeneration == expectedMutationGeneration else { return false }
             guard isSharedDeliveryCurrent(
                 epoch,
                 pollingGeneration: pollingGeneration,
@@ -2192,6 +2251,16 @@ public final class KeyboardViewController: UIInputViewController {
                 }) == true else {
                     return false
                 }
+                guard documentMutationGeneration == expectedMutationGeneration else {
+                    _ = await transcriptStoreCall {
+                        $0.abortDeliveryMutation(
+                            transcriptToken: transcriptToken,
+                            operationIndex: index,
+                            ownerID: deliveryOwnerID
+                        )
+                    }
+                    return false
+                }
                 guard isSharedDeliveryCurrent(
                     epoch,
                     pollingGeneration: pollingGeneration,
@@ -2223,6 +2292,7 @@ public final class KeyboardViewController: UIInputViewController {
                     return false
                 }
             }
+            guard documentMutationGeneration == expectedMutationGeneration else { return false }
             switch operation {
             case .insertText(let value):
                 guard isSharedDeliveryCurrent(
@@ -2336,9 +2406,11 @@ public final class KeyboardViewController: UIInputViewController {
                 speechCapture: .keyboardSpeechCapture(.unsupportedCommand(unsupportedCommand)),
                 announce: true
             )
-        } else if didEditDocument, !insertedText.isEmpty {
+        } else if didEditDocument {
             keyboardRootView.render(
-                speechCapture: .keyboardSpeechCapture(.inserted(insertedText)),
+                speechCapture: .keyboardSpeechCapture(
+                    .inserted(insertedText.isEmpty ? "Text edited" : insertedText)
+                ),
                 announce: true
             )
         } else {
@@ -2484,17 +2556,18 @@ public final class KeyboardViewController: UIInputViewController {
         guard operations.count <= SharedDictationTranscriptDelivery.maximumOperationCount else {
             return nil
         }
-        var totalDeletionCount = 0
-        for operation in operations {
-            if case let .deleteBackward(count) = operation,
-               count.value > Self.maximumSharedDeletionCount {
-                return nil
-            }
+        guard operations.allSatisfy({ operation in
             if case let .deleteBackward(count) = operation {
-                totalDeletionCount += count.value
-                guard totalDeletionCount <= Self.maximumSharedDeletionCount else { return nil }
+                return count.value <= Self.maximumSharedDeletionCount
             }
+            return true
+        }) else {
+            return nil
         }
+        // Keep a multi-character deletion as one journal operation. The host
+        // proxy still performs the bounded per-character calls, but the
+        // durable journal checkpoints the whole non-transactional mutation
+        // without overflowing its operation budget.
         return operations
     }
 

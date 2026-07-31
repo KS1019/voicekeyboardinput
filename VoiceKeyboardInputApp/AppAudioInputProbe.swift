@@ -56,10 +56,14 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                     _ = await audioEngineOperation.value
                 }
                 tapGate.waitUntilDrained()
-                if tapWasInstalled {
-                    _ = VKRemoveAudioInputTap(engine.inputNode)
+                let didRemoveTap = !tapWasInstalled || VKRemoveAudioEngineInputTap(engine)
+                let didStopEngine = VKStopAudioEngine(engine)
+                guard didRemoveTap && didStopEngine else {
+                    coordinator.finish(operationToken)
+                    coordinator.markTerminal()
+                    coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+                    return
                 }
-                _ = VKStopAudioEngine(engine)
                 // `terminateOperationIfNeeded` invalidates the token so a
                 // late engine callback cannot start new work. It must not
                 // suppress teardown of a session that was already activated.
@@ -68,7 +72,8 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                     coordinator.releaseOwnership(ownershipToken)
                     return
                 }
-                if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
+                await coordinator.waitForPendingSessionOperationsUntilSettled()
+                if coordinator.hasPendingSessionOperation {
                     // setPreferredInput can complete after the user-facing
                     // timeout, especially while a Bluetooth HFP route is
                     // materializing. Keep the fence and ownership until the
@@ -119,8 +124,8 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                 engine: engine
             )
 
-            let inputNode = engine.inputNode
-            guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+            guard let inputNode = VKAudioEngineInputNode(engine),
+                  let format = VKAudioEngineInputFormat(engine) else {
                 throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
 

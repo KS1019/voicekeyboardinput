@@ -429,6 +429,12 @@ public final class SharedDictationTranscriptStore {
         case unavailable
     }
 
+    public enum DeliveryReconciliationResult: Equatable, Sendable {
+        case progressed
+        case completed
+        case failed
+    }
+
     public static let appGroupIdentifier = "group.com.ks1019.voicekeyboardinput"
     // Bound both the bytes read from the App Group and the aggregate text
     // retained after JSON decoding. This protects the keyboard extension from
@@ -453,6 +459,7 @@ public final class SharedDictationTranscriptStore {
         var revision: UInt64
         var records: [String: SharedDictationTranscript]
         var consumedTokens: [String]
+        var consumedTokenDates: [String: Date]
         var pendingDeliveries: [String: SharedDictationTranscriptDelivery]
         var deliveryLeases: [String: DeliveryLease]
 
@@ -460,6 +467,7 @@ public final class SharedDictationTranscriptStore {
             case revision
             case records
             case consumedTokens
+            case consumedTokenDates
             case pendingDeliveries
             case deliveryLeases
             case pendingDelivery
@@ -470,12 +478,14 @@ public final class SharedDictationTranscriptStore {
             revision: UInt64 = 0,
             records: [String: SharedDictationTranscript],
             consumedTokens: [String],
+            consumedTokenDates: [String: Date] = [:],
             pendingDeliveries: [String: SharedDictationTranscriptDelivery] = [:],
             deliveryLeases: [String: DeliveryLease] = [:]
         ) {
             self.revision = revision
             self.records = records
             self.consumedTokens = consumedTokens
+            self.consumedTokenDates = consumedTokenDates
             self.pendingDeliveries = pendingDeliveries
             self.deliveryLeases = deliveryLeases
         }
@@ -485,6 +495,10 @@ public final class SharedDictationTranscriptStore {
             revision = try container.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
             records = try container.decode([String: SharedDictationTranscript].self, forKey: .records)
             consumedTokens = try container.decode([String].self, forKey: .consumedTokens)
+            consumedTokenDates = try container.decodeIfPresent(
+                [String: Date].self,
+                forKey: .consumedTokenDates
+            ) ?? Dictionary(uniqueKeysWithValues: consumedTokens.map { ($0, Date()) })
             let legacyPending = try container.decodeIfPresent(
                 SharedDictationTranscriptDelivery.self,
                 forKey: .pendingDelivery
@@ -500,9 +514,10 @@ public final class SharedDictationTranscriptStore {
             ) ?? legacyLease.map { [$0.transcriptToken: $0] } ?? [:]
             guard revision < UInt64.max,
                   SharedDictationTranscriptStore.isValidEnvelope(
-                records: records,
-                consumedTokens: consumedTokens,
-                pendingDeliveries: pendingDeliveries,
+                    records: records,
+                    consumedTokens: consumedTokens,
+                    consumedTokenDates: consumedTokenDates,
+                    pendingDeliveries: pendingDeliveries,
                 deliveryLeases: deliveryLeases
             ) else {
                 throw DecodingError.dataCorruptedError(
@@ -518,6 +533,7 @@ public final class SharedDictationTranscriptStore {
             try container.encode(revision, forKey: .revision)
             try container.encode(records, forKey: .records)
             try container.encode(consumedTokens, forKey: .consumedTokens)
+            try container.encode(consumedTokenDates, forKey: .consumedTokenDates)
             try container.encode(pendingDeliveries, forKey: .pendingDeliveries)
             try container.encode(deliveryLeases, forKey: .deliveryLeases)
         }
@@ -543,26 +559,32 @@ public final class SharedDictationTranscriptStore {
     private static let maximumDeliveryLeaseHorizon: TimeInterval = 5 * 60
     private static let transcriptIndexLimit = 32
     private static let pendingDeliveryLimit = 32
-    // Quarantine records are fail-closed tombstones. They must not grow the
-    // App Group forever after repeated ambiguous host edits; once this small
-    // diagnostic window is full, the oldest tombstones may be discarded
-    // because they can never be replayed.
+    // Tombstones are retained for the maximum period in which a producer can
+    // legally publish late. Expired tombstones are compacted under the same
+    // store lock; live fences are never dropped merely to make room.
     private static let quarantinedDeliveryRetentionLimit = 8
     private static let ambiguousDeliveryRetentionLimit = 8
-    private static let consumedTokenIndexLimit = 32
+    private static let consumedTokenIndexLimit = 1_024
+    private static let consumedTokenRetention: TimeInterval =
+        SharedDictationTranscript.maximumLifetime + maximumDeliveryLeaseHorizon
     private static let inProcessLock = NSLock()
 
     private static func isValidEnvelope(
         records: [String: SharedDictationTranscript],
         consumedTokens: [String],
+        consumedTokenDates: [String: Date],
         pendingDeliveries: [String: SharedDictationTranscriptDelivery],
         deliveryLeases: [String: DeliveryLease]
     ) -> Bool {
         guard records.count <= transcriptIndexLimit,
               consumedTokens.count <= consumedTokenIndexLimit,
+              consumedTokenDates.count <= consumedTokenIndexLimit,
               pendingDeliveries.count <= pendingDeliveryLimit,
               deliveryLeases.count <= pendingDeliveryLimit,
-              consumedTokens.count == Set(consumedTokens).count else {
+              consumedTokens.count == Set(consumedTokens).count,
+              consumedTokens.allSatisfy(Self.isBoundedIdentifier),
+              Set(consumedTokenDates.keys).isSubset(of: Set(consumedTokens)),
+              consumedTokenDates.values.allSatisfy({ $0.timeIntervalSinceReferenceDate.isFinite }) else {
             return false
         }
         var payloadBytes = 0
@@ -664,6 +686,18 @@ public final class SharedDictationTranscriptStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var envelopeReadBlocked = false
+
+    private enum LegacyDataResolution {
+        case missing
+        case found(Data)
+        case unavailable
+    }
+
+    private enum LegacyLeaseResolution {
+        case missing
+        case found(DeliveryLease)
+        case unavailable
+    }
 
     /// In-process compatibility backend for tests and legacy migration only.
     /// App Group production callers must use `appGroupStore()`, which uses a
@@ -779,7 +813,14 @@ public final class SharedDictationTranscriptStore {
                 }
             }
             records[transcript.token] = transcript
-            var tokens = loadTranscriptIndex().filter {
+            // Once a validated file-backed envelope exists, its records are
+            // authoritative. Do not read the retired UserDefaults index on
+            // every save: an unrelated malformed legacy index must not poison
+            // an otherwise healthy migrated mailbox.
+            var tokens = (envelopeURL != nil && existingEnvelope != nil
+                ? Array(records.keys)
+                : loadTranscriptIndex()
+            ).filter {
                 records[$0] != nil && $0 != transcript.token
             }
             for token in records.keys.sorted(by: { lhs, rhs in
@@ -894,19 +935,28 @@ public final class SharedDictationTranscriptStore {
             let removedTokens = tokens.filter { !retainedTokenSet.contains($0) }
             tokens = retainedTokenList
             records = records.filter { retainedTokenSet.contains($0.key) }
-            var tombstones = existingEnvelope?.consumedTokens ?? loadConsumedTokenIndex()
-            for token in evictedAmbiguousTokens where !tombstones.contains(token) {
+            let existingTombstones = existingEnvelope?.consumedTokens ?? loadConsumedTokenIndex()
+            var tombstoneCandidates: [String] = []
+            for token in evictedAmbiguousTokens where !existingTombstones.contains(token) {
                 // A compacted ambiguous journal is still a no-replay fence;
                 // removing its payload must not make the transcript writable
                 // again under the same handoff token.
-                tombstones.append(token)
+                tombstoneCandidates.append(token)
             }
-            for token in removedTokens where !tombstones.contains(token) {
-                tombstones.append(token)
+            for token in removedTokens where !existingTombstones.contains(token) {
+                tombstoneCandidates.append(token)
             }
+            var tombstoneDates = existingEnvelope?.consumedTokenDates ?? [:]
+            guard let tombstones = appendTombstones(
+                tombstoneCandidates,
+                to: existingTombstones,
+                datedBy: &tombstoneDates,
+                now: now
+            ) else { return false }
             let envelope = TranscriptEnvelope(
                 records: records,
-                consumedTokens: Array(tombstones.suffix(Self.consumedTokenIndexLimit)),
+                consumedTokens: tombstones,
+                consumedTokenDates: tombstoneDates,
                 pendingDeliveries: pendingDeliveries,
                 deliveryLeases: deliveryLeases
             )
@@ -969,12 +1019,15 @@ public final class SharedDictationTranscriptStore {
                     applyConsumption(to: $0, consumedTokens: envelope.consumedTokens)
                 }
             } else {
+                let consumedTokens = loadConsumedTokenIndex()
                 var legacyTranscripts = loadTranscriptTokens().compactMap { loadLegacyRecord(forToken: $0) }
                 if let singleton = loadLegacyRecord(forToken: nil),
                    !legacyTranscripts.contains(where: { $0.token == singleton.token }) {
                     legacyTranscripts.append(singleton)
                 }
-                transcripts = legacyTranscripts
+                transcripts = legacyTranscripts.compactMap {
+                    applyConsumption(to: $0, consumedTokens: consumedTokens)
+                }
             }
             guard !envelopeReadBlocked else { return .unavailable }
             return .available(transcripts
@@ -1142,6 +1195,7 @@ public final class SharedDictationTranscriptStore {
             return saveTranscriptEnvelope(TranscriptEnvelope(
                 records: records,
                 consumedTokens: existingEnvelope?.consumedTokens ?? loadConsumedTokenIndex(),
+                consumedTokenDates: existingEnvelope?.consumedTokenDates ?? [:],
                 pendingDeliveries: pendingDeliveries,
                 deliveryLeases: deliveryLeases
             ))
@@ -1396,11 +1450,15 @@ public final class SharedDictationTranscriptStore {
                     expiresAt: transcript.expiresAt,
                     isConsumed: true
                 )
-                var consumedTokens = updatedEnvelope.consumedTokens.filter { $0 != transcriptToken }
-                consumedTokens.append(transcriptToken)
-                updatedEnvelope.consumedTokens = Array(
-                    consumedTokens.suffix(Self.consumedTokenIndexLimit)
-                )
+                var tombstoneDates = updatedEnvelope.consumedTokenDates
+                guard let consumedTokens = appendTombstones(
+                    [transcriptToken],
+                    to: updatedEnvelope.consumedTokens,
+                    datedBy: &tombstoneDates,
+                    now: now
+                ) else { return false }
+                updatedEnvelope.consumedTokens = consumedTokens
+                updatedEnvelope.consumedTokenDates = tombstoneDates
             }
             // Remove the lease so the old owner cannot write progress after
             // the quarantine decision. The journal itself remains durable.
@@ -1503,7 +1561,7 @@ public final class SharedDictationTranscriptStore {
         ownerID: String,
         observedContext: SharedDictationDocumentContextFingerprint,
         now: Date = Date()
-    ) -> Bool {
+    ) -> DeliveryReconciliationResult {
         withExclusiveAccess {
             guard let envelope = loadTranscriptEnvelope(),
                   let pending = envelope.pendingDeliveries[transcriptToken],
@@ -1516,6 +1574,7 @@ public final class SharedDictationTranscriptStore {
                       delivery: pending,
                       transcript: transcript
                   ),
+                  pending.mutationInFlight,
                   observedContext.hasDocumentIdentifier,
                   SharedDictationTranscriptDelivery.isValidJournal(
                       operations: pending.operations,
@@ -1523,39 +1582,36 @@ public final class SharedDictationTranscriptStore {
                       appliedOperationCount: pending.appliedOperationCount,
                       beforeContext: pending.beforeContext,
                       afterContext: pending.afterContext
-                  ) else { return false }
-            let completedContextMatches: Bool
-            if pending.appliedOperationCount >= pending.operations.count,
-               pending.stepContexts.count == pending.operations.count + 1,
-               let finalStepContext = pending.checkpointContext ?? pending.stepContexts.last {
-                completedContextMatches = finalStepContext.matches(observedContext)
-            } else {
-                completedContextMatches = pending.afterContext.matches(observedContext)
-            }
-            guard completedContextMatches else { return false }
-            if pending.appliedOperationCount < pending.operations.count,
-               pending.beforeContext == pending.afterContext {
-                return false
+                  ) else { return .failed }
+            let operationIndex = pending.appliedOperationCount
+            guard pending.stepContexts.count == pending.operations.count + 1,
+                  operationIndex < pending.operations.count,
+                  pending.stepContexts[operationIndex + 1].matches(observedContext) else {
+                return .failed
             }
             if let lease = envelope.deliveryLeases[transcriptToken],
                now < lease.expiresAt,
                lease.ownerID != ownerID {
-                return false
+                return .failed
             }
             var updatedEnvelope = envelope
-            updatedEnvelope.pendingDeliveries[transcriptToken] = pending
+            let progressedDelivery = pending
                 .owned(by: ownerID)
                 .progressed(
-                    to: pending.operations.count,
+                    to: operationIndex + 1,
                     observedContext: observedContext
                 )
+            updatedEnvelope.pendingDeliveries[transcriptToken] = progressedDelivery
             updatedEnvelope.deliveryLeases[transcriptToken] = DeliveryLease(
                 transcriptToken: transcriptToken,
                 expiresAt: now.addingTimeInterval(Self.deliveryLeaseInterval),
                 ownerID: ownerID
             )
-            return markConsumedRecord(transcript, in: updatedEnvelope)
-        } ?? false
+            guard operationIndex + 1 == pending.operations.count else {
+                return saveTranscriptEnvelope(updatedEnvelope) ? .progressed : .failed
+            }
+            return markConsumedRecord(transcript, in: updatedEnvelope) ? .completed : .failed
+        } ?? .failed
     }
 
     public func markConsumed(_ transcript: SharedDictationTranscript) {
@@ -1604,7 +1660,9 @@ public final class SharedDictationTranscriptStore {
         }) == true {
             return nil
         }
-        if let lease = loadDeliveryLease(forToken: transcript.token),
+        let existingLease = loadDeliveryLease(forToken: transcript.token)
+        guard !envelopeReadBlocked else { return nil }
+        if let lease = existingLease,
            lease.transcriptToken == transcript.token,
            now < lease.expiresAt {
             return nil
@@ -1625,6 +1683,7 @@ public final class SharedDictationTranscriptStore {
     }
 
     private func saveDeliveryLease(_ lease: DeliveryLease) -> Bool {
+        guard !envelopeReadBlocked else { return false }
         if envelopeURL != nil {
             var envelope = loadTranscriptEnvelope() ?? TranscriptEnvelope(
                 records: loadLegacyRecords(),
@@ -1643,10 +1702,39 @@ public final class SharedDictationTranscriptStore {
         if envelopeURL != nil {
             return loadTranscriptEnvelope()?.deliveryLeases[token]
         }
-        let data = defaults.data(forKey: Key.deliveryLeasePrefix + token)
-            ?? defaults.data(forKey: Key.deliveryLease)
-        guard let data else { return nil }
-        return try? decoder.decode(DeliveryLease.self, from: data)
+        switch loadLegacyDeliveryLease(forToken: token) {
+        case .missing:
+            return nil
+        case .found(let lease):
+            return lease
+        case .unavailable:
+            envelopeReadBlocked = true
+            return nil
+        }
+    }
+
+    private func loadLegacyDeliveryLease(forToken token: String) -> LegacyLeaseResolution {
+        let tokenKey = Key.deliveryLeasePrefix + token
+        let key: String
+        if defaults.object(forKey: tokenKey) != nil {
+            key = tokenKey
+        } else if defaults.object(forKey: Key.deliveryLease) != nil {
+            key = Key.deliveryLease
+        } else {
+            return .missing
+        }
+        guard let data = defaults.data(forKey: key),
+              data.count <= Self.maximumEnvelopeByteCount,
+              let lease = try? decoder.decode(DeliveryLease.self, from: data),
+              key == Key.deliveryLease || lease.transcriptToken == token,
+              lease.transcriptToken.utf8.count <= SharedDictationTranscript.maximumIdentifierByteCount,
+              !lease.transcriptToken.contains("\0"),
+              lease.expiresAt.timeIntervalSinceReferenceDate.isFinite,
+              lease.expiresAt <= Date().addingTimeInterval(Self.maximumDeliveryLeaseHorizon),
+              lease.ownerID.map(Self.isBoundedIdentifier) ?? true else {
+            return .unavailable
+        }
+        return .found(lease)
     }
 
     private func loadRecord(forToken token: String?) -> SharedDictationTranscript? {
@@ -1663,6 +1751,9 @@ public final class SharedDictationTranscriptStore {
     private func loadLegacyRecord(forToken token: String?) -> SharedDictationTranscript? {
         let key = token.map { Key.transcriptRecordPrefix + $0 } ?? Key.transcriptRecord
         guard let data = defaults.data(forKey: key) else {
+            if defaults.object(forKey: key) != nil {
+                envelopeReadBlocked = true
+            }
             return nil
         }
         guard data.count <= Self.maximumEnvelopeByteCount,
@@ -1691,7 +1782,16 @@ public final class SharedDictationTranscriptStore {
     }
 
     private func loadTranscriptIndex() -> [String] {
-        guard let data = defaults.data(forKey: Key.transcriptIndex) else { return [] }
+        let data: Data
+        switch loadLegacyData(forKey: Key.transcriptIndex) {
+        case .missing:
+            return []
+        case .found(let value):
+            data = value
+        case .unavailable:
+            envelopeReadBlocked = true
+            return []
+        }
         guard data.count <= Self.maximumEnvelopeByteCount,
               let tokens = try? decoder.decode([String].self, from: data) else {
             // A present but malformed index must not be interpreted as an
@@ -1700,7 +1800,14 @@ public final class SharedDictationTranscriptStore {
             envelopeReadBlocked = true
             return []
         }
-        return Array(tokens.prefix(Self.transcriptIndexLimit))
+        guard tokens.count <= Self.transcriptIndexLimit else {
+            // Never silently discard legacy records during migration. A
+            // caller can surface the storage failure and retry after the
+            // mailbox is repaired or consumed explicitly.
+            envelopeReadBlocked = true
+            return []
+        }
+        return tokens
     }
 
     private func loadTranscriptEnvelope() -> TranscriptEnvelope? {
@@ -1732,7 +1839,16 @@ public final class SharedDictationTranscriptStore {
         guard !defaults.bool(forKey: Key.envelopeMigrationMarker) else {
             return TranscriptEnvelope(records: [:], consumedTokens: [])
         }
-        guard let data = defaults.data(forKey: Key.transcriptEnvelope) else { return nil }
+        let data: Data
+        switch loadLegacyData(forKey: Key.transcriptEnvelope) {
+        case .missing:
+            return nil
+        case .found(let value):
+            data = value
+        case .unavailable:
+            envelopeReadBlocked = true
+            return TranscriptEnvelope(records: [:], consumedTokens: [])
+        }
         guard data.count <= Self.maximumEnvelopeByteCount,
               let envelope = try? decoder.decode(TranscriptEnvelope.self, from: data) else {
             envelopeReadBlocked = true
@@ -1754,6 +1870,7 @@ public final class SharedDictationTranscriptStore {
               Self.isValidEnvelope(
                   records: envelope.records,
                   consumedTokens: envelope.consumedTokens,
+                  consumedTokenDates: envelope.consumedTokenDates,
                   pendingDeliveries: envelope.pendingDeliveries,
                   deliveryLeases: envelope.deliveryLeases
               ) else { return false }
@@ -1814,6 +1931,7 @@ public final class SharedDictationTranscriptStore {
               Self.isValidEnvelope(
                   records: envelope.records,
                   consumedTokens: envelope.consumedTokens,
+                  consumedTokenDates: envelope.consumedTokenDates,
                   pendingDeliveries: envelope.pendingDeliveries,
                   deliveryLeases: envelope.deliveryLeases
               ) else {
@@ -1872,6 +1990,17 @@ public final class SharedDictationTranscriptStore {
 
     private func loadTranscriptTokens() -> [String] {
         var tokens = loadTranscriptIndex()
+        guard !envelopeReadBlocked else { return [] }
+        for token in tokens {
+            let recordKey = Key.transcriptRecordPrefix + token
+            guard defaults.object(forKey: recordKey) != nil else {
+                // An index entry without a record is corruption, not an
+                // empty slot. Refuse migration so a transcript cannot be
+                // silently discarded or replayed after the marker is set.
+                envelopeReadBlocked = true
+                return []
+            }
+        }
         if let legacyTranscript = loadLegacyRecord(forToken: nil),
            !tokens.contains(legacyTranscript.token) {
             tokens = Array(tokens.suffix(max(0, Self.transcriptIndexLimit - 1)))
@@ -1882,20 +2011,89 @@ public final class SharedDictationTranscriptStore {
 
     private func loadConsumedTokenIndex() -> [String] {
         if let consumedTokens = loadTranscriptEnvelope()?.consumedTokens { return consumedTokens }
-        guard let data = defaults.data(forKey: Key.consumedTokenIndex) else {
-            return defaults.string(forKey: Key.consumedToken).map { [$0] } ?? []
-        }
-        guard data.count <= Self.maximumEnvelopeByteCount,
-              let tokens = try? decoder.decode([String].self, from: data) else {
+        switch loadLegacyData(forKey: Key.consumedTokenIndex) {
+        case .missing:
+            if defaults.object(forKey: Key.consumedToken) != nil,
+               defaults.string(forKey: Key.consumedToken) == nil {
+                envelopeReadBlocked = true
+                return []
+            }
+            guard let token = defaults.string(forKey: Key.consumedToken) else { return [] }
+            guard Self.isBoundedIdentifier(token) else {
+                envelopeReadBlocked = true
+                return []
+            }
+            return [token]
+        case .unavailable:
             envelopeReadBlocked = true
             return []
+        case .found(let data):
+            guard data.count <= Self.maximumEnvelopeByteCount,
+                  let tokens = try? decoder.decode([String].self, from: data) else {
+                envelopeReadBlocked = true
+                return []
+            }
+            guard tokens.count <= Self.consumedTokenIndexLimit,
+                  tokens.count == Set(tokens).count,
+                  tokens.allSatisfy(Self.isBoundedIdentifier) else {
+                envelopeReadBlocked = true
+                return []
+            }
+            return tokens
         }
-        return Array(tokens.suffix(Self.consumedTokenIndexLimit))
+    }
+
+    private func loadLegacyData(forKey key: String) -> LegacyDataResolution {
+        guard defaults.object(forKey: key) != nil else { return .missing }
+        guard let data = defaults.data(forKey: key) else { return .unavailable }
+        return .found(data)
     }
 
     private func saveTokenIndex(_ tokens: [String], forKey key: String) {
         guard let data = try? encoder.encode(tokens) else { return }
         defaults.set(data, forKey: key)
+    }
+
+    private func appendTombstones(
+        _ candidates: [String],
+        to existing: [String],
+        datedBy dates: inout [String: Date],
+        now: Date
+    ) -> [String]? {
+        for token in existing where dates[token] == nil {
+            dates[token] = now
+        }
+        let cutoff = now.addingTimeInterval(-Self.consumedTokenRetention)
+        let retained = existing.filter { token in
+            guard let date = dates[token] else { return true }
+            guard date >= cutoff else {
+                dates.removeValue(forKey: token)
+                return false
+            }
+            return true
+        }
+        var result = retained
+        for token in candidates where !result.contains(token) {
+            guard Self.isBoundedIdentifier(token) else {
+                return nil
+            }
+            if result.count >= Self.consumedTokenIndexLimit {
+                // A tombstone is a replay fence, but refusing every future
+                // delivery once the bounded index is full would leave the
+                // already-applied host edit permanently pending. Evict the
+                // oldest fence; transcript records and the random handoff
+                // token still prevent ordinary duplicate publication.
+                guard let oldest = result.min(by: {
+                    (dates[$0] ?? .distantPast) < (dates[$1] ?? .distantPast)
+                }) else { return nil }
+                result.removeAll { $0 == oldest }
+                dates.removeValue(forKey: oldest)
+            }
+            result.append(token)
+            dates[token] = now
+        }
+        dates = dates.filter { result.contains($0.key) }
+        return result
     }
 
     @discardableResult
@@ -1904,9 +2102,15 @@ public final class SharedDictationTranscriptStore {
         in suppliedEnvelope: TranscriptEnvelope? = nil
     ) -> Bool {
         let existingEnvelope = suppliedEnvelope ?? loadTranscriptEnvelope()
-        var consumedTokens = (existingEnvelope?.consumedTokens ?? loadConsumedTokenIndex())
-            .filter { $0 != transcript.token }
-        consumedTokens.append(transcript.token)
+        let existingConsumedTokens = existingEnvelope?.consumedTokens ?? loadConsumedTokenIndex()
+        var consumedTokenDates = existingEnvelope?.consumedTokenDates ?? [:]
+        let now = Date()
+        guard let consumedTokens = appendTombstones(
+            [transcript.token],
+            to: existingConsumedTokens,
+            datedBy: &consumedTokenDates,
+            now: now
+        ) else { return false }
         var records = existingEnvelope?.records ?? loadLegacyRecords()
         records[transcript.token] = SharedDictationTranscript(
             sessionID: transcript.sessionID,
@@ -1922,13 +2126,14 @@ public final class SharedDictationTranscriptStore {
         deliveryLeases.removeValue(forKey: transcript.token)
         guard saveTranscriptEnvelope(TranscriptEnvelope(
             records: records,
-            consumedTokens: Array(consumedTokens.suffix(Self.consumedTokenIndexLimit)),
+            consumedTokens: consumedTokens,
+            consumedTokenDates: consumedTokenDates,
             pendingDeliveries: pendingDeliveries,
             deliveryLeases: deliveryLeases
         )) else { return false }
         if envelopeURL == nil {
             saveTokenIndex(
-                Array(consumedTokens.suffix(Self.consumedTokenIndexLimit)),
+                consumedTokens,
                 forKey: Key.consumedTokenIndex
             )
             defaults.set(transcript.token, forKey: Key.consumedToken)

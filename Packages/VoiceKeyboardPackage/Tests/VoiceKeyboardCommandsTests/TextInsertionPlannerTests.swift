@@ -425,6 +425,31 @@ final class TextInsertionPlannerTests: XCTestCase {
         )
     }
 
+    func testSentenceDeletionKeepsClosingQuoteFromPreviousSentence() {
+        let planner = TextInsertionPlanner()
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: "One. “Two.” Next"
+            ),
+            [.deleteBackward(count: deleteCount(" Next".count))]
+        )
+    }
+
+    func testSentenceDeletionRecognizesEthiopicFullStop() {
+        let planner = TextInsertionPlanner()
+        let context = "አንድ። ሁለት"
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteSentence)]),
+                documentContextBeforeInput: context
+            ),
+            [.deleteBackward(count: deleteCount(" ሁለት".count))]
+        )
+    }
+
     func testSentenceDeletionStopsAfterSingleLetterInitial() {
         let planner = TextInsertionPlanner()
 
@@ -455,6 +480,75 @@ final class TextInsertionPlannerTests: XCTestCase {
 
         let operations = planner.plan(transcript, documentContextBeforeInput: "hello world ")
         XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(6))])
+    }
+
+    func testPlansDeleteWordForNumbersWithUnicodeGroupingSpaces() {
+        let planner = TextInsertionPlanner()
+
+        for separator in ["\u{2007}", "\u{2009}"] {
+            let context = "1\(separator)234"
+            XCTAssertEqual(
+                planner.plan(
+                    ParsedTranscript(elements: [.command(.deleteWord)]),
+                    documentContextBeforeInput: context
+                ),
+                [.deleteBackward(count: deleteCount(context.count))],
+                context.debugDescription
+            )
+        }
+    }
+
+    func testPlansDeleteWordForNumberSeparatedFromPreviousWordByNBSP() {
+        let planner = TextInsertionPlanner()
+        let context = "foo\u{00A0}1\u{00A0}234"
+
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteWord)]),
+            documentContextBeforeInput: context
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(5))])
+    }
+
+    func testSentenceDeletionRecognizesCanadianSyllabicsFullStop() {
+        let planner = TextInsertionPlanner()
+        let context = "First᙮ Second"
+
+        let operations = planner.plan(
+            ParsedTranscript(elements: [.command(.deleteSentence)]),
+            documentContextBeforeInput: context
+        )
+
+        XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(" Second".count))])
+    }
+
+    func testPlansDeleteWordForSchemeLessHostName() {
+        let planner = TextInsertionPlanner()
+        let context = "visit example.com"
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: context
+            ),
+            [.deleteBackward(count: deleteCount("example.com".count))]
+        )
+    }
+
+    func testPlansDeleteWordForSchemeLessHostWithPortAndQuery() {
+        let planner = TextInsertionPlanner()
+
+        for context in ["visit example.com:8080", "visit example.com?q=1", "visit example.com#section"] {
+            let expectedToken = String(context.dropFirst("visit ".count))
+            XCTAssertEqual(
+                planner.plan(
+                    ParsedTranscript(elements: [.command(.deleteWord)]),
+                    documentContextBeforeInput: context
+                ),
+                [.deleteBackward(count: deleteCount(expectedToken.count))],
+                context
+            )
+        }
     }
 
     func testPlansDeleteAfterInsertedTextAgainstVirtualContext() {
@@ -674,7 +768,7 @@ final class TextInsertionPlannerTests: XCTestCase {
     func testDeleteWordTreatsUnicodeDecimalTokensAsOneWord() {
         let planner = TextInsertionPlanner()
 
-        for context in ["３．１４", "3｡14", "3﹒14"] {
+        for context in ["３．１４", "3｡14", "3﹒14", "٣٫١٤", "3,14", "３，１４", "1٬234", "1\u{00A0}234", "1\u{202F}234"] {
             XCTAssertEqual(
                 planner.plan(
                     ParsedTranscript(elements: [.command(.deleteWord)]),
@@ -682,6 +776,22 @@ final class TextInsertionPlannerTests: XCTestCase {
                 ),
                 [.deleteBackward(count: deleteCount(context.count))],
                 context
+            )
+        }
+    }
+
+    func testDeleteSentenceRecognizesAdditionalUnicodeTerminators() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        for terminator in ["․", "۔", "։"] {
+            XCTAssertEqual(
+                planner.plan(
+                    transcript,
+                    documentContextBeforeInput: "First\(terminator) Second"
+                ),
+                [.deleteBackward(count: deleteCount(7))],
+                terminator
             )
         }
     }

@@ -14,13 +14,11 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
-    func testParsesPunctuationAliasInsideLiteralTranscript() {
+    func testPunctuationAliasInsideOrdinaryProseRemainsLiteral() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 
         XCTAssertEqual(parser.parse("hello comma world").elements, [
-            .text("hello"),
-            .command(.insertText(",")),
-            .text("world")
+            .text("hello comma world")
         ])
     }
 
@@ -67,14 +65,17 @@ final class VoiceCommandParserTests: XCTestCase {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
         let transcript = "  \n\t"
 
-        XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)])
+        let parsed = parser.parse(transcript)
+        XCTAssertEqual(parsed.elements, [.text(transcript)])
     }
 
     func testJapaneseUnspacedExpansionHonorsElementLimit() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
         let transcript = String(repeating: "読点／", count: 600)
 
-        XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)])
+        let parsed = parser.parse(transcript)
+        XCTAssertEqual(parsed.elements, [.text(transcript)])
+        XCTAssertTrue(parsed.didOverflow)
     }
 
     func testDestructiveCommandsRemainLiteralWhenNaturalTextPrecedesThem() {
@@ -232,10 +233,75 @@ final class VoiceCommandParserTests: XCTestCase {
         for transcript in [
             "new line of business",
             "newline character",
-            "use open parenthesis"
+            "use open parenthesis",
+            "comma and period",
+            "space bar",
+            "open parenthesis or close parenthesis"
         ] {
             XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
         }
+    }
+
+    func testNaturalLanguageNounPhrasesBeginningWithAliasesRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in ["new line item", "space station", "period drama", "question mark icon"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testNaturalLanguageInstructionsUsingSensitiveAliasesRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in ["Press space to continue", "We quote Alice"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testDestructiveCommandDoesNotCrossTranscriptLineBreaks() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+        let transcript = "command\ndelete word"
+
+        XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)])
+    }
+
+    func testMultiWordCommandDoesNotCrossNonCanonicalWhitespace() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        for transcript in ["open\nparenthesis", "question\tmark", "new  line"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testNaturalLanguagePunctuationAliasWithUnlistedCueRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(
+            parser.parse("I prefer comma syntax").elements,
+            [.text("I prefer comma syntax")]
+        )
+    }
+
+    func testJapaneseNaturalLanguageConnectorsRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in [
+            "読点なら句点", "読点また句点", "読点ないし句点", "読点もしくは句点",
+            "読点若しくは句点", "読点並びに句点"
+        ] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testJapaneseImplicitCommandOverflowFallsBackWithOverflowMarker() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        let transcript = String(repeating: "読点／", count: 300)
+        let result = parser.parse(transcript)
+
+        XCTAssertTrue(result.didOverflow)
+        XCTAssertEqual(result.elements.count, 1)
+        XCTAssertEqual(result.elements.first, .text(transcript))
     }
 
     func testLiteralizedDestructivePhraseDoesNotExecuteLaterPunctuationCommand() {
@@ -307,10 +373,36 @@ final class VoiceCommandParserTests: XCTestCase {
         }
     }
 
+    func testJapaneseListsAndComparisonsRemainLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        for transcript in ["読点より句点", "読点、句点", "読点直後に句点"] {
+            XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
+        }
+    }
+
+    func testJapanesePostpositionAfterCommandAliasRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        XCTAssertEqual(parser.parse("読点後に句点").elements, [.text("読点後に句点")])
+    }
+
+    func testVeryLongJapaneseSegmentFallsBackBeforeImplicitRescan() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+        let transcript = String(repeating: "あ", count: 4_097)
+
+        let parsed = parser.parse(transcript)
+        XCTAssertEqual(parsed.elements, [.text(transcript)])
+        XCTAssertFalse(parsed.didOverflow)
+    }
+
     func testJapaneseParticlesPreventImplicitCommandSequenceParsing() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
-        for transcript in ["読点と句点", "改行や空白", "句点から読点"] {
+        for transcript in [
+            "読点と句点", "改行や空白", "句点から読点", "読点および句点",
+            "読点または句点", "読点か句点", "読点・句点"
+        ] {
             XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
         }
     }
@@ -390,11 +482,16 @@ final class VoiceCommandParserTests: XCTestCase {
     }
 
     func testNonLocalePrefixesDoNotEnableJapaneseAliases() {
-        for identifier in ["javascript", "japanese@calendar=japanese", ""] {
+        for identifier in ["javascript", "japanese@calendar=japanese", "ja-", "ja--JP", ""] {
             let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: identifier))
 
-            let result = parser.parse("こんにちは読点世界")
-            XCTAssertEqual(result.elements, [.text("こんにちは読点世界")], identifier)
+            let result = parser.parse("読点")
+            XCTAssertEqual(result.elements, [.text("読点")], identifier)
         }
+
+        let malformedSubtagParser = VoiceCommandParser(
+            locale: VoiceKeyboardLocale(identifier: "ja-💣")
+        )
+        XCTAssertEqual(malformedSubtagParser.parse("読点").elements, [.text("読点")])
     }
 }

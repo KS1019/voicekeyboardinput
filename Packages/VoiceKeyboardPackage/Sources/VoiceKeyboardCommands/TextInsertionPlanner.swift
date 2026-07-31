@@ -176,11 +176,44 @@ package struct TextInsertionPlanner: Sendable {
         let trimmed = context.dropLast(trailingWhitespaceCount)
         guard !trimmed.isEmpty else { return 0 }
 
-        let trailingToken = trimmed.split(whereSeparator: \.isWhitespace).last.map(String.init) ?? ""
-        let decimalSeparators: Set<Character> = [".", "．", "｡", "﹒"]
+        let characters = Array(trimmed)
+        var tokenStart = 0
+        for index in stride(from: characters.count - 1, through: 0, by: -1) {
+            let character = characters[index]
+            guard character.isWhitespace else {
+                continue
+            }
+            let isNumericGroupingSeparator = (character == "\u{2007}" || character == "\u{2009}")
+                && index > 0
+                && index + 1 < characters.count
+                && characters[index - 1].isNumber
+                && characters[index + 1].isNumber
+            let isNonBreakingNumericGroupingSeparator = (character == "\u{00A0}" || character == "\u{202F}")
+                && index > 0
+                && index + 1 < characters.count
+                && characters[index - 1].isNumber
+                && characters[index + 1].isNumber
+            if !isNumericGroupingSeparator && !isNonBreakingNumericGroupingSeparator {
+                tokenStart = index + 1
+                break
+            }
+        }
+        let trailingToken = String(characters[tokenStart...])
+        let decimalSeparators: Set<Character> = [
+            ".", "．", "｡", "﹒", "․", ",", "，", "٫", "٬", "\u{00A0}", "\u{202F}", "\u{2007}", "\u{2009}"
+        ]
+        let trailingCharacters = Array(trailingToken)
+        let hasNumericSeparator = trailingCharacters.indices.contains { index in
+            guard decimalSeparators.contains(trailingCharacters[index]),
+                  index > trailingCharacters.startIndex,
+                  index + 1 < trailingCharacters.endIndex else { return false }
+            return trailingCharacters[index - 1].isNumber
+                && trailingCharacters[index + 1].isNumber
+        }
         if trailingToken.contains("@")
             || trailingToken.contains("://")
-            || trailingToken.contains(where: { decimalSeparators.contains($0) }) {
+            || isSchemeLessHostToken(trailingToken)
+            || hasNumericSeparator {
             // Treat URLs, e-mail addresses, and decimal-like tokens as one
             // word. Removing only `com` or `14` leaves a malformed token.
             return trailingWhitespaceCount + trailingToken.count
@@ -190,18 +223,45 @@ package struct TextInsertionPlanner: Sendable {
             return trailingWhitespaceCount + 1
         }
         var count = 0
-        let characters = Array(trimmed)
-        for (index, character) in characters.enumerated().reversed() {
+        let wordCharacters = characters
+        for (index, character) in wordCharacters.enumerated().reversed() {
             let isInternalApostrophe = (character == "'" || character == "’")
                 && index > 0
-                && index + 1 < characters.count
-                && characters[index - 1].isWordCharacter
-                && characters[index + 1].isWordCharacter
+                && index + 1 < wordCharacters.count
+                && wordCharacters[index - 1].isWordCharacter
+                && wordCharacters[index + 1].isWordCharacter
             guard (character.isLetter || character.isNumber || character == "_" || isInternalApostrophe),
                   !character.isJapaneseText else { break }
             count += 1
         }
         return trailingWhitespaceCount + max(count, 1)
+    }
+
+    private func isSchemeLessHostToken(_ token: String) -> Bool {
+        let authority = token
+            .split(whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" })
+            .first
+            .map(String.init) ?? token
+        let host: String
+        if let colon = authority.lastIndex(of: ":") {
+            let port = authority[authority.index(after: colon)...]
+            guard !port.isEmpty, port.allSatisfy(\.isNumber) else { return false }
+            host = String(authority[..<colon])
+        } else {
+            host = authority
+        }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2,
+              labels.allSatisfy({ label in
+                  !label.isEmpty
+                      && label.first?.isWordCharacter == true
+                      && label.last?.isWordCharacter == true
+                      && label.allSatisfy { $0.isWordCharacter || $0 == "-" }
+              }) else {
+            return false
+        }
+        let topLevelLabel = labels[labels.index(before: labels.endIndex)]
+        return topLevelLabel.count >= 2 && topLevelLabel.allSatisfy(\.isLetter)
     }
 
     private func deletingSuffix(_ count: Int, from context: String) -> String {
@@ -219,10 +279,12 @@ package struct TextInsertionPlanner: Sendable {
         // deletion never crosses a Windows-style line boundary.
         let sentenceTerminators: Set<Character> = [
             ".", "?", "!", "\n", "\r", "\r\n", "\u{85}", "\u{2028}", "\u{2029}",
-            "。", "？", "！", "…", "．", "｡", "﹒"
+            "。", "？", "！", "…", "．", "｡", "﹒", "․", "۔", "։", "।", "॥", "؟", "።", "᙮", "᠃", "᠉"
         ]
         var count = 0
         var hasSeenSentenceBody = false
+        var pendingClosingDelimiterCount = 0
+        var stoppedAtSentenceBoundary = false
 
         let trailingClosingDelimiterCount = trimmed.reversed().prefix { $0.isSentenceClosingDelimiter }.count
         count += trailingClosingDelimiterCount
@@ -230,11 +292,19 @@ package struct TextInsertionPlanner: Sendable {
         let sentenceBody = trimmed.dropLast(trailingClosingDelimiterCount)
         for index in sentenceBody.indices.reversed() {
             let character = sentenceBody[index]
+            if character.isSentenceClosingDelimiter {
+                // Keep a closing quote/parenthesis pending until we know
+                // whether its terminator belongs to the sentence being
+                // deleted. With a following sentence, it closes the prior
+                // sentence and must remain untouched.
+                pendingClosingDelimiterCount += 1
+                continue
+            }
             let previousIndex = index == sentenceBody.startIndex
                 ? nil
                 : sentenceBody.index(before: index)
             let nextIndex = sentenceBody.index(after: index)
-            let isDecimalPoint = [".", "．", "｡", "﹒"].contains(character)
+            let isDecimalPoint = [".", "．", "｡", "﹒", "․", ",", "，", "٫", "٬"].contains(character)
                 && previousIndex.map { sentenceBody[$0].isNumber } == true
                 && nextIndex < sentenceBody.endIndex
                 && sentenceBody[nextIndex].isNumber
@@ -242,14 +312,20 @@ package struct TextInsertionPlanner: Sendable {
                 && !isDecimalPoint
                 && isSentenceBoundaryCandidate(character, at: index, in: sentenceBody)
             if isSentenceBoundary, hasSeenSentenceBody {
+                stoppedAtSentenceBoundary = true
                 break
             }
+            count += pendingClosingDelimiterCount
+            pendingClosingDelimiterCount = 0
             if !isSentenceBoundary {
                 hasSeenSentenceBody = true
             }
             count += 1
         }
 
+        if !stoppedAtSentenceBoundary {
+            count += pendingClosingDelimiterCount
+        }
         return trailingWhitespaceCount + count
     }
 

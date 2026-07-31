@@ -610,7 +610,7 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let model = VoiceInputLaunchModel(sessionController: controller)
 
         let firstStart = Task { await model.startDictation() }
-        await waitForStatus(.requestingPermission, in: model)
+        await waitForStatus(.microphoneActive(peakPower: nil), in: model)
 
         let secondStart = Task { await model.startDictation() }
         for _ in 0..<10 {
@@ -622,6 +622,48 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         controller.finish(with: .microphoneActive(peakPower: -9))
         await firstStart.value
         await secondStart.value
+    }
+
+    func testStopCannotBeOverwrittenByLateStartResult() async {
+        let controller = SuspendedDictationSessionController()
+        let model = VoiceInputLaunchModel(sessionController: controller)
+
+        let startTask = Task { await model.startDictation() }
+        await waitForStatus(.microphoneActive(peakPower: nil), in: model)
+
+        await model.stopDictation()
+        XCTAssertEqual(model.status, .sessionReady)
+
+        controller.finish(with: .transcriptShared("late result"))
+        await startTask.value
+
+        XCTAssertEqual(model.status, .sessionReady)
+    }
+
+    func testStopSerializesAReplacementStartUntilCancellationFinishes() async {
+        let controller = SuspendedDictationSessionController(suspendCancellation: true)
+        let model = VoiceInputLaunchModel(sessionController: controller)
+
+        let firstStart = Task { await model.startDictation() }
+        await waitForStatus(.microphoneActive(peakPower: nil), in: model)
+
+        let stopTask = Task { await model.stopDictation() }
+        for _ in 0..<20 where controller.recordedCancelCallCount() == 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(controller.recordedCancelCallCount(), 1)
+
+        controller.finish(with: .microphoneActive(peakPower: -9))
+        await firstStart.value
+
+        let replacementStart = Task { await model.startDictation() }
+        await replacementStart.value
+        XCTAssertEqual(controller.recordedStartCallCount(), 1)
+        XCTAssertEqual(model.status, .microphoneActive(peakPower: nil))
+
+        controller.finishCancellation()
+        await stopTask.value
+        XCTAssertEqual(model.status, .sessionReady)
     }
 
     func testDictationRunCancellingTimeoutDoesNotCompleteLater() async throws {
@@ -990,6 +1032,13 @@ private final class SuspendedPreparationDictationSessionController: DictationSes
 private final class SuspendedDictationSessionController: DictationSessionControlling {
     private var continuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>] = []
     private var startCallCount = 0
+    private var cancelCallCount = 0
+    private var cancellationContinuation: CheckedContinuation<Void, Never>?
+    private let suspendCancellation: Bool
+
+    init(suspendCancellation: Bool = false) {
+        self.suspendCancellation = suspendCancellation
+    }
 
     func prepareSession() async -> VoiceInputLaunchStatus {
         .sessionReady
@@ -1011,7 +1060,13 @@ private final class SuspendedDictationSessionController: DictationSessionControl
 
     func setAppAvailable(_ isAvailable: Bool) {}
 
-    func cancelActiveSession() async {}
+    func cancelActiveSession() async {
+        cancelCallCount += 1
+        guard suspendCancellation else { return }
+        await withCheckedContinuation { continuation in
+            cancellationContinuation = continuation
+        }
+    }
 
     func finish(with status: VoiceInputLaunchStatus) {
         let continuations = continuations
@@ -1021,5 +1076,14 @@ private final class SuspendedDictationSessionController: DictationSessionControl
 
     func recordedStartCallCount() -> Int {
         startCallCount
+    }
+
+    func recordedCancelCallCount() -> Int {
+        cancelCallCount
+    }
+
+    func finishCancellation() {
+        cancellationContinuation?.resume()
+        cancellationContinuation = nil
     }
 }

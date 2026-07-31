@@ -40,12 +40,16 @@ final class KeyboardRootView: UIView {
         static let returnButton = "keyboard.return"
     }
 
-    private let transcriptGlassEffect = UIGlassEffect(style: .clear)
+    // Text needs an adaptive backdrop. The regular Liquid Glass material
+    // keeps the surface translucent while preserving label contrast in both
+    // appearances; clear glass is reserved for media-rich backgrounds.
+    private let transcriptGlassEffect = UIGlassEffect(style: .regular)
     private lazy var transcriptContainerView = UIVisualEffectView(
         effect: transcriptGlassEffect
     )
     private let transcriptIconView = UIImageView(image: UIImage(systemName: "waveform"))
     private let transcriptLabel = UILabel()
+    private let statusLabel = UILabel()
     private let voiceActivityLabel = UILabel()
     private let voiceActivityMeterView = VoiceActivityMeterView()
     private let voiceActivityStrip = UIStackView()
@@ -109,6 +113,14 @@ final class KeyboardRootView: UIView {
         transcriptLabel.adjustsFontForContentSizeCategory = true
         transcriptLabel.minimumScaleFactor = 0.88
         transcriptLabel.isAccessibilityElement = false
+        transcriptLabel.textColor = .label
+
+        statusLabel.font = .preferredFont(forTextStyle: .caption1)
+        statusLabel.adjustsFontForContentSizeCategory = true
+        statusLabel.textColor = .secondaryLabel
+        statusLabel.numberOfLines = 2
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.isAccessibilityElement = false
 
         configureCaptionLabel(voiceActivityLabel)
         voiceActivityStrip.addArrangedSubview(voiceActivityLabel)
@@ -187,7 +199,11 @@ final class KeyboardRootView: UIView {
             minimumHeight
         ])
 
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: KeyboardRootView, _) in
+        registerForTraitChanges([
+            UITraitUserInterfaceStyle.self,
+            UITraitUserInterfaceLevel.self,
+            UITraitAccessibilityContrast.self
+        ]) { (view: KeyboardRootView, _) in
             // CALayer stores a resolved CGColor rather than the dynamic
             // UIColor provider. Reapply Liquid Glass chrome after an
             // appearance change so a border resolved in light mode cannot
@@ -212,7 +228,13 @@ final class KeyboardRootView: UIView {
         transcriptIconView.tintColor = .secondaryLabel
         transcriptIconView.translatesAutoresizingMaskIntoConstraints = false
 
-        let transcriptStack = UIStackView(arrangedSubviews: [transcriptIconView, transcriptLabel])
+        let transcriptTextStack = UIStackView(arrangedSubviews: [transcriptLabel, statusLabel])
+        transcriptTextStack.axis = .vertical
+        transcriptTextStack.alignment = .fill
+        transcriptTextStack.spacing = 2
+        transcriptTextStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let transcriptStack = UIStackView(arrangedSubviews: [transcriptIconView, transcriptTextStack])
         transcriptStack.axis = .horizontal
         transcriptStack.alignment = .center
         transcriptStack.spacing = Metrics.stackSpacing
@@ -337,7 +359,7 @@ final class KeyboardRootView: UIView {
         let color = presentation.tone.uiColor
 
         voiceActivityLabel.text = presentation.title
-        voiceActivityLabel.textColor = color
+        voiceActivityLabel.textColor = presentation.tone.uiForegroundColor
         voiceActivityStrip.accessibilityValue = presentation.accessibilityValue
         voiceActivityMeterView.render(snapshot: presentation.meterSnapshot, color: color)
         updateVoiceInputAccessibilityValue(activity: presentation.accessibilityValue)
@@ -374,16 +396,17 @@ final class KeyboardRootView: UIView {
 
         switch tone {
         case .positive:
-            // `systemBackground` is a dynamic color. It keeps the positive
-            // control readable when the system appearance changes instead of
-            // pinning the glyph and title to a light-mode-only color.
-            configuration.baseForegroundColor = .systemBackground
-            configuration.baseBackgroundColor = .systemGreen.withAlphaComponent(0.82)
+            // Keep the glyph and title on the system label color. A strong
+            // green fill has insufficient contrast in some light-mode
+            // accessibility combinations, while a translucent tint retains
+            // the Liquid Glass material and stays legible in both appearances.
+            configuration.baseForegroundColor = .label
+            configuration.baseBackgroundColor = .systemGreen.withAlphaComponent(0.22)
         case .warning:
-            configuration.baseForegroundColor = .systemOrange
+            configuration.baseForegroundColor = .label
             configuration.baseBackgroundColor = .systemOrange.withAlphaComponent(0.22)
         case .critical:
-            configuration.baseForegroundColor = .systemRed
+            configuration.baseForegroundColor = .label
             configuration.baseBackgroundColor = .systemRed.withAlphaComponent(0.20)
         case .muted:
             configuration.baseForegroundColor = .label
@@ -399,6 +422,7 @@ final class KeyboardRootView: UIView {
     }
 
     private func updateStatus(_ message: String, announce: Bool = false) {
+        statusLabel.text = message
         if announce {
             UIAccessibility.post(notification: .announcement, argument: message)
         }
@@ -417,7 +441,7 @@ final class KeyboardRootView: UIView {
 
     private func updateAdaptiveChromeColors() {
         let color = transcriptTone.uiColor
-        transcriptIconView.tintColor = color
+        transcriptIconView.tintColor = transcriptTone.uiForegroundColor
         transcriptContainerView.layer.borderColor = color.withAlphaComponent(0.22).cgColor
         transcriptGlassEffect.tintColor = color.withAlphaComponent(0.12)
         controlsContainerView.layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor

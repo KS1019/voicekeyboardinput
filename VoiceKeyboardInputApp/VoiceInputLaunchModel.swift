@@ -54,6 +54,15 @@ enum VoiceInputLaunchStatus: Equatable {
             message
         }
     }
+
+    var isStoppable: Bool {
+        switch self {
+        case .microphoneActive, .requestingPermission:
+            true
+        case .idle, .sessionReady, .transcriptShared, .permissionDenied, .failed:
+            false
+        }
+    }
 }
 
 @MainActor
@@ -63,6 +72,9 @@ final class VoiceInputLaunchModel {
     private var routeStartTask: Task<Void, Never>?
     private var sessionPreparationTask: Task<VoiceInputLaunchStatus, Never>?
     private var sessionPreparationGeneration: UInt64 = 0
+    private var startInFlight = false
+    private var stopInFlight = false
+    private var startGeneration: UInt64 = 0
 
     var status = VoiceInputLaunchStatus.idle
 
@@ -87,7 +99,12 @@ final class VoiceInputLaunchModel {
     }
 
     func startDictation() async {
-        guard status != .requestingPermission else { return }
+        guard !startInFlight, !stopInFlight else { return }
+        startInFlight = true
+        defer { startInFlight = false }
+        startGeneration &+= 1
+        let generation = startGeneration
+
         let preparationStatus = await prepareSessionResult()
         guard case .sessionReady = preparationStatus else {
             status = preparationStatus
@@ -95,11 +112,22 @@ final class VoiceInputLaunchModel {
         }
         guard status != .requestingPermission else { return }
         status = .requestingPermission
-        status = await sessionController.startFromContainingApp()
+        // Keep the control state truthful while the app-side audio session
+        // and recognizer are still running. The final result arrives later;
+        // users must be able to issue Stop during that interval.
+        status = .microphoneActive(peakPower: nil)
+        let result = await sessionController.startFromContainingApp()
+        guard generation == startGeneration else { return }
+        status = result
     }
 
     private func startDictation(forKeyboardSessionID sessionID: String) async {
-        guard status != .requestingPermission else { return }
+        guard !startInFlight, !stopInFlight else { return }
+        startInFlight = true
+        defer { startInFlight = false }
+        startGeneration &+= 1
+        let generation = startGeneration
+
         let preparationStatus = await prepareSessionResult()
         guard case .sessionReady = preparationStatus else {
             status = preparationStatus
@@ -107,7 +135,23 @@ final class VoiceInputLaunchModel {
         }
         guard status != .requestingPermission else { return }
         status = .requestingPermission
-        status = await sessionController.startFromKeyboardSession(sessionID: sessionID)
+        status = .microphoneActive(peakPower: nil)
+        let result = await sessionController.startFromKeyboardSession(sessionID: sessionID)
+        guard generation == startGeneration else { return }
+        status = result
+    }
+
+    func stopDictation() async {
+        guard status.isStoppable, !stopInFlight else { return }
+        stopInFlight = true
+        defer { stopInFlight = false }
+        // A late start continuation must not restore a terminal result after
+        // Stop has already published the session-ready state.
+        startGeneration &+= 1
+        let generation = startGeneration
+        await sessionController.cancelActiveSession()
+        guard generation == startGeneration else { return }
+        status = .sessionReady
     }
 
     func prepareSession() async {
@@ -1095,7 +1139,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 status = resolvedStatus
             }
             switch status {
-            case .commandAcknowledged, .recording, .transcribing,
+            case .commandAcknowledged, .recording, .transcribing, .failed,
                  .idle, .commandPending, .cancelled:
                 // The transcript is the durable completion marker. Promote
                 // it even when status publication was interrupted or a newer
@@ -1105,10 +1149,26 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                         .transcriptReady(token: transcript.commandToken),
                         allowRecoveryFromTranscriptReady: true
                     )
-                }) == true else {
-                    let replacement = commands.first {
-                        ($0.kind == .stop || $0.kind == .cancel)
-                            && $0.replacesCommandToken == transcript.commandToken
+                    }) == true else {
+                        let replacement = commands.reversed().first {
+                            guard $0.kind == .stop || $0.kind == .cancel else { return false }
+                            if $0.replacesCommandToken == transcript.commandToken { return true }
+                            return $0.replacesCommandToken == nil
+                                && $0.sessionID == command.sessionID
+                        }
+                    if let replacement,
+                       replacement.kind == .stop,
+                       replacement.isExpired(at: Date()),
+                       await sessionStoreCall({
+                           $0.recoverCompletedTranscriptAfterExpiredStop(
+                               sourceCommandToken: transcript.commandToken,
+                               throughCommandToken: replacement.token
+                           )
+                       }) == true {
+                        // The completed transcript is the durable result. An
+                        // expired Stop may recover it only when no live claim
+                        // remains; Cancel never uses this fallback.
+                        continue
                     }
                     if let replacement,
                        let ownerToken = heartbeatToken,
@@ -1136,7 +1196,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                     if replacement != nil { continue }
                     return false
                 }
-            case .transcriptReady, .failed:
+            case .transcriptReady:
                 break
             }
         }

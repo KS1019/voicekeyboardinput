@@ -51,6 +51,12 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
             )
         }
         let parsed = parser.parse(transcript)
+        guard !parsed.didOverflow else {
+            return LiteralTranscriptPreview(
+                elements: [.text("Transcript contains too many command elements to preview safely.")],
+                operations: []
+            )
+        }
         guard let operations = planner.plan(
             parsed,
             documentContextBeforeInput: documentContextBeforeInput,
@@ -77,6 +83,7 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
             return nil
         }
         let parsed = parser.parse(transcript)
+        guard !parsed.didOverflow else { return nil }
         guard let operations = planner.plan(
                   parsed,
                   documentContextBeforeInput: documentContextBeforeInput,

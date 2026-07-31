@@ -4,11 +4,30 @@ import VoiceKeyboardCommandPipeline
 import VoiceKeyboardModels
 import VoiceKeyboardPresentation
 
+private actor LiteralTranscriptPreviewWorker {
+    func preview(
+        using pipeline: LiteralTranscriptCommandPipeline,
+        transcript: String,
+        documentContext: String
+    ) -> LiteralTranscriptPreview {
+        guard !Task.isCancelled else {
+            return LiteralTranscriptPreview(elements: [], operations: [])
+        }
+        return pipeline.preview(
+            for: transcript,
+            documentContextBeforeInput: documentContext
+        )
+    }
+}
+
 struct ContentView: View {
     @State private var sampleTranscript = "comma newline"
     @State private var commandPreview = CommandPreviewPresentationSnapshot.empty
     @State private var keyboardQAText = ""
     @State private var showsDeveloperDetails = false
+    @State private var previewTask: Task<Void, Never>?
+    @State private var previewGeneration: UInt64 = 0
+    @State private var previewWorker = LiteralTranscriptPreviewWorker()
     private let voiceInputLaunchModel: VoiceInputLaunchModel
 
     private let pipeline = LiteralTranscriptCommandPipeline(
@@ -34,6 +53,10 @@ struct ContentView: View {
             }
             .background(appBackground)
             .navigationTitle("Voice Keyboard")
+        }
+        .onDisappear {
+            previewTask?.cancel()
+            previewTask = nil
         }
     }
 
@@ -97,7 +120,8 @@ struct ContentView: View {
                             .stroke(statusTint.opacity(0.28), lineWidth: 1)
                         Image(systemName: "waveform")
                             .font(.system(size: 28, weight: .semibold))
-                            .foregroundStyle(statusTint)
+                            .foregroundStyle(statusForeground)
+                            .accessibilityHidden(true)
                     }
                     .frame(width: 64, height: 64)
 
@@ -113,10 +137,17 @@ struct ContentView: View {
 
                 Button {
                     Task {
-                        await voiceInputLaunchModel.startDictation()
+                        if voiceInputLaunchModel.status.isStoppable {
+                            await voiceInputLaunchModel.stopDictation()
+                        } else {
+                            await voiceInputLaunchModel.startDictation()
+                        }
                     }
                 } label: {
-                    Label("Start Voice Input", systemImage: "mic.fill")
+                    Label(
+                        voiceInputLaunchModel.status.isStoppable ? "Stop Voice Input" : "Start Voice Input",
+                        systemImage: voiceInputLaunchModel.status.isStoppable ? "stop.fill" : "mic.fill"
+                    )
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -168,7 +199,7 @@ struct ContentView: View {
     private var commandPreviewPanel: some View {
         Panel("Command Preview") {
             VStack(alignment: .leading, spacing: 12) {
-                TextField("Transcript", text: $sampleTranscript)
+                TextField("Transcript", text: boundedBinding(for: $sampleTranscript))
                     .textFieldStyle(.roundedBorder)
 
                 Button("Preview Commands") {
@@ -217,10 +248,24 @@ struct ContentView: View {
         }
     }
 
+    private var statusForeground: Color {
+        switch voiceInputLaunchModel.status {
+        case .failed, .permissionDenied, .requestingPermission:
+            .primary
+        case .microphoneActive, .transcriptShared, .idle, .sessionReady:
+            statusTint
+        }
+    }
+
     private var statusBadge: some View {
-        Label(voiceInputLaunchModel.status.title, systemImage: "record.circle")
-            .font(.headline)
-            .foregroundStyle(statusTint)
+        HStack(spacing: 6) {
+            Image(systemName: "record.circle")
+                .foregroundStyle(statusForeground)
+                .accessibilityHidden(true)
+            Text(voiceInputLaunchModel.status.title)
+                .foregroundStyle(.primary)
+        }
+        .font(.headline)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(statusTint.opacity(0.12), in: Capsule())
@@ -232,12 +277,36 @@ struct ContentView: View {
     }
 
     private func previewSampleTranscript() {
-        let preview = pipeline.preview(
-            for: sampleTranscript,
-            documentContextBeforeInput: ""
-        )
-        commandPreview = CommandPreviewPresentationSnapshot(
-            operations: preview.operations
+        previewTask?.cancel()
+        previewGeneration &+= 1
+        let generation = previewGeneration
+        let pipeline = pipeline
+        let transcript = sampleTranscript
+        previewTask = Task { @MainActor in
+            let preview = await previewWorker.preview(
+                using: pipeline,
+                transcript: transcript,
+                documentContext: ""
+            )
+            guard !Task.isCancelled, generation == previewGeneration else { return }
+            commandPreview = CommandPreviewPresentationSnapshot(
+                operations: preview.operations
+            )
+        }
+    }
+
+    private func boundedBinding(for source: Binding<String>) -> Binding<String> {
+        Binding(
+            get: { source.wrappedValue },
+            set: {
+                let bounded = VoiceKeyboardTextLimits.bounded($0)
+                guard bounded != source.wrappedValue else { return }
+                source.wrappedValue = bounded
+                previewGeneration &+= 1
+                previewTask?.cancel()
+                previewTask = nil
+                commandPreview = .empty
+            }
         )
     }
 
@@ -297,9 +366,9 @@ private struct Panel<Content: View>: View {
 private extension VoiceInputLaunchStatus {
     var isActive: Bool {
         switch self {
-        case .microphoneActive, .transcriptShared, .requestingPermission:
+        case .microphoneActive, .requestingPermission:
             true
-        case .failed, .idle, .sessionReady, .permissionDenied:
+        case .failed, .idle, .sessionReady, .permissionDenied, .transcriptShared:
             false
         }
     }

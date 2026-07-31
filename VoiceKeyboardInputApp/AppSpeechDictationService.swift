@@ -136,6 +136,8 @@ final class AppSpeechDictationRun {
         private let request: SFSpeechAudioBufferRecognitionRequest?
         private let tapIsInstalled: Bool
         private let engineStartTask: Task<AppAudioEngineOperationStatus, Never>?
+        private let teardownLock = NSLock()
+        private var teardownTask: Task<Bool, Never>?
 
         init(
             gate: AudioTapGate?,
@@ -152,30 +154,39 @@ final class AppSpeechDictationRun {
         }
 
         func waitForCompletion(timeout: TimeInterval) async -> Bool {
-            if let engineStartTask,
-               await waitForTask(engineStartTask, timeout: timeout) == false {
-                return false
-            }
+            let task = retainedTeardownTask()
             return await withCheckedContinuation { continuation in
-                DispatchQueue.global(qos: .utility).async { [self] in
-                    guard gate?.waitUntilDrained(timeout: timeout) ?? true else {
-                        continuation.resume(returning: false)
-                        return
-                    }
-                    performTeardown()
-                    continuation.resume(returning: true)
+                let completionGate = AudioSessionCompletionGate()
+                Task {
+                    let result = await task.value
+                    guard completionGate.finish() else { return }
+                    continuation.resume(returning: result)
+                }
+                Task {
+                    try? await Task.sleep(for: .seconds(timeout))
+                    guard completionGate.finish() else { return }
+                    continuation.resume(returning: false)
                 }
             }
         }
 
-        func quarantine() -> Task<Void, Never> {
-            Task.detached { [self] in
+        func quarantine() -> Task<Bool, Never> {
+            retainedTeardownTask()
+        }
+
+        private func retainedTeardownTask() -> Task<Bool, Never> {
+            teardownLock.lock()
+            defer { teardownLock.unlock() }
+            if let teardownTask { return teardownTask }
+            let task = Task.detached { [self] in
                 if let engineStartTask {
                     _ = await engineStartTask.value
                 }
                 gate?.waitUntilDrained()
-                performTeardown()
+                return performTeardown()
             }
+            teardownTask = task
+            return task
         }
 
         private func waitForTask(
@@ -197,12 +208,11 @@ final class AppSpeechDictationRun {
             }
         }
 
-        private func performTeardown() {
-            if tapIsInstalled {
-                _ = VKRemoveAudioInputTap(engine.inputNode)
-            }
-            _ = VKStopAudioEngine(engine)
+        private func performTeardown() -> Bool {
+            let didRemoveTap = !tapIsInstalled || VKRemoveAudioEngineInputTap(engine)
+            let didStopEngine = VKStopAudioEngine(engine)
             request?.endAudio()
+            return didRemoveTap && didStopEngine
         }
     }
 
@@ -251,7 +261,10 @@ final class AppSpeechDictationRun {
     private var didStart = false
     private var tapIsInstalled = false
     private var lingeringAudioEngineStartTask: Task<AppAudioEngineOperationStatus, Never>?
-    private var lingeringAudioTapCleanupTask: Task<Void, Never>?
+    private var lingeringAudioTapCleanupTask: Task<Bool, Never>?
+    private var terminalAudioCleanup: DeferredAudioEngineCleanup?
+    private var audioEngineQuiesced = false
+    private var audioCleanupNeedsLateDeactivation = false
     private var drainWatchdogTask: Task<Void, Never>?
     private var pendingStopTask: Task<Void, Never>?
     private var audioTapGate: AudioTapGate?
@@ -338,8 +351,8 @@ final class AppSpeechDictationRun {
             throw pendingError
         }
 
-        let inputNode = engine.inputNode
-        guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+        guard let inputNode = VKAudioEngineInputNode(engine),
+              let format = VKAudioEngineInputFormat(engine) else {
             await cleanup()
             throw AppSpeechDictationError.audioInputUnavailable
         }
@@ -492,13 +505,16 @@ final class AppSpeechDictationRun {
             tapIsInstalled: tapIsInstalled,
             engineStartTask: nil
         )
-        let cleanupTask = Task.detached {
+        let coordinator = AppAudioSessionOperationCoordinator.shared
+        let cleanupTask = Task.detached { () -> Bool in
             guard await cleanup.waitForCompletion(timeout: 2) else {
-                await cleanup.quarantine().value
-                return
+                coordinator.markTerminal()
+                let didTeardown = await cleanup.quarantine().value
+                if !didTeardown { coordinator.markTerminal() }
+                return didTeardown
             }
+            return true
         }
-        tapIsInstalled = false
         lingeringAudioTapCleanupTask = cleanupTask
         // Do not wait indefinitely for a broken route or a stuck Speech
         // append callback before completing User Stop. The normal cleanup
@@ -518,12 +534,27 @@ final class AppSpeechDictationRun {
             }
         }
         Task { [weak self] in
-            await cleanupTask.value
+            let didTeardown = await cleanupTask.value
             await MainActor.run {
                 guard let self, self.lingeringAudioTapCleanupTask != nil else { return }
-                self.lingeringAudioTapCleanupTask = nil
                 self.drainWatchdogTask?.cancel()
                 self.drainWatchdogTask = nil
+                guard didTeardown else {
+                    self.terminalAudioCleanup = cleanup
+                    coordinator.markTerminal()
+                    self.complete(.failure(AppSpeechDictationError.audioTapDrainTimedOut))
+                    return
+                }
+                self.lingeringAudioTapCleanupTask = nil
+                self.tapIsInstalled = false
+                self.audioEngineQuiesced = true
+                if self.didFinish, self.audioCleanupNeedsLateDeactivation {
+                    self.audioCleanupNeedsLateDeactivation = false
+                    Task { @MainActor [weak self] in
+                        await self?.cleanup()
+                    }
+                }
+                guard !self.didFinish else { return }
                 self.startFinalizationTimeout()
             }
         }
@@ -748,17 +779,16 @@ final class AppSpeechDictationRun {
             let didFinish = await waitForAudioCleanup(lingeringAudioTapCleanupTask, timeout: 2)
             if !didFinish {
                 coordinator.markTerminal()
-                coordinator.beginDeactivationPending()
-                releaseAudioSessionOwnershipIfSafe()
-                let cleanupTask = lingeringAudioTapCleanupTask
-                Task { @MainActor [self] in
-                    await cleanupTask.value
-                    self.lingeringAudioTapCleanupTask = nil
-                    await self.finishDeferredAudioTapCleanup(session)
-                }
+                audioCleanupNeedsLateDeactivation = true
+                // The task retains the engine, tap gate, and request until
+                // teardown returns. A hard failure keeps the coordinator
+                // terminal and deliberately retains session ownership; a
+                // later run must never deactivate an unknown graph.
                 return
             }
             self.lingeringAudioTapCleanupTask = nil
+            self.tapIsInstalled = false
+            self.audioEngineQuiesced = true
         }
         let hasPendingSessionOperation = coordinator.hasPendingSessionOperation
         if hasPendingSessionOperation {
@@ -766,72 +796,71 @@ final class AppSpeechDictationRun {
             // later run to reuse the shared session before that call settles.
             coordinator.markTerminal()
         }
-        let deactivationToken = hasPendingSessionOperation
-            ? nil
-            : await acquireDeactivationToken()
         let requestToEnd = self.request
         self.request = nil
-        let engineCleanup = DeferredAudioEngineCleanup(
-            gate: audioTapGate,
-            engine: engine,
-            request: requestToEnd,
-            tapIsInstalled: tapIsInstalled,
-            engineStartTask: lingeringAudioEngineStartTask
-        )
-        let didCompleteEngineCleanup = await engineCleanup.waitForCompletion(timeout: 2)
-        tapIsInstalled = false
-        if didCompleteEngineCleanup {
-            if coordinator.hasPendingSessionOperation {
-                scheduleDeferredAudioSessionDeactivation(session)
-                releaseAudioSessionOwnershipIfSafe()
-                return
-            }
-            guard let deactivationToken else {
-                scheduleDeferredAudioSessionDeactivation(session)
-                releaseAudioSessionOwnershipIfSafe()
-                return
-            }
-            if await deactivateAudioSession(session, operationToken: deactivationToken) {
-                coordinator.completeDeactivationPending()
-            }
-            releaseAudioSessionOwnershipIfSafe()
-        } else {
-            let quarantineTask = engineCleanup.quarantine()
-            Task { @MainActor [self] in
-                let didFinishQuarantine = await waitForAudioCleanup(quarantineTask, timeout: 2)
-                if !didFinishQuarantine {
-                    AppAudioSessionOperationCoordinator.shared.markTerminal()
-                    // Do not touch AVAudioSession while AVAudioEngine.start() or a tap
-                    // callback is still in flight. The terminal state prevents a new
-                    // run from starting; a detached continuation performs cleanup only
-                    // after the engine operation has actually quiesced.
-                    Task { @MainActor [self] in
-                        await quarantineTask.value
-                        if let deactivationToken {
-                            if await self.deactivateAudioSession(
-                                session,
-                                operationToken: deactivationToken
-                            ) {
-                                coordinator.completeDeactivationPending()
-                            }
-                            self.releaseAudioSessionOwnershipIfSafe()
-                        } else {
-                            self.scheduleDeferredAudioSessionDeactivation(session)
-                            self.releaseAudioSessionOwnershipIfSafe()
+        if !audioEngineQuiesced {
+            let engineCleanup = DeferredAudioEngineCleanup(
+                gate: audioTapGate,
+                engine: engine,
+                request: requestToEnd,
+                tapIsInstalled: tapIsInstalled,
+                engineStartTask: lingeringAudioEngineStartTask
+            )
+            guard await engineCleanup.waitForCompletion(timeout: 2) else {
+                coordinator.markTerminal()
+                terminalAudioCleanup = engineCleanup
+                let deferredCleanupTask = engineCleanup.quarantine()
+                lingeringAudioTapCleanupTask = deferredCleanupTask
+                audioCleanupNeedsLateDeactivation = true
+                Task { [weak self] in
+                    let didTeardown = await deferredCleanupTask.value
+                    await MainActor.run {
+                        guard let self,
+                              self.lingeringAudioTapCleanupTask != nil else { return }
+                        guard didTeardown else {
+                            coordinator.markTerminal()
+                            return
+                        }
+                        self.lingeringAudioTapCleanupTask = nil
+                        self.tapIsInstalled = false
+                        self.audioEngineQuiesced = true
+                        self.audioCleanupNeedsLateDeactivation = false
+                        Task { @MainActor [weak self] in
+                            await self?.cleanup()
                         }
                     }
-                    return
                 }
-                if let deactivationToken {
-                    if await deactivateAudioSession(session, operationToken: deactivationToken) {
-                        coordinator.completeDeactivationPending()
-                    }
-                    releaseAudioSessionOwnershipIfSafe()
-                } else {
-                    scheduleDeferredAudioSessionDeactivation(session)
-                    releaseAudioSessionOwnershipIfSafe()
-                }
+                // Do not touch AVAudioSession after a failed wrapper call.
+                // The retained cleanup holder owns the unknown engine graph
+                // and the terminal fence blocks reuse.
+                return
             }
+            tapIsInstalled = false
+            audioEngineQuiesced = true
+        }
+        if hasPendingSessionOperation {
+            // The operation may be a late activation that completes after
+            // this bounded cleanup returns. Keep ownership and let the
+            // coordinator perform exactly one deactivation after it settles.
+            scheduleDeferredAudioSessionDeactivation(session)
+            return
+        }
+        // Acquire the deactivation token only after engine cleanup succeeds.
+        // If cleanup times out, the deferred retry must be able to acquire a
+        // fresh token; reserving one before the timeout leaves the coordinator
+        // permanently occupied by an operation that never started.
+        let deactivationToken = await acquireDeactivationToken()
+        guard let deactivationToken else {
+            coordinator.markTerminal()
+            return
+        }
+        if await deactivateAudioSession(session, operationToken: deactivationToken) {
+            coordinator.completeDeactivationPending()
+            releaseAudioSessionOwnershipIfSafe()
+        } else {
+            // A failed deactivation has its own coordinator quarantine. Keep
+            // ownership until that path proves the session is safe again.
+            coordinator.markTerminal()
         }
     }
 
@@ -843,7 +872,7 @@ final class AppSpeechDictationRun {
               let input = session.currentRoute.inputs.first else {
             return false
         }
-        guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+        guard let format = VKAudioEngineInputFormat(engine) else {
             return false
         }
         return input.uid == preparationInputUID
@@ -853,7 +882,7 @@ final class AppSpeechDictationRun {
 
     private func audioConfigurationMatchesPreparedRoute(session: AVAudioSession) -> Bool {
         guard let input = session.currentRoute.inputs.first else { return false }
-        guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+        guard let format = VKAudioEngineInputFormat(engine) else {
             return false
         }
         return input.uid == preparationInputUID
@@ -937,7 +966,12 @@ final class AppSpeechDictationRun {
         let coordinator = AppAudioSessionOperationCoordinator.shared
         coordinator.beginDeactivationPending()
         Task { @MainActor [self] in
-            if !(await coordinator.waitForPendingSessionOperations(timeout: 10)) {
+            await coordinator.waitForPendingSessionOperationsUntilSettled()
+            if Task.isCancelled {
+                coordinator.markTerminal()
+                return
+            }
+            if coordinator.hasPendingSessionOperation {
                 // A late AVAudioSession callback may still activate the
                 // session after the user-facing timeout. Keep the terminal
                 // fence and ownership until that operation actually settles;
@@ -956,7 +990,11 @@ final class AppSpeechDictationRun {
                         coordinator.completeDeactivationPending(
                             deactivationSucceeded: didDeactivate
                         )
-                        self.releaseAudioSessionOwnershipIfSafe()
+                        if didDeactivate {
+                            self.releaseAudioSessionOwnershipIfSafe()
+                        } else {
+                            coordinator.markTerminal()
+                        }
                     } else {
                         coordinator.completeDeactivationPending(deactivationSucceeded: false)
                         coordinator.markTerminal()
@@ -974,7 +1012,11 @@ final class AppSpeechDictationRun {
                 coordinator.completeDeactivationPending(
                     deactivationSucceeded: didDeactivate
                 )
-                self.releaseAudioSessionOwnershipIfSafe()
+                if didDeactivate {
+                    self.releaseAudioSessionOwnershipIfSafe()
+                } else {
+                    coordinator.markTerminal()
+                }
                 return
             }
             coordinator.markTerminal()
@@ -1005,35 +1047,16 @@ final class AppSpeechDictationRun {
         audioSessionOwnershipToken = nil
     }
 
-    private func finishDeferredAudioTapCleanup(_ session: AVAudioSession) async {
-        guard let operationToken = await acquireDeactivationToken() else {
-            let coordinator = AppAudioSessionOperationCoordinator.shared
-            coordinator.markTerminal()
-            coordinator.completeDeactivationPending(deactivationSucceeded: false)
-            coordinator.markTerminal()
-            releaseAudioSessionOwnershipAfterTerminal()
-            return
-        }
-        let didDeactivate = await deactivateAudioSession(
-            session,
-            operationToken: operationToken
-        )
-        AppAudioSessionOperationCoordinator.shared.completeDeactivationPending(
-            deactivationSucceeded: didDeactivate
-        )
-        releaseAudioSessionOwnershipIfSafe()
-    }
-
     private func waitForAudioCleanup(
-        _ cleanupTask: Task<Void, Never>,
+        _ cleanupTask: Task<Bool, Never>,
         timeout: TimeInterval
     ) async -> Bool {
         await withCheckedContinuation { continuation in
             let gate = AudioSessionCompletionGate()
             Task {
-                await cleanupTask.value
+                let succeeded = await cleanupTask.value
                 guard gate.finish() else { return }
-                continuation.resume(returning: true)
+                continuation.resume(returning: succeeded)
             }
             Task {
                 try? await Task.sleep(for: .seconds(timeout))
@@ -1355,7 +1378,8 @@ private func scheduleAudioSessionQuarantine(
     }
     Task {
         try? await Task.sleep(for: .seconds(2))
-        guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
+        await coordinator.waitForPendingSessionOperationsUntilSettled()
+        guard !coordinator.hasPendingSessionOperation else {
             coordinator.markTerminal()
             return
         }
@@ -1462,7 +1486,8 @@ private func scheduleLateDeactivationWatchdog(
 ) {
     Task {
         try? await Task.sleep(for: .seconds(2))
-        guard await coordinator.waitForPendingSessionOperations(timeout: 10) else {
+        await coordinator.waitForPendingSessionOperationsUntilSettled()
+        guard !coordinator.hasPendingSessionOperation else {
             coordinator.markTerminal()
             return
         }
@@ -1613,6 +1638,20 @@ final class AppAudioSessionOperationCoordinator: @unchecked Sendable {
         timeout: TimeInterval = 10
     ) async -> Bool {
         await waitForPendingSessionOperations(timeout: timeout)
+    }
+
+    /// Teardown must not abandon an AVAudioSession call merely because its
+    /// user-facing timeout elapsed. If Core Audio eventually returns, this
+    /// fence allows the matching deactivation to run before ownership is
+    /// released. A task cancellation is the only escape hatch.
+    func waitForPendingSessionOperationsUntilSettled() async {
+        while hasPendingSessionOperation {
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+        }
     }
 
     func acquireOwnership() -> UInt64? {

@@ -3,6 +3,8 @@ import CryptoKit
 
 public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sendable {
     private let beforeInput: String
+    private let beforeInputSuffix: String?
+    private let beforeInputLength: Int?
     private let afterInput: String
     private let documentIdentifier: String?
     private let selectedText: String
@@ -14,6 +16,8 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
         selectedText: String? = nil
     ) {
         self.beforeInput = Self.fingerprint(beforeInput)
+        self.beforeInputSuffix = beforeInput.map { Self.fingerprintSuffix($0) }
+        self.beforeInputLength = beforeInput?.count
         self.afterInput = Self.fingerprint(afterInput)
         self.documentIdentifier = documentIdentifier?.uuidString
         self.selectedText = Self.fingerprint(selectedText)
@@ -25,7 +29,7 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
         documentIdentifier: UUID? = nil,
         selectedText: String? = nil
     ) -> Bool {
-        self.beforeInput == Self.fingerprint(beforeInput)
+        self.beforeInputMatches(beforeInput)
             && self.afterInput == Self.fingerprint(afterInput)
             && self.documentIdentifier == documentIdentifier?.uuidString
             && self.selectedText == Self.fingerprint(selectedText)
@@ -34,7 +38,10 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
     /// Compares two already-fingerprinted contexts without exposing the
     /// document text or identifier hash to storage clients.
     public func matches(_ other: SharedDictationDocumentContextFingerprint) -> Bool {
-        self == other
+        beforeInputMatches(other)
+            && afterInput == other.afterInput
+            && documentIdentifier == other.documentIdentifier
+            && selectedText == other.selectedText
     }
 
     /// `UITextDocumentProxy.documentIdentifier` is optional on some hosts.
@@ -57,6 +64,8 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
 
     private enum CodingKeys: String, CodingKey {
         case beforeInput
+        case beforeInputSuffix
+        case beforeInputLength
         case afterInput
         case documentIdentifier
         case selectedText
@@ -65,6 +74,8 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         beforeInput = try container.decode(String.self, forKey: .beforeInput)
+        beforeInputSuffix = try container.decodeIfPresent(String.self, forKey: .beforeInputSuffix)
+        beforeInputLength = try container.decodeIfPresent(Int.self, forKey: .beforeInputLength)
         afterInput = try container.decode(String.self, forKey: .afterInput)
         documentIdentifier = try container.decodeIfPresent(String.self, forKey: .documentIdentifier)
         selectedText = try container.decodeIfPresent(String.self, forKey: .selectedText)
@@ -76,6 +87,39 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
         return SHA256.hash(data: Data(value.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    private static let suffixCharacterLimit = 256
+
+    private static func fingerprintSuffix(_ context: String) -> String {
+        fingerprint(String(context.suffix(suffixCharacterLimit)))
+    }
+
+    private func beforeInputMatches(_ rawContext: String?) -> Bool {
+        guard let rawContext else {
+            return beforeInput == Self.fingerprint(nil)
+        }
+        guard beforeInput == Self.fingerprint(rawContext) else {
+            guard let beforeInputSuffix,
+                  let beforeInputLength,
+                  beforeInputLength >= rawContext.count else {
+                return false
+            }
+            return beforeInputSuffix == Self.fingerprintSuffix(rawContext)
+        }
+        return true
+    }
+
+    private func beforeInputMatches(_ other: SharedDictationDocumentContextFingerprint) -> Bool {
+        guard beforeInput != other.beforeInput else { return true }
+        guard let beforeInputSuffix,
+              let beforeInputLength,
+              let otherSuffix = other.beforeInputSuffix,
+              let otherLength = other.beforeInputLength,
+              beforeInputLength >= otherLength else {
+            return false
+        }
+        return beforeInputSuffix == otherSuffix
     }
 }
 

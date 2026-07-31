@@ -100,6 +100,20 @@ final class KeyboardAudioSessionOperationCoordinator: @unchecked Sendable {
         await waitForPendingOperations(timeout: timeout)
     }
 
+    /// A timed-out user-facing operation still owns AVAudioSession state.
+    /// Keep the teardown fence until that operation returns so a late HFP or
+    /// USB callback cannot leave the extension with an active session and no
+    /// safe deactivation path.
+    func waitUntilPendingOperationsSettle() async {
+        while hasPendingOperation {
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+        }
+    }
+
     func waitUntilAvailable(timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
@@ -133,6 +147,7 @@ enum KeyboardAudioSessionRouting {
         // activation/route-change notification delivery. Do not freeze a
         // built-in microphone decision from the first snapshot.
         for attempt in 0..<32 {
+            try Task.checkCancellation()
             if let preferredInput = preferredInput(in: session.availableInputs ?? []) {
                 if let currentInput = session.currentRoute.inputs.first,
                    currentInput.portType != .builtInMic,
@@ -145,6 +160,7 @@ enum KeyboardAudioSessionRouting {
 
                 try await setPreferredInput(preferredInput, on: session)
                 for _ in 0..<32 {
+                    try Task.checkCancellation()
                     if session.currentRoute.inputs.contains(where: { $0.uid == preferredInput.uid }) {
                         return
                     }
@@ -230,8 +246,9 @@ enum KeyboardAudioSessionRouting {
         // notifications. Keep the retry bounded, but give late hardware a
         // few extra seconds to settle before reporting unavailability.
         for _ in 0..<80 {
+            try Task.checkCancellation()
             let input = session.currentRoute.inputs.first
-            guard let format = VKAudioInputNodeOutputFormat(engine.inputNode) else {
+            guard let format = VKAudioEngineInputFormat(engine) else {
                 stableSamples = 0
                 lastSignature = nil
                 lastChangeCount = monitor.changeCount
@@ -252,6 +269,7 @@ enum KeyboardAudioSessionRouting {
                 // when the availability notification arrives; observing the
                 // route alone does not make AVAudioSession choose it.
                 try await selectPreferredInputIfAvailable(session)
+                try Task.checkCancellation()
             }
             guard let signature,
                   signature.channelCount > 0,

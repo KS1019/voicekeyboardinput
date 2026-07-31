@@ -38,7 +38,8 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
             let audioSessionOperation = lingeringAudioSessionOperation
             let audioEngineOperation = lingeringAudioEngineOperation
             Task.detached {
-                if !(await coordinator.waitForPendingOperations(timeout: 10)) {
+                await coordinator.waitUntilPendingOperationsSettle()
+                if coordinator.hasPendingOperation {
                     // A late AVAudioSession callback may still activate the
                     // session. Retain the terminal fence and ownership until
                     // the operation settles; never race a fallback
@@ -64,10 +65,13 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
                     _ = await audioEngineOperation.task.value
                 }
                 tapGate.waitUntilDrained()
-                if tapWasInstalled {
-                    _ = VKRemoveAudioInputTap(engine.inputNode)
+                let didRemoveTap = !tapWasInstalled || VKRemoveAudioEngineInputTap(engine)
+                let didStopEngine = VKStopAudioEngine(engine)
+                guard didRemoveTap && didStopEngine else {
+                    coordinator.markTerminal()
+                    coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+                    return
                 }
-                _ = VKStopAudioEngine(engine)
                 guard sessionWasActive else {
                     coordinator.releaseOwnership(ownershipToken)
                     coordinator.recoverIfIdle()
@@ -127,8 +131,8 @@ struct KeyboardAudioInputProbe: AudioCaptureProbing {
                 return try Self.result(false, duration: duration, peakPower: nil)
             }
 
-            let inputNode = engine.inputNode
-            guard let format = VKAudioInputNodeOutputFormat(inputNode) else {
+            guard let inputNode = VKAudioEngineInputNode(engine),
+                  let format = VKAudioEngineInputFormat(engine) else {
                 throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
             guard format.channelCount > 0, format.sampleRate > 0 else {

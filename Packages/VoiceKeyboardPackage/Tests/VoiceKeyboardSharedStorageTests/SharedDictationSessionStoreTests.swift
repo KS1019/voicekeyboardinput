@@ -97,6 +97,169 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         XCTAssertTrue(store.saveStatus(.cancelled(token: stop.token), ownerToken: ownerToken))
     }
 
+    func testExpiredStopCanRecoverCompletedTranscriptWithoutAStaleClaim() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let now = Date()
+        let start = SharedDictationSessionCommand(
+            token: "expired-stop-source",
+            kind: .start,
+            source: .keyboard,
+            requestedAt: now.addingTimeInterval(-20),
+            expiresAt: now.addingTimeInterval(120),
+            sessionID: "expired-stop-session"
+        )
+        let stop = SharedDictationSessionCommand(
+            token: "expired-stop-replacement",
+            kind: .stop,
+            source: .keyboard,
+            requestedAt: now.addingTimeInterval(-20),
+            expiresAt: now.addingTimeInterval(-1),
+            sessionID: start.sessionID,
+            replacesCommandToken: start.token
+        )
+
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(stop))
+        XCTAssertTrue(store.saveStatus(.transcribing(token: start.token)))
+        XCTAssertTrue(store.recoverCompletedTranscriptAfterExpiredStop(
+            sourceCommandToken: start.token,
+            throughCommandToken: stop.token,
+            now: now
+        ))
+        XCTAssertEqual(
+            store.status(forCommandToken: start.token),
+            .transcriptReady(token: start.token)
+        )
+    }
+
+    func testExpiredCancelCannotRecoverCompletedTranscript() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let now = Date()
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: now.addingTimeInterval(-20),
+            expiryInterval: 120,
+            sessionID: "expired-cancel-session"
+        )
+        let cancel = SharedDictationSessionCommand.cancel(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            requestedAt: now.addingTimeInterval(-20),
+            expiryInterval: 1,
+            replacingCommandToken: start.token
+        )
+
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(cancel))
+        XCTAssertTrue(store.saveStatus(.transcribing(token: start.token)))
+        XCTAssertFalse(store.recoverCompletedTranscriptAfterExpiredStop(
+            sourceCommandToken: start.token,
+            throughCommandToken: cancel.token,
+            now: now
+        ))
+        XCTAssertEqual(
+            store.status(forCommandToken: start.token),
+            .transcribing(token: start.token)
+        )
+    }
+
+    func testClaimedCancelCannotAuthorizeTranscriptRecovery() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            sessionID: "claimed-cancel-session"
+        )
+        let cancel = SharedDictationSessionCommand.cancel(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            replacingCommandToken: start.token
+        )
+        let owner = "cancel-owner"
+
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(cancel))
+        XCTAssertTrue(store.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: owner,
+            lastSeenAt: Date(),
+            sessionState: .armed
+        )))
+        XCTAssertEqual(
+            store.claimCommand(
+                afterLastClaimedToken: start.token,
+                ownerToken: owner,
+                source: .keyboard
+            ),
+            cancel
+        )
+        XCTAssertFalse(store.recoverCompletedTranscriptStatus(
+            sourceCommandToken: start.token,
+            throughCommandToken: cancel.token,
+            ownerToken: owner
+        ))
+    }
+
+    func testExpiredStopCannotRecoverAfterNewerCancellation() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let now = Date()
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: now.addingTimeInterval(-20),
+            expiryInterval: 120,
+            sessionID: "replacement-order-session"
+        )
+        let expiredStop = SharedDictationSessionCommand.stop(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            requestedAt: now.addingTimeInterval(-20),
+            expiryInterval: 1,
+            replacingCommandToken: start.token
+        )
+        let cancel = SharedDictationSessionCommand.cancel(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            requestedAt: now,
+            replacingCommandToken: start.token
+        )
+
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(expiredStop))
+        XCTAssertTrue(store.saveCommand(cancel))
+        XCTAssertTrue(store.saveStatus(.transcribing(token: start.token)))
+        XCTAssertFalse(store.recoverCompletedTranscriptAfterExpiredStop(
+            sourceCommandToken: start.token,
+            throughCommandToken: expiredStop.token,
+            now: now
+        ))
+        XCTAssertEqual(store.status(forCommandToken: start.token), .transcribing(token: start.token))
+    }
+
+    func testHistoricalTranscriptPromotionCannotCrossCancellationFence() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            sessionID: "historical-cancel-session"
+        )
+        let cancel = SharedDictationSessionCommand.cancel(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            replacingCommandToken: start.token
+        )
+
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(cancel))
+        XCTAssertTrue(store.saveStatus(.transcribing(token: start.token)))
+        XCTAssertFalse(store.saveStatus(
+            .transcriptReady(token: start.token),
+            allowRecoveryFromTranscriptReady: true
+        ))
+        XCTAssertEqual(store.status(forCommandToken: start.token), .transcribing(token: start.token))
+    }
+
     func testCancellationIntentSuppressesStartUntilItCanBePublished() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)
@@ -401,7 +564,10 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         ))
         XCTAssertEqual(
             store.status(forCommandToken: command.token),
-            .cancelled(token: command.token)
+            .failed(
+                token: command.token,
+                message: "Keyboard producer timed out; a committed transcript may still be recovered."
+            )
         )
 
         let pendingCommand = SharedDictationSessionCommand(
@@ -522,6 +688,23 @@ final class SharedDictationSessionStoreTests: XCTestCase {
             afterInput: nil,
             documentIdentifier: documentIdentifier,
             selectedText: "selected"
+        ))
+    }
+
+    func testDocumentContextFingerprintAcceptsHostWindowTruncationAtTheCaret() {
+        let expectedContext = String(repeating: "x", count: 512) + "tail"
+        let observedContext = String(expectedContext.suffix(256))
+        let documentIdentifier = UUID()
+        let fingerprint = SharedDictationDocumentContextFingerprint(
+            beforeInput: expectedContext,
+            afterInput: nil,
+            documentIdentifier: documentIdentifier
+        )
+
+        XCTAssertTrue(fingerprint.matches(
+            beforeInput: observedContext,
+            afterInput: nil,
+            documentIdentifier: documentIdentifier
         ))
     }
 

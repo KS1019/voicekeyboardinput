@@ -17,6 +17,11 @@ package struct VoiceCommandParser: Sendable {
         let suffix: [Bool]
     }
 
+    private struct JapaneseNaturalLanguageBoundaries {
+        let prefix: [Bool]
+        let suffix: [Bool]
+    }
+
     package init(locale: VoiceKeyboardLocale) {
         let isJapaneseLocale = locale.usesJapaneseCommandAliases
         let commandMap = Self.makeCommandMap(isJapaneseLocale: isJapaneseLocale)
@@ -41,10 +46,22 @@ package struct VoiceCommandParser: Sendable {
         guard !transcript.isEmpty else { return ParsedTranscript(elements: []) }
         guard !words.isEmpty else { return ParsedTranscript(elements: [.text(transcript)]) }
         let commandOnlyBoundaries = makeCommandOnlyBoundaries(for: words)
-        if containsUnsafeDestructiveCommand(in: words, boundaries: commandOnlyBoundaries) {
+        let japaneseNaturalLanguageBoundaries = isJapaneseLocale
+            ? makeJapaneseNaturalLanguageBoundaries(for: words)
+            : nil
+        if containsUnsafeDestructiveCommand(
+            in: words,
+            boundaries: commandOnlyBoundaries,
+            tokens: tokens,
+            transcript: transcript
+        ) {
             return ParsedTranscript(elements: [.text(transcript)])
         }
-        if containsNaturalLanguageSensitiveCommand(in: words, boundaries: commandOnlyBoundaries) {
+        if containsNaturalLanguageSensitiveCommand(
+            in: words,
+            boundaries: commandOnlyBoundaries,
+            japaneseNaturalLanguageBoundaries: japaneseNaturalLanguageBoundaries
+        ) {
             return ParsedTranscript(elements: [.text(transcript)])
         }
 
@@ -53,7 +70,7 @@ package struct VoiceCommandParser: Sendable {
 
         while index < words.count {
             if elements.count >= Self.maximumElementCount {
-                return ParsedTranscript(elements: [.text(transcript)])
+                return ParsedTranscript(elements: [.text(transcript)], didOverflow: true)
             }
             var matched: (length: Int, command: VoiceCommand)?
 
@@ -63,12 +80,20 @@ package struct VoiceCommandParser: Sendable {
                     .lowercased()
 
                 if let command = commandMap[phrase] {
-                    if (!command.isDestructive && isSafeNonDestructiveMatch(
+                    let hasCanonicalSeparators = hasCanonicalTokenSeparators(
+                        at: index,
+                        length: length,
+                        tokens: tokens,
+                        transcript: transcript
+                    )
+                    if hasCanonicalSeparators,
+                       (!command.isDestructive && isSafeNonDestructiveMatch(
                         command,
                         at: index,
                         length: length,
                         in: words,
-                        boundaries: commandOnlyBoundaries
+                        boundaries: commandOnlyBoundaries,
+                        japaneseNaturalLanguageBoundaries: japaneseNaturalLanguageBoundaries
                     )) || (command.isDestructive && isSafeDestructiveMatch(
                         command,
                         at: index,
@@ -94,11 +119,23 @@ package struct VoiceCommandParser: Sendable {
                 index += matched.length
             } else {
                 if isJapaneseLocale {
+                    if words[index].count > Self.maximumImplicitJapaneseSegmentLength {
+                        appendLiteralText(
+                            words[index],
+                            token: tokens[index],
+                            tokenIndex: index,
+                            tokens: tokens,
+                            transcript: transcript,
+                            to: &elements
+                        )
+                        index += 1
+                        continue
+                    }
                     guard let parsed = parseUnspacedJapaneseSegment(
                         words[index],
                         maximumElementCount: Self.maximumElementCount - elements.count
                     ) else {
-                        return ParsedTranscript(elements: [.text(transcript)])
+                        return ParsedTranscript(elements: [.text(transcript)], didOverflow: true)
                     }
                     appendLiteralElements(
                         parsed,
@@ -221,7 +258,9 @@ package struct VoiceCommandParser: Sendable {
 
     private func containsUnsafeDestructiveCommand(
         in words: [String],
-        boundaries: CommandOnlyBoundaries
+        boundaries: CommandOnlyBoundaries,
+        tokens: [TranscriptToken],
+        transcript: String
     ) -> Bool {
         for index in words.indices {
             for length in stride(
@@ -231,6 +270,17 @@ package struct VoiceCommandParser: Sendable {
             ) {
                 let phrase = words[index..<(index + length)].joined(separator: " ").lowercased()
                 guard let command = commandMap[phrase], command.isDestructive else { continue }
+                // Destructive phrases must retain the recognizer's exact
+                // separator. Otherwise a transcript line break or tab could
+                // be normalized into a command and delete user text.
+                guard hasCanonicalTokenSeparators(
+                    at: index,
+                    length: length,
+                    tokens: tokens,
+                    transcript: transcript
+                ) else {
+                    return true
+                }
                 // A command-only phrase is not confirmation that recognition
                 // was correct. Destructive edits require an explicit prefix.
                 if phrase.hasPrefix("command ") {
@@ -255,7 +305,8 @@ package struct VoiceCommandParser: Sendable {
 
     private func containsNaturalLanguageSensitiveCommand(
         in words: [String],
-        boundaries: CommandOnlyBoundaries
+        boundaries: CommandOnlyBoundaries,
+        japaneseNaturalLanguageBoundaries: JapaneseNaturalLanguageBoundaries?
     ) -> Bool {
         for index in words.indices {
             for length in stride(
@@ -272,6 +323,15 @@ package struct VoiceCommandParser: Sendable {
                         && index == words.startIndex
                         && phrase.hasPrefix("command ")
                     if command.isUnsupportedShortcut && !isExplicitUnsupportedShortcut {
+                        return true
+                    }
+                    // A sensitive alias is executable only as a complete
+                    // command phrase. This prevents ordinary nouns such as
+                    // "new line item" and "period drama" from becoming
+                    // edits merely because the alias appears at the start.
+                    if !isExplicitUnsupportedShortcut,
+                       index == words.startIndex
+                        && !boundaries.suffix[index + length] {
                         return true
                     }
                     let precedingWord = prefix.last.map(Self.normalizedNaturalLanguageCueWord)
@@ -292,8 +352,9 @@ package struct VoiceCommandParser: Sendable {
                         || !boundaries.suffix[index + length] {
                         return true
                     }
-                    if prefix.contains(where: Self.containsJapaneseNaturalLanguageCue)
-                        || suffix.contains(where: Self.containsJapaneseLeadingNaturalLanguageCue) {
+                    guard let japaneseNaturalLanguageBoundaries else { return true }
+                    if japaneseNaturalLanguageBoundaries.prefix[index]
+                        || japaneseNaturalLanguageBoundaries.suffix[index + length] {
                         return true
                     }
                 }
@@ -302,10 +363,28 @@ package struct VoiceCommandParser: Sendable {
         return false
     }
 
+    private func hasCanonicalTokenSeparators(
+        at index: Int,
+        length: Int,
+        tokens: [TranscriptToken],
+        transcript: String
+    ) -> Bool {
+        guard length > 1 else { return true }
+        for tokenIndex in index..<(index + length - 1) {
+            let separator = String(
+                transcript[tokens[tokenIndex].range.upperBound..<tokens[tokenIndex + 1].range.lowerBound]
+            )
+            if separator != " " {
+                return false
+            }
+        }
+        return true
+    }
+
     private static func containsJapaneseNaturalLanguageCue(_ word: String) -> Bool {
         let normalizedWord = normalizedNaturalLanguageCueWord(word)
         return japaneseNaturalLanguageCueWords.contains { cue in
-            normalizedWord == cue || (cue.count > 1 && normalizedWord.contains(cue))
+            normalizedWord == cue || normalizedWord.contains(cue)
         }
     }
 
@@ -316,6 +395,21 @@ package struct VoiceCommandParser: Sendable {
                 ? normalizedWord.hasPrefix(cue)
                 : normalizedWord.contains(cue)
         }
+    }
+
+    private func makeJapaneseNaturalLanguageBoundaries(
+        for words: [String]
+    ) -> JapaneseNaturalLanguageBoundaries {
+        var prefix = Array(repeating: false, count: words.count + 1)
+        for index in words.indices {
+            prefix[index + 1] = prefix[index] || Self.containsJapaneseNaturalLanguageCue(words[index])
+        }
+
+        var suffix = Array(repeating: false, count: words.count + 1)
+        for index in words.indices.reversed() {
+            suffix[index] = suffix[index + 1] || Self.containsJapaneseLeadingNaturalLanguageCue(words[index])
+        }
+        return JapaneseNaturalLanguageBoundaries(prefix: prefix, suffix: suffix)
     }
 
     package func hasIncompleteCommandPrefix(_ transcript: String) -> Bool {
@@ -365,6 +459,12 @@ package struct VoiceCommandParser: Sendable {
         maximumElementCount: Int
     ) -> [TranscriptElement]? {
         guard maximumElementCount > 0 else { return nil }
+        // Avoid scanning a huge unspaced speech segment once for implicit
+        // command validation and again while producing elements. Falling
+        // back to literal text is safer for the keyboard's synchronous path.
+        guard segment.count <= Self.maximumImplicitJapaneseSegmentLength else {
+            return nil
+        }
         var remaining = segment[...]
         var pendingText = ""
         var elements: [TranscriptElement] = []
@@ -411,13 +511,14 @@ package struct VoiceCommandParser: Sendable {
             }) {
                 if hasSeenCommand,
                    (Self.containsJapaneseNaturalLanguageCue(literalSinceCommand)
-                    || Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)) {
+                    || Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)
+                    || Self.containsJapaneseImplicitSequenceBridge(literalSinceCommand)) {
                     return false
                 }
                 hasSeenCommand = true
                 literalSinceCommand = ""
                 matchCount += 1
-                endsWithCommand = remaining.count == match.alias.count
+                endsWithCommand = remaining.dropFirst(match.alias.count).isEmpty
                 remaining.removeFirst(match.alias.count)
             } else {
                 endsWithCommand = false
@@ -428,6 +529,7 @@ package struct VoiceCommandParser: Sendable {
             && endsWithCommand
             && !Self.containsJapaneseNaturalLanguageCue(literalSinceCommand)
             && !Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)
+            && !Self.containsJapaneseImplicitSequenceBridge(literalSinceCommand)
     }
 
     private func isSafeDestructiveMatch(
@@ -455,7 +557,8 @@ package struct VoiceCommandParser: Sendable {
         at index: Int,
         length: Int,
         in words: [String],
-        boundaries: CommandOnlyBoundaries
+        boundaries: CommandOnlyBoundaries,
+        japaneseNaturalLanguageBoundaries: JapaneseNaturalLanguageBoundaries?
     ) -> Bool {
         // "period" is a common noun. When surrounded by ordinary prose,
         // preserving the literal word is safer than silently inserting '.'.
@@ -471,9 +574,24 @@ package struct VoiceCommandParser: Sendable {
             || (isJapaneseLocale && (
                 Self.japaneseNaturalLanguageCueWords.contains(precedingWord ?? "")
                     || Self.japaneseNaturalLanguageCueWords.contains(followingWord ?? "")
-                    || suffix.contains { Self.japaneseNaturalLanguageCueWords.contains(Self.normalizedNaturalLanguageCueWord($0)) }
+                    || japaneseNaturalLanguageBoundaries?.suffix[index + length] == true
             )) {
             return false
+        }
+        if command.requiresExplicitNaturalLanguageCommandFraming {
+            let isSurroundedByCommands = (prefix.isEmpty || boundaries.prefix[index])
+                && (suffix.isEmpty || boundaries.suffix[index + length])
+            guard isSurroundedByCommands else { return false }
+        }
+        if command.isNaturalLanguageSensitiveAlias {
+            let isExplicitUnsupportedShortcut = command.isUnsupportedShortcut
+                && index == 0
+                && words[index].lowercased() == "command"
+            if !isExplicitUnsupportedShortcut {
+                let isSurroundedByCommands = (prefix.isEmpty || boundaries.prefix[index])
+                    && (suffix.isEmpty || boundaries.suffix[index + length])
+                guard isSurroundedByCommands else { return false }
+            }
         }
         guard command.isAmbiguousNaturalLanguageAlias else { return true }
         guard !prefix.isEmpty, !suffix.isEmpty else { return true }
@@ -487,7 +605,8 @@ package struct VoiceCommandParser: Sendable {
         "there", "no", "left", "me", "splice", "were", "are", "isn't", "isnt",
         "oxford", "debate", "exploration", "word", "words", "said", "say", "says", "mentioned", "mention",
         "called", "call", "phrase", "phrases", "literal", "literally", "type", "typed", "typing", "write",
-        "wrote", "written", "use", "using"
+        "wrote", "written", "use", "using", "and", "or", "bar", "symbol", "key", "keys", "either", "plus", "then",
+        "press", "to", "we", "prefer", "syntax"
     ]
 
     private static let japaneseNaturalLanguageCueWords: Set<String> = [
@@ -496,7 +615,20 @@ package struct VoiceCommandParser: Sendable {
         // These particles connect otherwise command-looking aliases in
         // ordinary Japanese prose. Do not execute an unspaced sequence such
         // as "読点と句点" unless the user provides an explicit boundary.
-        "と", "や", "も", "へ", "で", "から", "まで", "って", "という"
+        "と", "や", "も", "へ", "で", "から", "まで", "って", "という",
+        "及び", "および", "又は", "または", "あるいは", "ならびに", "か", "とか", "なら", "また", "ないし",
+        "もしくは", "若しくは", "並びに", "より", "直後", "後"
+    ]
+
+    private static func containsJapaneseImplicitSequenceBridge(_ word: String) -> Bool {
+        let normalized = normalizedNaturalLanguageCueWord(word)
+        return japaneseImplicitSequenceBridgeWords.contains(word)
+            || japaneseImplicitSequenceBridgeWords.contains(normalized)
+    }
+
+    private static let japaneseImplicitSequenceBridgeWords: Set<String> = [
+        "及び", "および", "又は", "または", "あるいは", "ならびに", "か", "とか", "なら", "また", "ないし",
+        "もしくは", "若しくは", "並びに", "より", "・", "、", "。", "？", "！"
     ]
 
     private static func normalizedNaturalLanguageCueWord(_ word: String) -> String {
@@ -569,6 +701,7 @@ package struct VoiceCommandParser: Sendable {
     }
 
     private static let maximumElementCount = 512
+    private static let maximumImplicitJapaneseSegmentLength = 4_096
 
     private static func makeCommandMap(isJapaneseLocale: Bool) -> [String: VoiceCommand] {
         var commands: [String: VoiceCommand] = [
@@ -619,6 +752,15 @@ private extension VoiceCommand {
     var isAmbiguousNaturalLanguageAlias: Bool {
         if case .insertText(".") = self { return true }
         return false
+    }
+
+    var requiresExplicitNaturalLanguageCommandFraming: Bool {
+        switch self {
+        case .insertText(" "), .insertText("\t"), .insertText("\""):
+            true
+        default:
+            false
+        }
     }
 
     var isNaturalLanguageSensitiveAlias: Bool {
@@ -682,7 +824,26 @@ private extension String {
 
 private extension VoiceKeyboardLocale {
     var usesJapaneseCommandAliases: Bool {
-        languageSubtag == "ja"
+        guard !identifier.isEmpty else { return false }
+        let localePart = identifier.split(
+            separator: "@",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )[0]
+        let subtags = localePart.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: { $0 == "-" || $0 == "_" }
+        )
+        guard !subtags.isEmpty, subtags.allSatisfy({ !$0.isEmpty }) else { return false }
+        guard subtags[0].count == 2,
+              subtags[0].allSatisfy({ $0.isASCII && $0.isLetter }),
+              subtags[0].lowercased() == "ja" else {
+            return false
+        }
+        return subtags.dropFirst().allSatisfy { subtag in
+            (1...8).contains(subtag.count)
+                && subtag.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        }
     }
 
     var languageSubtag: String {

@@ -12,8 +12,10 @@ package enum TranscriptElement: Equatable, Sendable {
 
 package struct ParsedTranscript: Equatable, Sendable {
     package let elements: [TranscriptElement]
+    package let didOverflow: Bool
 
-    package init(elements: [TranscriptElement]) {
+    package init(elements: [TranscriptElement], didOverflow: Bool = false) {
         self.elements = elements
+        self.didOverflow = didOverflow
     }
 }

@@ -32,6 +32,49 @@ BOOL VKRemoveAudioInputTap(AVAudioInputNode *inputNode) {
     }
 }
 
+AVAudioInputNode * _Nullable VKAudioEngineInputNode(AVAudioEngine *engine) {
+    @try {
+        return [engine inputNode];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+AVAudioFormat * _Nullable VKAudioEngineInputFormat(AVAudioEngine *engine) {
+    @try {
+        AVAudioInputNode *inputNode = [engine inputNode];
+        return [inputNode outputFormatForBus:0];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+BOOL VKInstallAudioEngineInputTap(
+    AVAudioEngine *engine,
+    AVAudioNodeTapBlock tapBlock
+) {
+    @try {
+        AVAudioInputNode *inputNode = [engine inputNode];
+        [inputNode installTapOnBus:0
+                         bufferSize:1024
+                             format:nil
+                              block:tapBlock];
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}
+
+BOOL VKRemoveAudioEngineInputTap(AVAudioEngine *engine) {
+    @try {
+        AVAudioInputNode *inputNode = [engine inputNode];
+        [inputNode removeTapOnBus:0];
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}
+
 AVAudioFormat * _Nullable VKAudioInputNodeOutputFormat(AVAudioInputNode *inputNode) {
     @try {
         return [inputNode outputFormatForBus:0];

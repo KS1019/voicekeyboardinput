@@ -3,7 +3,7 @@ import VoiceKeyboardModels
 import XCTest
 
 final class LiteralTranscriptCommandPipelineTests: XCTestCase {
-    func testPreviewExposesParsedElementsAndPlannedOperations() {
+    func testPreviewPreservesNaturalProseAroundPunctuationWords() {
         let pipeline = LiteralTranscriptCommandPipeline(
             locale: VoiceKeyboardLocale(identifier: "en-US")
         )
@@ -14,14 +14,10 @@ final class LiteralTranscriptCommandPipelineTests: XCTestCase {
         )
 
         XCTAssertEqual(preview.elements, [
-            .text("hello"),
-            .command(.insertText(",")),
-            .text("world")
+            .text("hello comma world")
         ])
         XCTAssertEqual(preview.operations, [
-            .insertText("hello"),
-            .insertText(","),
-            .insertText(" world")
+            .insertText("hello comma world")
         ])
     }
 
