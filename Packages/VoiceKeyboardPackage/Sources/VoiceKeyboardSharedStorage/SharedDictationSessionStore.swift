@@ -1274,16 +1274,33 @@ public final class SharedDictationSessionStore {
         guard !defaults.bool(forKey: Key.envelopeMigrationMarker) else {
             return SessionEnvelope()
         }
+        let commandHistory = loadCommandHistory()
+        let statusTokens = Self.uniqueTokens(Array(
+            (load([String].self, forKey: Key.statusIndex) ?? [])
+                .suffix(Self.historyLimit)
+        ))
+        let statuses = loadStatusHistory()
+        let commands = Self.dictionaryByToken(commandHistory)
+        let claims = load([String: Date].self, forKey: Key.claims) ?? [:]
+        let filteredClaims = claims.filter { commands[$0.key] != nil }
+        let claimOwners = (load([String: String].self, forKey: Key.claimOwners) ?? [:])
+            .filter { filteredClaims[$0.key] != nil }
         return SessionEnvelope(
-            commands: Self.dictionaryByToken(loadCommandHistory()),
-            commandOrder: Self.uniqueTokens(loadCommandHistory().map(\.token)),
-            statuses: loadStatusHistory(),
+            commands: commands,
+            commandOrder: Self.uniqueTokens(commandHistory.map(\.token)),
+            statuses: statuses,
+            statusOrder: statusTokens.filter { statuses[$0] != nil },
             latestStatus: loadStatus(),
             heartbeat: load(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat),
             heartbeats: load(SharedDictationAppHeartbeat.self, forKey: Key.heartbeat)
                 .map { [$0.token: $0] } ?? [:],
-            claims: [:],
-            claimOwners: [:]
+            claims: filteredClaims,
+            claimOwners: claimOwners,
+            deliveryFailureIntents: load([String: String].self, forKey: Key.deliveryFailureIntents) ?? [:],
+            cancellationIntents: load(
+                [String: SharedDictationSessionCommand].self,
+                forKey: Key.cancellationIntents
+            ) ?? [:]
         )
     }
 
@@ -1580,7 +1597,6 @@ public final class SharedDictationSessionStore {
                 return token
             }
             guard let command = envelope.commands[token],
-                  !command.isExpired(at: now),
                   now.timeIntervalSince(command.requestedAt) <= Self.transcriptRetentionInterval else {
                 return nil
             }
@@ -1588,7 +1604,12 @@ public final class SharedDictationSessionStore {
             // consumed by the containing app. Treating it as ordinary history
             // can silently delete the handoff while saveCommand reports
             // success.
-            guard let status = envelope.statuses[token] else { return token }
+            guard let status = envelope.statuses[token] else {
+                // An unstated command is safe to retain only while it can
+                // still be claimed by its producer. Once its lease expires,
+                // it is ordinary stale history.
+                return command.isExpired(at: now) ? nil : token
+            }
             switch status {
             case .commandPending, .commandAcknowledged, .recording, .transcribing, .transcriptReady:
                 return token

@@ -270,9 +270,7 @@ package struct VoiceCommandParser: Sendable {
                     let isExplicitUnsupportedShortcut = command.isUnsupportedShortcut
                         && index == words.startIndex
                         && phrase.hasPrefix("command ")
-                    if !isExplicitUnsupportedShortcut,
-                       (!boundaries.prefix[index]
-                        || !boundaries.suffix[index + length]) {
+                    if command.isUnsupportedShortcut && !isExplicitUnsupportedShortcut {
                         return true
                     }
                     let precedingWord = prefix.last?.lowercased()
@@ -447,7 +445,8 @@ package struct VoiceCommandParser: Sendable {
         "a", "an", "the", "some", "this", "that", "is", "was", "need", "needs", "add", "insert", "put",
         "explore", "travel", "separated", "values", "start", "of", "business", "use", "missing", "here",
         "new", "line", "text", "code", "means", "meaning", "character", "parenthesis", "parentheses",
-        "there", "no", "left", "me", "splice", "were", "are", "isn't", "isnt"
+        "there", "no", "left", "me", "splice", "were", "are", "isn't", "isnt",
+        "oxford", "debate", "exploration"
     ]
 
     private static let japaneseNaturalLanguageCueWords: Set<String> = [

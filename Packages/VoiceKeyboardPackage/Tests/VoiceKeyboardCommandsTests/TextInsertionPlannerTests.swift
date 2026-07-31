@@ -372,6 +372,26 @@ final class TextInsertionPlannerTests: XCTestCase {
         XCTAssertEqual(operations, [.deleteBackward(count: deleteCount(7))])
     }
 
+    func testSentenceDeletionTreatsAllCommonLineSeparatorsAsBoundaries() {
+        let planner = TextInsertionPlanner()
+        let transcript = ParsedTranscript(elements: [.command(.deleteSentence)])
+
+        for context in [
+            "First line\nSecond",
+            "First line\r\nSecond",
+            "First line\rSecond",
+            "First line\u{85}Second",
+            "First line\u{2028}Second",
+            "First line\u{2029}Second"
+        ] {
+            XCTAssertEqual(
+                planner.plan(transcript, documentContextBeforeInput: context),
+                [.deleteBackward(count: deleteCount("Second".count))],
+                context.debugDescription
+            )
+        }
+    }
+
     func testSentenceDeletionStopsAtAmbiguousAbbreviationPeriods() {
         let planner = TextInsertionPlanner()
 

@@ -587,6 +587,91 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         XCTAssertEqual(secondStore.claimOwner(forCommandToken: command.token, now: renewedAt), owner)
     }
 
+    func testFileBackedMigrationPreservesStatusAndRecoveryWAL() throws {
+        let defaults = try makeDefaults()
+        let legacyStore = SharedDictationSessionStore(defaults: defaults)
+        let start = SharedDictationSessionCommand.start(source: .keyboard)
+        let recording = SharedDictationSessionStatus.recording(
+            token: start.token,
+            startedAt: start.requestedAt,
+            timeoutSeconds: 8
+        )
+        let cancel = SharedDictationSessionCommand.cancel(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            replacingCommandToken: start.token
+        )
+
+        XCTAssertTrue(legacyStore.saveCommand(start))
+        XCTAssertTrue(legacyStore.saveStatus(recording))
+        XCTAssertTrue(legacyStore.recordCancellationIntent(cancel))
+        XCTAssertTrue(legacyStore.recordDeliveryFailureIntent(
+            token: start.token,
+            message: "delivery retry"
+        ))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SharedDictationSessionStoreMigrationTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileStore = try XCTUnwrap(SharedDictationSessionStore(
+            defaults: defaults,
+            envelopeURL: directory.appendingPathComponent("session.json"),
+            lockFileURL: directory.appendingPathComponent("session.lock")
+        ))
+
+        XCTAssertTrue(fileStore.storageHealth())
+        XCTAssertTrue(fileStore.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: "migration-owner",
+            sessionID: start.sessionID,
+            lastSeenAt: Date(),
+            sessionState: .recording
+        )))
+        XCTAssertEqual(fileStore.statusResolution(forCommandToken: start.token), .found(recording))
+        XCTAssertEqual(fileStore.pendingDeliveryFailureIntents(), [start.token: "delivery retry"])
+        XCTAssertEqual(fileStore.pendingCancellationIntents(), [cancel])
+    }
+
+    func testTranscriptReadyCommandSurvivesHistoryChurnAfterCommandExpiry() throws {
+        let defaults = try makeDefaults()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SharedDictationSessionStoreTranscriptRetentionTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try XCTUnwrap(SharedDictationSessionStore(
+            defaults: defaults,
+            envelopeURL: directory.appendingPathComponent("session.json"),
+            lockFileURL: directory.appendingPathComponent("session.lock")
+        ))
+        let requestedAt = Date()
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: requestedAt,
+            expiryInterval: 1
+        )
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveStatus(.transcriptReady(token: start.token), now: requestedAt))
+
+        let staleRequestedAt = requestedAt.addingTimeInterval(-100)
+        for index in 0..<40 {
+            let churn = SharedDictationSessionCommand(
+                token: "expired-churn-\(index)",
+                kind: .start,
+                source: .keyboard,
+                requestedAt: staleRequestedAt,
+                expiresAt: staleRequestedAt.addingTimeInterval(1),
+                sessionID: "expired-churn-session-\(index)"
+            )
+            XCTAssertTrue(store.saveCommand(churn), "churn \(index)")
+        }
+
+        XCTAssertEqual(store.commandResolution(forToken: start.token), .found(start))
+        XCTAssertEqual(
+            store.statusResolution(forCommandToken: start.token),
+            .found(.transcriptReady(token: start.token))
+        )
+    }
+
     func testExpiredClaimIsReclaimableEvenWhenOwnerHeartbeatIsStillFresh() throws {
         let defaults = try makeDefaults()
         let now = Date(timeIntervalSince1970: 1_730_000_000)

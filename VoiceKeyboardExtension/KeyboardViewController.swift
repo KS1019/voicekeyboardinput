@@ -32,6 +32,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var sharedSessionDocumentContextAfterInput: String?
     private var sharedSessionDocumentIdentifier: UUID?
     private var sharedSessionSelectedText: String?
+    private var sharedSessionDeliveryFingerprint: SharedDictationDocumentContextFingerprint?
     private var recognitionExpectedDocumentContext: String?
     private var recognitionExpectedDocumentContextAfterInput: String?
     private var recognitionExpectedDocumentIdentifier: UUID?
@@ -821,6 +822,7 @@ public final class KeyboardViewController: UIInputViewController {
         activeSharedSessionID = command.sessionID
         activeSharedCommandToken = command.token
         hasSharedDeliveryLifecycleGap = false
+        sharedSessionDeliveryFingerprint = startContextFingerprint
         sharedSessionDocumentContext = textDocumentProxy.documentContextBeforeInput
         sharedSessionDocumentContextAfterInput = textDocumentProxy.documentContextAfterInput
         sharedSessionDocumentIdentifier = textDocumentProxy.documentIdentifier
@@ -1156,7 +1158,11 @@ public final class KeyboardViewController: UIInputViewController {
                     self.sharedDictationPollingTask = nil
                 }
             }
-            let deadline = Date().addingTimeInterval(16)
+            let initialDeadline = Date().addingTimeInterval(16)
+            let hardDeadline = max(
+                initialDeadline,
+                command.requestedAt.addingTimeInterval(Self.sharedTranscriptRecoveryRetention)
+            )
             var didRequestContainingAppFallback = false
 
             while !Task.isCancelled {
@@ -1247,17 +1253,35 @@ public final class KeyboardViewController: UIInputViewController {
                       self.sharedPollingGeneration == pollingGeneration,
                       self.activeSharedSessionID == command.sessionID,
                       self.activeSharedCommandToken == command.token else { return }
-                if Date() >= deadline {
-                    endSharedSession(
-                        ifMatchingSessionID: command.sessionID,
-                        commandToken: command.token,
-                        pollingGeneration: pollingGeneration
-                    )
-                    keyboardRootView.render(
-                        speechCapture: .sharedDictationTimedOut,
-                        announce: true
-                    )
-                    return
+                if Date() >= initialDeadline {
+                    let statusResolution = await self.sessionStoreCall {
+                        $0.statusResolution(forCommandToken: command.token)
+                    }
+                    let producerMayStillFinish: Bool
+                    switch statusResolution {
+                    case .found(.commandPending),
+                         .found(.commandAcknowledged),
+                         .found(.recording),
+                         .found(.transcribing),
+                         .found(.transcriptReady):
+                        producerMayStillFinish = true
+                    case .found(.idle), .found(.failed), .found(.cancelled), .missing, .unavailable, nil:
+                        producerMayStillFinish = false
+                    }
+                    guard producerMayStillFinish, Date() < hardDeadline else {
+                        endSharedSession(
+                            ifMatchingSessionID: command.sessionID,
+                            commandToken: command.token,
+                            pollingGeneration: pollingGeneration
+                        )
+                        keyboardRootView.render(
+                            speechCapture: .sharedDictationTimedOut,
+                            announce: true
+                        )
+                        return
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
                 }
 
                 try? await Task.sleep(for: .milliseconds(250))
@@ -1889,6 +1913,16 @@ public final class KeyboardViewController: UIInputViewController {
         if let pollingGeneration, sharedPollingGeneration != pollingGeneration {
             return
         }
+        if hasSharedDeliveryLifecycleGap,
+           let beforeInput = sharedSessionDocumentContext,
+           let documentIdentifier = sharedSessionDocumentIdentifier {
+            sharedSessionDeliveryFingerprint = SharedDictationDocumentContextFingerprint(
+                beforeInput: beforeInput,
+                afterInput: sharedSessionDocumentContextAfterInput,
+                documentIdentifier: documentIdentifier,
+                selectedText: sharedSessionSelectedText
+            )
+        }
         activeSharedSessionID = nil
         activeSharedCommandToken = nil
         sharedSessionDocumentContext = nil
@@ -1904,9 +1938,20 @@ public final class KeyboardViewController: UIInputViewController {
         sourceCommandToken: String
     ) async -> Bool {
         if hasSharedDeliveryLifecycleGap {
-            guard let documentIdentifier = sharedSessionDocumentIdentifier,
-                  documentIdentifier == textDocumentProxy.documentIdentifier else {
-                return false
+            if let documentIdentifier = sharedSessionDocumentIdentifier {
+                guard documentIdentifier == textDocumentProxy.documentIdentifier else {
+                    return false
+                }
+            } else {
+                guard let fingerprint = sharedSessionDeliveryFingerprint,
+                      fingerprint.matches(
+                          beforeInput: textDocumentProxy.documentContextBeforeInput,
+                          afterInput: textDocumentProxy.documentContextAfterInput,
+                          documentIdentifier: textDocumentProxy.documentIdentifier,
+                          selectedText: textDocumentProxy.selectedText
+                      ) else {
+                    return false
+                }
             }
         }
         if let expectedDocumentContext = sharedSessionDocumentContext {
@@ -2376,6 +2421,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private static let maximumSharedDeletionCount = 512
+    private static let sharedTranscriptRecoveryRetention: TimeInterval = 360
 
     private func hostContextMatchesExpected(
         expectedBeforeInput: String?,

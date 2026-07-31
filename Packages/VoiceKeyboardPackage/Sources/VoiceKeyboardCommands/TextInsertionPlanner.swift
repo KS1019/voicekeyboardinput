@@ -213,7 +213,13 @@ package struct TextInsertionPlanner: Sendable {
         let trimmed = context.dropLast(trailingWhitespaceCount)
         guard !trimmed.isEmpty else { return 0 }
 
-        let sentenceTerminators: Set<Character> = [".", "?", "!", "\n", "\u{2028}", "\u{2029}", "。", "？", "！", "…"]
+        // Swift exposes CRLF as one Character cluster. Include both the
+        // cluster and standalone Unicode line separators so sentence
+        // deletion never crosses a Windows-style line boundary.
+        let sentenceTerminators: Set<Character> = [
+            ".", "?", "!", "\n", "\r", "\r\n", "\u{85}", "\u{2028}", "\u{2029}",
+            "。", "？", "！", "…"
+        ]
         var count = 0
         var hasSeenSentenceBody = false
 

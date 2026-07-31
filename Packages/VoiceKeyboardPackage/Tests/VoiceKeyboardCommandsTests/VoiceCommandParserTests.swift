@@ -14,6 +14,16 @@ final class VoiceCommandParserTests: XCTestCase {
         ])
     }
 
+    func testParsesPunctuationAliasInsideLiteralTranscript() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
+
+        XCTAssertEqual(parser.parse("hello comma world").elements, [
+            .text("hello"),
+            .command(.insertText(",")),
+            .text("world")
+        ])
+    }
+
     func testParsesNewLineAsSingleCommand() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "en-US"))
 

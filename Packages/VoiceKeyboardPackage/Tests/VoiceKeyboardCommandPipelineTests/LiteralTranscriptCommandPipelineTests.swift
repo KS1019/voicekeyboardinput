@@ -9,15 +9,19 @@ final class LiteralTranscriptCommandPipelineTests: XCTestCase {
         )
 
         let preview = pipeline.preview(
-            for: "comma",
+            for: "hello comma world",
             documentContextBeforeInput: ""
         )
 
         XCTAssertEqual(preview.elements, [
+            .text("hello"),
             .command(.insertText(",")),
+            .text("world")
         ])
         XCTAssertEqual(preview.operations, [
-            .insertText(",")
+            .insertText("hello"),
+            .insertText(","),
+            .insertText(" world")
         ])
     }
 
