@@ -22,6 +22,7 @@ GENERATED_CHECK_PATHS := VoiceKeyboardInputApp/Info.plist VoiceKeyboardExtension
 SWIFT_PM := env CLANG_MODULE_CACHE_PATH=/private/tmp/voicekeyboard-clang-cache SWIFTPM_CACHE_PATH=/private/tmp/voicekeyboard-swiftpm-cache swift
 XCODEBUILD := env CLANG_MODULE_CACHE_PATH=/private/tmp/voicekeyboard-clang-cache SWIFTPM_CACHE_PATH=/private/tmp/voicekeyboard-swiftpm-cache xcodebuild
 XCODEGEN ?= $(or $(shell command -v xcodegen 2>/dev/null),$(wildcard /opt/homebrew/bin/xcodegen),$(wildcard /usr/local/bin/xcodegen),xcodegen)
+NODE ?= node
 DEPENDENCY_POLICY_PATHS := project.yml project-mac.yml VoiceKeyboardInput.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved Packages/VoiceKeyboardPackage VoiceKeyboardInputApp VoiceKeyboardExtension VoiceKeyboardUIKit
 FORBIDDEN_PACKAGE_IMPORTS := '^[[:space:]]*import[[:space:]]+(AuralKit|UIKit|AVFAudio|AVFoundation|Speech|FoundationModels)\b'
 FORBIDDEN_MAC_APP_IMPORTS := '^[[:space:]]*import[[:space:]]+(AVFAudio|AVFoundation|Speech|UIKit|FoundationModels)\b'
@@ -42,6 +43,10 @@ package-test:
 .PHONY: package-strict-test
 package-strict-test:
 	cd $(PACKAGE_DIR) && $(SWIFT_PM) test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+
+.PHONY: webkit-test
+webkit-test:
+	$(NODE) Tests/webkit-dictation.test.cjs
 
 .PHONY: build
 build: generate
@@ -214,16 +219,19 @@ keyboard-permission-policy-check:
 	rg --quiet '$(APP_GROUP_ID)' VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements
 	rg --quiet '$(APP_GROUP_ID)' VoiceKeyboardExtension/VoiceKeyboardExtension.entitlements
 
-.PHONY: verify
-verify:
+.PHONY: verify verify-unsigned
+verify: verify-unsigned
+	$(MAKE) mac-security-check
+
+verify-unsigned:
 	$(MAKE) package-strict-test
+	$(MAKE) webkit-test
 	$(MAKE) dependency-policy-check
 	$(MAKE) keyboard-permission-policy-check
 	$(MAKE) generated-check
 	$(MAKE) build
 	$(MAKE) mac-build
 	$(MAKE) mac-test
-	$(MAKE) mac-security-check
 	$(MAKE) ui-kit-test
 	$(MAKE) app-ui-test
 	$(MAKE) preview-layout-test
