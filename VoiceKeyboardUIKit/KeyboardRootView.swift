@@ -22,7 +22,6 @@ final class KeyboardRootView: UIView {
 
     private enum Copy {
         static let voiceInputAccessibilityLabel = "Voice input"
-        static let transcriptAccessibilityLabel = "Transcript"
         static let emptyTranscriptAccessibilityValue = "No transcript"
         static let nextAccessibilityLabel = "Next keyboard"
         static let microphoneTitle = "Speak"
@@ -361,9 +360,7 @@ final class KeyboardRootView: UIView {
         case "Open app":
             return "Open Voice Keyboard Input"
         default:
-            // Keep action-specific labels such as “Check mic” and “Retry”
-            // intact; the button title is the best available description of
-            // those non-start actions.
+            // The title describes actions such as “Check mic” and “Retry”.
             return title
         }
     }
@@ -384,10 +381,7 @@ final class KeyboardRootView: UIView {
 
         switch tone {
         case .positive:
-            // Keep the glyph and title on the system label color. A strong
-            // green fill has insufficient contrast in some light-mode
-            // accessibility combinations, while a translucent tint retains
-            // the Liquid Glass material and stays legible in both appearances.
+            // System label color and a translucent tint preserve contrast in both appearances.
             configuration.baseForegroundColor = .label
             configuration.baseBackgroundColor = .systemGreen.withAlphaComponent(0.22)
         case .warning:

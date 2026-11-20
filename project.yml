@@ -22,8 +22,6 @@ targets:
     sources:
       - VoiceKeyboardInputApp
       - VoiceKeyboardAudioSupport
-      # Keep UIKit source-shared while it is small and extension-safe.
-      # Promote to an iOS-only local framework only when app/extension UI APIs need an explicit module boundary.
       - VoiceKeyboardUIKit
       - path: PrivacyInfo.xcprivacy
         buildPhase: resources
@@ -80,14 +78,8 @@ targets:
       - path: VoiceKeyboardUIKit
         excludes:
           - KeyboardRootViewPreview.swift
-      # Keep native microphone diagnostics out of the keyboard. Its
-      # experimental recording path uses the bundled WebKit page.
       - path: VoiceKeyboardExtension
         excludes:
-          - AudioSessionRouting.swift
-          - KeyboardAudioInputProbe.swift
-          - KeyboardSpeechRecognitionDiagnostics.swift
-          - KeyboardSpeechRecognitionService.swift
           - DictationCapture.html
       - path: VoiceKeyboardExtension/DictationCapture.html
         buildPhase: resources
