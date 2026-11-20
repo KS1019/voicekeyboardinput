@@ -68,6 +68,7 @@ private struct KeyboardRootPreview: UIViewRepresentable {
         showsNextKeyboard: true
     )
     .frame(height: 260)
+    .background(Color(uiColor: .systemBackground))
     .preferredColorScheme(.light)
 }
 
@@ -77,6 +78,7 @@ private struct KeyboardRootPreview: UIViewRepresentable {
         showsNextKeyboard: true
     )
     .frame(height: 260)
+    .background(Color(uiColor: .systemBackground))
     .preferredColorScheme(.dark)
 }
 

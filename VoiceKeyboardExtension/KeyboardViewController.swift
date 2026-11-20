@@ -641,6 +641,8 @@ public final class KeyboardViewController: UIInputViewController {
     // MARK: - View Setup
 
     private func configureView() {
+        view.backgroundColor = .clear
+        view.isOpaque = false
         keyboardRootView.translatesAutoresizingMaskIntoConstraints = false
         keyboardRootView.setNextKeyboardTarget(
             self,

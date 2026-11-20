@@ -13,9 +13,7 @@ final class KeyboardRootView: UIView {
         static let horizontalMargin: CGFloat = 12
         static let verticalMargin: CGFloat = 6
         static let controlPadding: CGFloat = 4
-        static let controlCornerRadius: CGFloat = 12
         static let transcriptPadding: CGFloat = 6
-        static let transcriptCornerRadius: CGFloat = 10
         static let buttonHeight: CGFloat = 38
         static let primaryButtonHeight: CGFloat = 46
         static let buttonMinimumScaleFactor: CGFloat = 0.72
@@ -40,25 +38,16 @@ final class KeyboardRootView: UIView {
         static let returnButton = "keyboard.return"
     }
 
-    // Text needs an adaptive backdrop. The regular Liquid Glass material
-    // keeps the surface translucent while preserving label contrast in both
-    // appearances; clear glass is reserved for media-rich backgrounds.
-    private let transcriptGlassEffect = UIGlassEffect(style: .regular)
-    private lazy var transcriptContainerView = UIVisualEffectView(
-        effect: transcriptGlassEffect
-    )
+    private let transcriptContainerView = UIView()
     private let transcriptIconView = UIImageView(image: UIImage(systemName: "waveform"))
     private let transcriptLabel = UILabel()
     private let statusLabel = UILabel()
     private let voiceActivityLabel = UILabel()
     private let voiceActivityMeterView = VoiceActivityMeterView()
     private let voiceActivityStrip = UIStackView()
-    // The buttons are the interactive glass surfaces. Keeping their parent
-    // plain avoids stacking regular glass behind every glass button.
     private let controlsContainerView = UIView()
     private var nextKeyboardButton: UIButton?
     private var microphoneButton: UIButton?
-    private var transcriptTone: PresentationTone = .muted
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -96,10 +85,8 @@ final class KeyboardRootView: UIView {
     }
 
     private func configureView() {
-        // Let Liquid Glass pick up the host keyboard/background environment.
-        // An opaque grouped background here makes every nested material look
-        // like a flat gray card instead of a translucent surface.
         backgroundColor = .clear
+        isOpaque = false
 
         let stack = UIStackView()
         stack.axis = .vertical
@@ -198,28 +185,11 @@ final class KeyboardRootView: UIView {
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             minimumHeight
         ])
-
-        registerForTraitChanges([
-            UITraitUserInterfaceStyle.self,
-            UITraitUserInterfaceLevel.self,
-            UITraitAccessibilityContrast.self
-        ]) { (view: KeyboardRootView, _) in
-            // CALayer stores a resolved CGColor rather than the dynamic
-            // UIColor provider. Reapply Liquid Glass chrome after an
-            // appearance change so a border resolved in light mode cannot
-            // remain in dark mode.
-            view.updateAdaptiveChromeColors()
-            view.microphoneButton?.setNeedsUpdateConfiguration()
-        }
     }
 
     private func configureTranscriptContainer() {
-        transcriptContainerView.contentView.backgroundColor = .clear
-        transcriptContainerView.clipsToBounds = true
-        transcriptContainerView.layer.cornerRadius = Metrics.transcriptCornerRadius
-        transcriptContainerView.layer.cornerCurve = .continuous
-        transcriptContainerView.layer.borderWidth = 1
-        transcriptContainerView.layer.borderColor = UIColor.separator.withAlphaComponent(0.35).cgColor
+        transcriptContainerView.backgroundColor = .clear
+        transcriptContainerView.isOpaque = false
         transcriptContainerView.isAccessibilityElement = true
         transcriptContainerView.accessibilityLabel = Copy.voiceInputAccessibilityLabel
         transcriptContainerView.translatesAutoresizingMaskIntoConstraints = false
@@ -249,7 +219,7 @@ final class KeyboardRootView: UIView {
         transcriptStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         voiceActivityStrip.setContentCompressionResistancePriority(.required, for: .horizontal)
         transcriptLabel.translatesAutoresizingMaskIntoConstraints = false
-        transcriptContainerView.contentView.addSubview(contentStack)
+        transcriptContainerView.addSubview(contentStack)
 
         NSLayoutConstraint.activate([
             transcriptIconView.widthAnchor.constraint(equalToConstant: 18),
@@ -274,11 +244,8 @@ final class KeyboardRootView: UIView {
     }
 
     private func configureControlsContainer(with controls: UIStackView) {
-        controlsContainerView.clipsToBounds = true
-        controlsContainerView.layer.cornerRadius = Metrics.controlCornerRadius
-        controlsContainerView.layer.cornerCurve = .continuous
-        controlsContainerView.layer.borderWidth = 1
-        controlsContainerView.layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor
+        controlsContainerView.backgroundColor = .clear
+        controlsContainerView.isOpaque = false
         controlsContainerView.addSubview(controls)
 
         NSLayoutConstraint.activate([
@@ -457,16 +424,7 @@ final class KeyboardRootView: UIView {
     }
 
     private func updateTranscriptChrome(tone: PresentationTone) {
-        transcriptTone = tone
-        updateAdaptiveChromeColors()
-    }
-
-    private func updateAdaptiveChromeColors() {
-        let color = transcriptTone.uiColor
-        transcriptIconView.tintColor = transcriptTone.uiForegroundColor
-        transcriptContainerView.layer.borderColor = color.withAlphaComponent(0.22).cgColor
-        transcriptGlassEffect.tintColor = color.withAlphaComponent(0.12)
-        controlsContainerView.layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor
+        transcriptIconView.tintColor = tone.uiForegroundColor
     }
 
     private func updateVoiceInputAccessibilityValue(activity: String?) {
