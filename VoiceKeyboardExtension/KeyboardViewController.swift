@@ -6,6 +6,30 @@ import VoiceKeyboardSharedStorage
 
 @MainActor
 public final class KeyboardViewController: UIInputViewController {
+    private struct PendingDocumentMutation: Equatable {
+        enum Kind: Equatable {
+            case delete
+            case returnKey
+        }
+
+        let kind: Kind
+        let expectedContext: SharedDictationDocumentContextFingerprint
+        let expectedMutationGeneration: UInt64
+        let expectedEpoch: UInt64
+
+        init(
+            kind: Kind,
+            expectedContext: SharedDictationDocumentContextFingerprint,
+            expectedMutationGeneration: UInt64,
+            expectedEpoch: UInt64
+        ) {
+            self.kind = kind
+            self.expectedContext = expectedContext
+            self.expectedMutationGeneration = expectedMutationGeneration
+            self.expectedEpoch = expectedEpoch
+        }
+    }
+
     private let keyboardRootView = KeyboardRootView()
     private let speechCaptureCoordinator = KeyboardSpeechCaptureCoordinator()
     private let sharedDeliveryOwnerID = UUID().uuidString
@@ -28,6 +52,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var sharedPollingGeneration: UInt64 = 0
     private var activeSharedSessionID: String?
     private var activeSharedCommandToken: String?
+    private var activeSharedTranscriptToken: String?
     private var sharedSessionDocumentContext: String?
     private var sharedSessionDocumentContextAfterInput: String?
     private var sharedSessionDocumentIdentifier: UUID?
@@ -49,12 +74,23 @@ public final class KeyboardViewController: UIInputViewController {
     private var isSharedDeliveryRecoveryInProgress = false
     private var isSharedStorageResolutionUnknown = false
     private var sharedDeliveryRecoveryGeneration: UInt64 = 0
+    private var sharedDeliveryRecoveryRetryGeneration: UInt64 = 0
     private var sharedDeliveryRecoveryRetryTask: Task<Void, Never>?
-    private var hasSharedDeliveryLifecycleGap = false
+    // Only an unexpected local disappearance creates a lifecycle gap. A
+    // newly-created controller can still safely recover an intentional
+    // containing-app handoff because the command's durable document
+    // fingerprint is checked before insertion.
+    private var hasSharedDeliveryLifecycleGap = true
+    private var lifecycleGapSessionID: String?
+    private var lifecycleGapTranscriptToken: String?
+    private var blockedLifecycleTranscriptTokens: Set<String> = []
+    private static let maximumBlockedLifecycleTranscriptTokens = 32
     private var sharedCancellationTask: Task<Void, Never>?
     private var isSharedCancellationInProgress = false
-    private var queuedDocumentMutations: [() -> Void] = []
+    private var queuedDocumentMutations: [PendingDocumentMutation] = []
+    private static let maximumQueuedDocumentMutations = 32
     private var sharedCancellationRetryTask: Task<Void, Never>?
+    private var sharedCancellationRetryGeneration: UInt64 = 0
     private var sharedCancellationRecoveryWaitTask: Task<Void, Never>?
     private var sharedCancellationOperationGeneration: UInt64 = 0
     private var directRecognitionStopTask: Task<Void, Never>?
@@ -79,6 +115,14 @@ public final class KeyboardViewController: UIInputViewController {
         }.value
     }
 
+    private func persistKeyboardLifecycleBlock(for transcriptToken: String) {
+        let provider = sharedSessionStoreProvider
+        Task.detached {
+            guard let store = provider() else { return }
+            _ = store.blockKeyboardTranscript(token: transcriptToken)
+        }
+    }
+
     private func saveSharedCommandWithRetry(
         _ command: SharedDictationSessionCommand,
         attempts: Int = 3
@@ -100,10 +144,16 @@ public final class KeyboardViewController: UIInputViewController {
         onExhausted: @escaping @MainActor () -> Void = {}
     ) {
         sharedCancellationRetryTask?.cancel()
+        sharedCancellationRetryGeneration &+= 1
+        let retryGeneration = sharedCancellationRetryGeneration
         sharedCancellationRetryTask = Task { [weak self] in
             for _ in 0..<120 {
-                guard let self else { return }
+                guard let self,
+                      self.sharedCancellationRetryGeneration == retryGeneration,
+                      !Task.isCancelled else { return }
                 if await self.sessionStoreCall({ $0.saveCommand(command) }) == true {
+                    guard !Task.isCancelled,
+                          self.sharedCancellationRetryGeneration == retryGeneration else { return }
                     self.sharedCancellationRetryTask = nil
                     onSuccess()
                     return
@@ -114,9 +164,45 @@ public final class KeyboardViewController: UIInputViewController {
                     return
                 }
             }
-            guard let self else { return }
+            guard let self,
+                  !Task.isCancelled,
+                  self.sharedCancellationRetryGeneration == retryGeneration else { return }
             self.sharedCancellationRetryTask = nil
             onExhausted()
+        }
+    }
+
+    private func scheduleSharedCancellationResolutionRetry(epoch: UInt64) {
+        guard isViewVisible,
+              lifecycleEpoch == epoch,
+              sharedCancellationRetryTask == nil else { return }
+        sharedCancellationRetryGeneration &+= 1
+        let retryGeneration = sharedCancellationRetryGeneration
+        sharedCancellationRetryTask = Task { [weak self] in
+            defer {
+                if let self,
+                   self.sharedCancellationRetryGeneration == retryGeneration {
+                    self.sharedCancellationRetryTask = nil
+                }
+            }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
+                }
+                guard let self,
+                      !Task.isCancelled,
+                      self.sharedCancellationRetryGeneration == retryGeneration,
+                      self.isViewVisible,
+                      self.lifecycleEpoch == epoch,
+                      self.isSharedStorageResolutionUnknown,
+                      !self.isSharedCancellationInProgress else { return }
+                guard let mutation = self.queuedDocumentMutations.first else { return }
+                self.queuedDocumentMutations.removeFirst()
+                self.cancelSharedDictationForLifecycleChange(then: mutation)
+                return
+            }
         }
     }
 
@@ -190,6 +276,10 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: UInt64) {
+        if isSharedStorageResolutionUnknown, !queuedDocumentMutations.isEmpty {
+            scheduleSharedCancellationResolutionRetry(epoch: epoch)
+            return
+        }
         guard isSharedCancellationInProgress,
               let cancellationTask = sharedCancellationTask else {
             startSharedDeliveryRecovery(epoch: epoch)
@@ -209,6 +299,10 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func startSharedDeliveryRecovery(epoch: UInt64) {
+        guard !(isSharedStorageResolutionUnknown && !queuedDocumentMutations.isEmpty) else {
+            scheduleSharedCancellationResolutionRetry(epoch: epoch)
+            return
+        }
         sharedDeliveryRecoveryRetryTask?.cancel()
         sharedDeliveryRecoveryRetryTask = nil
         sharedDeliveryTask?.cancel()
@@ -276,9 +370,12 @@ public final class KeyboardViewController: UIInputViewController {
         guard isViewVisible,
               lifecycleEpoch == epoch,
               sharedDeliveryRecoveryRetryTask == nil else { return }
+        sharedDeliveryRecoveryRetryGeneration &+= 1
+        let retryGeneration = sharedDeliveryRecoveryRetryGeneration
         sharedDeliveryRecoveryRetryTask = Task { [weak self] in
             defer {
-                if let self {
+                if let self,
+                   self.sharedDeliveryRecoveryRetryGeneration == retryGeneration {
                     self.sharedDeliveryRecoveryRetryTask = nil
                 }
             }
@@ -290,6 +387,7 @@ public final class KeyboardViewController: UIInputViewController {
                 }
                 guard let self,
                       !Task.isCancelled,
+                      self.sharedDeliveryRecoveryRetryGeneration == retryGeneration,
                       self.isViewVisible,
                       self.lifecycleEpoch == epoch else { return }
                 if !self.isSharedCancellationInProgress {
@@ -337,10 +435,19 @@ public final class KeyboardViewController: UIInputViewController {
                     continue
                 case .found(let replacedStatus):
                     switch replacedStatus {
-                    case .failed, .cancelled:
+                    case .cancelled:
                         guard store.discardCancellationIntent(forToken: command.token) else {
                             allResolved = false
                             continue
+                        }
+                        continue
+                    case .failed:
+                        // A failed producer may still have a committed
+                        // transcript. Keep the cancellation fence until the
+                        // cancel command is persisted and processed; dropping
+                        // it here would allow that transcript to resurrect.
+                        if !store.saveCommand(command) {
+                            allResolved = false
                         }
                         continue
                     default:
@@ -429,6 +536,12 @@ public final class KeyboardViewController: UIInputViewController {
             case .unavailable:
                 return false
             }
+            if pendingDelivery.isQuarantined {
+                // A previous recovery already wrote the no-replay tombstone.
+                // Leave it in place and continue to the failure WAL; trying
+                // to discard or quarantine it again would deadlock recovery.
+                continue
+            }
             let repaired: Bool
             if pendingDelivery.mutationInFlight || pendingDelivery.appliedOperationCount > 0 {
                 repaired = await transcriptStoreCall {
@@ -458,7 +571,27 @@ public final class KeyboardViewController: UIInputViewController {
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         isViewVisible = false
-        hasSharedDeliveryLifecycleGap = true
+        if isOpeningContainingApp {
+            // This disappearance is the deliberate app handoff requested by
+            // the user. Keep the durable transcript eligible for the next
+            // keyboard instance; its document fingerprint is still checked
+            // before any insertion.
+            hasSharedDeliveryLifecycleGap = false
+            lifecycleGapSessionID = nil
+            lifecycleGapTranscriptToken = nil
+        } else {
+            hasSharedDeliveryLifecycleGap = true
+            lifecycleGapSessionID = activeSharedSessionID
+            lifecycleGapTranscriptToken = activeSharedTranscriptToken
+            if let activeSharedTranscriptToken {
+                blockedLifecycleTranscriptTokens.insert(activeSharedTranscriptToken)
+                if blockedLifecycleTranscriptTokens.count > Self.maximumBlockedLifecycleTranscriptTokens,
+                   let oldestToken = blockedLifecycleTranscriptTokens.first {
+                    blockedLifecycleTranscriptTokens.remove(oldestToken)
+                }
+                persistKeyboardLifecycleBlock(for: activeSharedTranscriptToken)
+            }
+        }
         lifecycleEpoch &+= 1
         microphoneDecisionTask?.cancel()
         microphoneDecisionTask = nil
@@ -484,8 +617,6 @@ public final class KeyboardViewController: UIInputViewController {
         sharedCancellationRecoveryWaitTask = nil
         queuedDocumentMutations.removeAll()
         endSharedSession()
-        directRecognitionStopTask?.cancel()
-        directRecognitionStopTask = nil
         // Disappearing is a normal keyboard lifecycle event (keyboard
         // switching, host navigation, or temporary dismissal). Keep the
         // durable shared handoff alive; explicit Stop/Cancel and document
@@ -496,17 +627,7 @@ public final class KeyboardViewController: UIInputViewController {
         sharedDeliveryTask = nil
         sharedDeliveryRecoveryGeneration &+= 1
         isSharedDeliveryRecoveryInProgress = false
-        let coordinator = speechCaptureCoordinator
-        let epoch = lifecycleEpoch
-        Task { [weak self] in
-            await coordinator.stopRecognition()
-            guard let self,
-                  self.isViewLoaded,
-                  self.isViewVisible,
-                  self.lifecycleEpoch == epoch else { return }
-            self.isRecognitionStopping = false
-            await self.resumeSharedDictationPollingIfNeeded(epoch: epoch)
-        }
+        startDirectRecognitionStopTask()
     }
 
     // MARK: - View Setup
@@ -672,18 +793,7 @@ public final class KeyboardViewController: UIInputViewController {
         sharedDictationPollingTask = nil
 
         if isRecognitionActive {
-            isRecognitionStopping = true
-            let coordinator = speechCaptureCoordinator
-            let epoch = lifecycleEpoch
-            let recognitionGeneration = self.recognitionGeneration
-            Task { [weak self] in
-                await coordinator.stopRecognition()
-                guard let self,
-                      self.lifecycleEpoch == epoch,
-                      self.recognitionGeneration == recognitionGeneration else { return }
-                self.isRecognitionStopping = false
-                self.renderCurrentSpeechCapture(announce: true)
-            }
+            cancelDirectRecognition()
             return
         }
 
@@ -821,7 +931,10 @@ public final class KeyboardViewController: UIInputViewController {
         }
         activeSharedSessionID = command.sessionID
         activeSharedCommandToken = command.token
+        activeSharedTranscriptToken = command.token
         hasSharedDeliveryLifecycleGap = false
+        lifecycleGapSessionID = nil
+        lifecycleGapTranscriptToken = nil
         sharedSessionDeliveryFingerprint = startContextFingerprint
         sharedSessionDocumentContext = textDocumentProxy.documentContextBeforeInput
         sharedSessionDocumentContextAfterInput = textDocumentProxy.documentContextAfterInput
@@ -914,8 +1027,18 @@ public final class KeyboardViewController: UIInputViewController {
                     return .storageUnavailable
                 }
                 switch status {
-                case .failed, .cancelled:
+                case .cancelled:
                     continue
+                case .failed:
+                    // A failed producer status does not prove that its
+                    // transcript journal is empty. Preserve the explicit
+                    // Delete/Return cancellation fence so recovery cannot
+                    // later promote a committed transcript.
+                    return .target(SharedCancellationTarget(
+                        sessionID: command.sessionID,
+                        activeCommandToken: command.token,
+                        replacedCommandToken: command.token
+                    ))
                 case .commandPending,
                      .commandAcknowledged,
                      .recording,
@@ -934,15 +1057,15 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func cancelSharedDictationForLifecycleChange(
-        then mutation: @escaping @MainActor () -> Void
+        then mutation: PendingDocumentMutation
     ) {
         guard !isSharedCancellationInProgress else {
-            queuedDocumentMutations.append(mutation)
+            enqueuePendingDocumentMutation(mutation)
             return
         }
-        let expectedContext = currentDocumentContextFingerprint()
-        let expectedMutationGeneration = documentMutationGeneration
-        let expectedEpoch = lifecycleEpoch
+        let expectedContext = mutation.expectedContext
+        let expectedMutationGeneration = mutation.expectedMutationGeneration
+        let expectedEpoch = mutation.expectedEpoch
         sharedCancellationOperationGeneration &+= 1
         let operationGeneration = sharedCancellationOperationGeneration
         isSharedCancellationInProgress = true
@@ -951,9 +1074,17 @@ public final class KeyboardViewController: UIInputViewController {
             switch await self.sharedCancellationTarget() {
             case .storageUnavailable:
                 guard self.sharedCancellationOperationGeneration == operationGeneration else { return }
+                self.isSharedStorageResolutionUnknown = true
                 self.isSharedCancellationInProgress = false
                 self.sharedCancellationTask = nil
-                self.queuedDocumentMutations.removeAll()
+                self.retainMutationForCancellationRetry(
+                    mutation
+                )
+                self.sharedDictationPollingTask?.cancel()
+                self.sharedDictationPollingTask = nil
+                self.sharedDeliveryTask?.cancel()
+                self.sharedDeliveryTask = nil
+                self.scheduleSharedCancellationResolutionRetry(epoch: expectedEpoch)
                 guard self.lifecycleEpoch == expectedEpoch, self.isViewVisible else { return }
                 self.keyboardRootView.render(
                     speechCapture: .sharedDictationUnavailable,
@@ -967,21 +1098,21 @@ public final class KeyboardViewController: UIInputViewController {
                 // a task that can no longer be observed by the old view.
                 self.isSharedCancellationInProgress = false
                 self.sharedCancellationTask = nil
+                self.isSharedStorageResolutionUnknown = false
                 self.cancelDirectRecognition()
-                self.queuedDocumentMutations.removeAll()
                 guard self.lifecycleEpoch == expectedEpoch, self.isViewVisible else {
+                    self.queuedDocumentMutations.removeAll()
                     self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
                     return
                 }
                 let canApplyMutation = self.documentMutationGeneration == expectedMutationGeneration
                     && self.currentDocumentContextFingerprint() == expectedContext
                 if canApplyMutation {
-                    mutation()
+                    self.applyPendingDocumentMutations(startingWith: mutation)
+                } else {
+                    self.queuedDocumentMutations.removeAll()
                 }
-                // A proxy mutation can submit a form or move focus. Do not
-                // replay taps captured before cancellation onto an unverified
-                // field; fail closed and let the user retry in the new field.
-                self.queuedDocumentMutations.removeAll()
+                self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
             case .target(let target):
                 let cancelCommand = SharedDictationSessionCommand.cancel(
                     sessionID: target.sessionID,
@@ -995,7 +1126,14 @@ public final class KeyboardViewController: UIInputViewController {
                     self.isSharedStorageResolutionUnknown = true
                     self.isSharedCancellationInProgress = false
                     self.sharedCancellationTask = nil
-                    self.queuedDocumentMutations.removeAll()
+                    self.retainMutationForCancellationRetry(
+                        mutation
+                    )
+                    self.sharedDictationPollingTask?.cancel()
+                    self.sharedDictationPollingTask = nil
+                    self.sharedDeliveryTask?.cancel()
+                    self.sharedDeliveryTask = nil
+                    self.scheduleSharedCancellationResolutionRetry(epoch: expectedEpoch)
                     guard self.lifecycleEpoch == expectedEpoch, self.isViewVisible else { return }
                     self.keyboardRootView.render(
                         speechCapture: .sharedDictationUnavailable,
@@ -1031,7 +1169,14 @@ public final class KeyboardViewController: UIInputViewController {
                         self.isSharedStorageResolutionUnknown = true
                         self.isSharedCancellationInProgress = false
                         self.sharedCancellationTask = nil
-                        self.queuedDocumentMutations.removeAll()
+                        self.retainMutationForCancellationRetry(
+                            mutation
+                        )
+                        self.sharedDictationPollingTask?.cancel()
+                        self.sharedDictationPollingTask = nil
+                        self.sharedDeliveryTask?.cancel()
+                        self.sharedDeliveryTask = nil
+                        self.scheduleSharedCancellationResolutionRetry(epoch: self.lifecycleEpoch)
                         self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
                         guard self.lifecycleEpoch == expectedEpoch, self.isViewVisible else { return }
                         self.keyboardRootView.render(
@@ -1059,7 +1204,7 @@ public final class KeyboardViewController: UIInputViewController {
         expectedMutationGeneration: UInt64,
         expectedEpoch: UInt64,
         operationGeneration: UInt64,
-        mutation: @escaping @MainActor () -> Void
+        mutation: PendingDocumentMutation
     ) {
         guard sharedCancellationOperationGeneration == operationGeneration else { return }
         guard lifecycleEpoch == expectedEpoch, isViewVisible else {
@@ -1079,13 +1224,24 @@ public final class KeyboardViewController: UIInputViewController {
         isSharedCancellationInProgress = false
         sharedCancellationTask = nil
         if canApplyMutation {
-            mutation()
+            applyPendingDocumentMutations(startingWith: mutation)
+        } else {
+            queuedDocumentMutations.removeAll()
         }
-        // The first proxy mutation may change focus synchronously. Queued
-        // taps were captured against the previous field, so never replay them
-        // without a fresh document identity check.
-        queuedDocumentMutations.removeAll()
         startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: lifecycleEpoch)
+    }
+
+    private func retainMutationForCancellationRetry(
+        _ mutation: PendingDocumentMutation
+    ) {
+        guard isViewVisible, lifecycleEpoch == mutation.expectedEpoch else {
+            // The mutation belongs to a document that is no longer visible.
+            // Never replay it against a newly focused host field.
+            queuedDocumentMutations.removeAll()
+            return
+        }
+        enqueuePendingDocumentMutation(mutation, atFront: true)
+        scheduleSharedCancellationResolutionRetry(epoch: mutation.expectedEpoch)
     }
 
     private func isCurrentInteraction(_ epoch: UInt64?) -> Bool {
@@ -1138,6 +1294,7 @@ public final class KeyboardViewController: UIInputViewController {
             return
         }
         activeSharedCommandToken = command.token
+        activeSharedTranscriptToken = commandToken
         keyboardRootView.render(
             speechCapture: .sharedDictationStopping,
             announce: true
@@ -1349,11 +1506,18 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func finishRecognitionStopAfterAppearance() {
-        let coordinator = speechCaptureCoordinator
         let epoch = lifecycleEpoch
+        guard let stopTask = directRecognitionStopTask else {
+            isRecognitionStopping = false
+            startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: epoch)
+            return
+        }
         Task { [weak self] in
-            await coordinator.stopRecognition()
-            guard let self, self.lifecycleEpoch == epoch else { return }
+            await stopTask.value
+            guard let self,
+                  self.lifecycleEpoch == epoch,
+                  self.isViewVisible else { return }
+            self.directRecognitionStopTask = nil
             self.isRecognitionStopping = false
             self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: epoch)
         }
@@ -1399,7 +1563,7 @@ public final class KeyboardViewController: UIInputViewController {
             }
         }
         guard actions.count <= SharedDictationTranscriptDelivery.maximumOperationCount,
-              totalDeletionCount <= Self.maximumSharedDeletionCount else {
+              totalDeletionCount <= SharedDictationTranscriptDelivery.maximumTotalDeletionCount else {
             keyboardRootView.render(
                 speechCapture: .keyboardSpeechCapture(.unsupportedCommand(
                     "Voice input contained too many editing operations."
@@ -1510,6 +1674,9 @@ public final class KeyboardViewController: UIInputViewController {
         }
         guard isCurrentDelivery() else { return false }
         guard !latestTranscript.isExpired() else {
+            guard await transcriptStoreCall({
+                $0.markConsumed(token: source.commandToken)
+            }) == true else { return false }
             guard await sessionStoreCall({
                 $0.saveDeliveryFailure(
                     token: source.commandToken,
@@ -1552,6 +1719,80 @@ public final class KeyboardViewController: UIInputViewController {
             return false
         }
         guard isCurrentDelivery() else { return false }
+        let isDurablyBlocked = await sessionStoreCall {
+            $0.isKeyboardTranscriptBlocked(token: source.commandToken)
+        } == true
+        let isLocallyBlocked = blockedLifecycleTranscriptTokens.contains(source.commandToken)
+        if hasSharedDeliveryLifecycleGap {
+            if let lifecycleGapSessionID,
+               source.sessionID != lifecycleGapSessionID {
+                return false
+            }
+            if let lifecycleGapTranscriptToken,
+               source.commandToken != lifecycleGapTranscriptToken {
+                return false
+            }
+            let lifecycleContextMatches = await sharedDocumentContextMatches(
+                sourceCommandToken: source.commandToken
+            )
+            if isLocallyBlocked || isDurablyBlocked || !lifecycleContextMatches {
+                // UITextDocumentProxy exposes only a bounded context window,
+                // so a source blocked by an unexpected keyboard disappearance
+                // must never be replayed. For an intentional containing-app
+                // handoff, the durable command fingerprint is the proof that
+                // the same field is still active.
+                let message = "The text field could not be verified after the keyboard restarted. Try again."
+                guard await failSharedDelivery(
+                    sourceCommandToken: source.commandToken,
+                    transcriptToken: pendingDelivery?.transcriptToken ?? latestTranscript.token,
+                    message: message
+                ) else { return false }
+                blockedLifecycleTranscriptTokens.remove(source.commandToken)
+                _ = await sessionStoreCall {
+                    $0.clearKeyboardTranscriptBlock(token: source.commandToken)
+                }
+                guard isCurrentDelivery() else { return false }
+                endSharedSession(
+                    ifMatchingSessionID: source.sessionID,
+                    commandToken: command.token,
+                    pollingGeneration: deliveryPollingGeneration
+                )
+                keyboardRootView.render(
+                    speechCapture: .keyboardSpeechCapture(.recognitionFailed(
+                        .recognitionFailed(message)
+                    )),
+                    announce: true
+                )
+                return true
+            }
+            hasSharedDeliveryLifecycleGap = false
+            lifecycleGapSessionID = nil
+            lifecycleGapTranscriptToken = nil
+        } else if isLocallyBlocked || isDurablyBlocked {
+            let message = "The text field could not be verified after the keyboard restarted. Try again."
+            guard await failSharedDelivery(
+                sourceCommandToken: source.commandToken,
+                transcriptToken: pendingDelivery?.transcriptToken ?? latestTranscript.token,
+                message: message
+            ) else { return false }
+            blockedLifecycleTranscriptTokens.remove(source.commandToken)
+            _ = await sessionStoreCall {
+                $0.clearKeyboardTranscriptBlock(token: source.commandToken)
+            }
+            guard isCurrentDelivery() else { return false }
+            endSharedSession(
+                ifMatchingSessionID: source.sessionID,
+                commandToken: command.token,
+                pollingGeneration: deliveryPollingGeneration
+            )
+            keyboardRootView.render(
+                speechCapture: .keyboardSpeechCapture(.recognitionFailed(
+                    .recognitionFailed(message)
+                )),
+                announce: true
+            )
+            return true
+        }
         if let candidate = pendingDelivery,
            candidate.transcriptToken != latestTranscript.token {
             // A session can retain a journal for an older transcript when a
@@ -2052,6 +2293,7 @@ public final class KeyboardViewController: UIInputViewController {
         }
         activeSharedSessionID = nil
         activeSharedCommandToken = nil
+        activeSharedTranscriptToken = nil
         sharedSessionDocumentContext = nil
         sharedSessionDocumentContextAfterInput = nil
         sharedSessionDocumentIdentifier = nil
@@ -2431,6 +2673,7 @@ public final class KeyboardViewController: UIInputViewController {
         guard !Task.isCancelled,
               !isRecognitionStopping,
               !isSharedCancellationInProgress,
+              !isSharedStorageResolutionUnknown,
               isViewVisible else { return false }
         if let epoch, lifecycleEpoch != epoch { return false }
         if let pollingGeneration, sharedPollingGeneration != pollingGeneration { return false }
@@ -2482,6 +2725,19 @@ public final class KeyboardViewController: UIInputViewController {
                         ownerID: deliveryOwnerID
                     )
                 } == true
+                if !canWriteFailure,
+                   case .missing = await transcriptStoreCall({
+                       $0.pendingDeliveryResolution(forCommandToken: sourceCommandToken)
+                   }) ?? .unavailable {
+                    // A transcript can become visible before its delivery
+                    // journal is created. There is no host mutation to
+                    // reconcile in that state; redact the transcript and
+                    // persist the terminal failure fence instead of leaving
+                    // recovery stuck forever.
+                    canWriteFailure = await transcriptStoreCall {
+                        $0.markConsumed(token: transcriptToken)
+                    } == true
+                }
             }
         }
         guard canWriteFailure else {
@@ -2558,10 +2814,18 @@ public final class KeyboardViewController: UIInputViewController {
         }
         guard operations.allSatisfy({ operation in
             if case let .deleteBackward(count) = operation {
-                return count.value <= Self.maximumSharedDeletionCount
+                return count.value <= TextDeletionCount.maximumValue
             }
             return true
         }) else {
+            return nil
+        }
+        let totalDeletionCount = operations.reduce(into: 0) { total, operation in
+            if case let .deleteBackward(count) = operation {
+                total += count.value
+            }
+        }
+        guard totalDeletionCount <= SharedDictationTranscriptDelivery.maximumTotalDeletionCount else {
             return nil
         }
         // Keep a multi-character deletion as one journal operation. The host
@@ -2571,7 +2835,6 @@ public final class KeyboardViewController: UIInputViewController {
         return operations
     }
 
-    private static let maximumSharedDeletionCount = 512
     private static let sharedTranscriptRecoveryRetention: TimeInterval = 360
 
     private func hostContextMatchesExpected(
@@ -2614,6 +2877,28 @@ public final class KeyboardViewController: UIInputViewController {
         return command
     }
 
+    private func commandMatchesCurrentDocument(
+        _ command: SharedDictationSessionCommand,
+        commands: [SharedDictationSessionCommand]
+    ) -> Bool {
+        let expectedFingerprint: SharedDictationDocumentContextFingerprint?
+        switch command.kind {
+        case .start:
+            expectedFingerprint = command.documentContextFingerprint
+        case .stop:
+            expectedFingerprint = command.replacesCommandToken.flatMap { token in
+                commands.first { $0.token == token }?.documentContextFingerprint
+            }
+        case .cancel:
+            expectedFingerprint = nil
+        }
+        guard let expectedFingerprint,
+              expectedFingerprint.hasStableMutationIdentity else {
+            return false
+        }
+        return expectedFingerprint.matches(currentDocumentContextFingerprint())
+    }
+
     private func matchingActiveStartCommand(epoch: UInt64? = nil) async -> SharedDictationSessionCommand? {
         guard isSharedDeliveryCurrent(epoch) else { return nil }
         guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }),
@@ -2643,6 +2928,13 @@ public final class KeyboardViewController: UIInputViewController {
             if command.kind == .start && cancelledStartTokens.contains(command.token) {
                 continue
             }
+            guard commandMatchesCurrentDocument(command, commands: commands) else {
+                // A global command history can contain a completed session
+                // from another host field. Do not terminally consume it here;
+                // let the keyboard attached to its durable document identity
+                // recover it instead.
+                continue
+            }
             if await isConsumedSharedTranscript(for: command) {
                 continue
             }
@@ -2652,6 +2944,7 @@ public final class KeyboardViewController: UIInputViewController {
                 guard isSharedDeliveryCurrent(epoch) else { return nil }
                 activeSharedSessionID = command.sessionID
                 activeSharedCommandToken = command.token
+                activeSharedTranscriptToken = command.replacesCommandToken
                 sharedSessionDeliveryFingerprint = command.replacesCommandToken.flatMap { replacedToken in
                     commands.first { $0.token == replacedToken }?.documentContextFingerprint
                 }
@@ -2676,6 +2969,7 @@ public final class KeyboardViewController: UIInputViewController {
                 guard !command.isExpired() else { continue }
                 activeSharedSessionID = command.sessionID
                 activeSharedCommandToken = command.token
+                activeSharedTranscriptToken = command.token
                 sharedSessionDeliveryFingerprint = command.documentContextFingerprint
                 return command
             }
@@ -2699,6 +2993,7 @@ public final class KeyboardViewController: UIInputViewController {
             guard isSharedDeliveryCurrent(epoch) else { return nil }
             activeSharedSessionID = command.sessionID
             activeSharedCommandToken = command.token
+            activeSharedTranscriptToken = command.token
             // A recreated controller may recover the command after the
             // original controller has already cleared its in-memory context.
             // Preserve the durable start fingerprint so the lifecycle-gap
@@ -2782,7 +3077,9 @@ public final class KeyboardViewController: UIInputViewController {
             guard !didOpen else { return }
             Task { @MainActor in
                 guard let self, self.lifecycleEpoch == epoch else { return }
-                self.isOpeningContainingApp = false
+                // Keep the handoff intent alive after an URL-opening failure.
+                // The user may switch to the containing app manually; the
+                // durable document fingerprint remains the final safety gate.
                 self.keyboardRootView.render(
                     speechCapture: .containingAppOpenFailed,
                     announce: true
@@ -2792,33 +3089,27 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func deleteTapped() {
-        guard !isRecognitionStopping else { return }
-        performDocumentMutationAfterVoiceCancellation {
-            self.isApplyingProxyMutation = true
-            self.textDocumentProxy.deleteBackward()
-            self.isApplyingProxyMutation = false
-            self.expectSelfMutationCallbacks(for: self.currentDocumentContextFingerprint())
-        }
+        performDocumentMutationAfterVoiceCancellation(.delete)
     }
 
     @objc private func returnTapped() {
-        guard !isRecognitionStopping else { return }
-        performDocumentMutationAfterVoiceCancellation {
-            self.isApplyingProxyMutation = true
-            self.textDocumentProxy.insertText("\n")
-            self.isApplyingProxyMutation = false
-            self.expectSelfMutationCallbacks(for: self.currentDocumentContextFingerprint())
-        }
+        performDocumentMutationAfterVoiceCancellation(.returnKey)
     }
 
     private func performDocumentMutationAfterVoiceCancellation(
-        _ mutation: @escaping @MainActor () -> Void
+        _ kind: PendingDocumentMutation.Kind
     ) {
         microphoneDecisionTask?.cancel()
         microphoneDecisionTask = nil
         isMicrophoneDecisionInFlight = false
+        let mutation = PendingDocumentMutation(
+            kind: kind,
+            expectedContext: currentDocumentContextFingerprint(),
+            expectedMutationGeneration: documentMutationGeneration,
+            expectedEpoch: lifecycleEpoch
+        )
         if isSharedCancellationInProgress {
-            queuedDocumentMutations.append(mutation)
+            enqueuePendingDocumentMutation(mutation)
             return
         }
         if isSharedStorageResolutionUnknown
@@ -2828,12 +3119,70 @@ public final class KeyboardViewController: UIInputViewController {
             cancelSharedDictationForLifecycleChange(then: mutation)
         } else {
             cancelDirectRecognition()
-            mutation()
+            applyDocumentMutation(mutation)
+        }
+    }
+
+    private func enqueuePendingDocumentMutation(
+        _ mutation: PendingDocumentMutation,
+        atFront: Bool = false
+    ) {
+        // App Group outages can otherwise turn repeated Delete/Return taps
+        // into an unbounded extension-resident queue. A Return is a focus
+        // boundary, so never retain edits captured after one has already
+        // been queued; replaying them against a new field is unsafe.
+        guard !queuedDocumentMutations.contains(where: { $0.kind == .returnKey }),
+              queuedDocumentMutations.count < Self.maximumQueuedDocumentMutations else {
+            return
+        }
+        if atFront {
+            queuedDocumentMutations.insert(mutation, at: 0)
+        } else {
+            queuedDocumentMutations.append(mutation)
+        }
+    }
+
+    private func applyDocumentMutation(_ mutation: PendingDocumentMutation) {
+        isApplyingProxyMutation = true
+        switch mutation.kind {
+        case .delete:
+            textDocumentProxy.deleteBackward()
+        case .returnKey:
+            textDocumentProxy.insertText("\n")
+        }
+        isApplyingProxyMutation = false
+        expectSelfMutationCallbacks(for: currentDocumentContextFingerprint())
+    }
+
+    private func applyPendingDocumentMutations(startingWith mutation: PendingDocumentMutation) {
+        let pendingMutations = [mutation] + queuedDocumentMutations
+        queuedDocumentMutations.removeAll()
+        guard mutation.expectedEpoch == lifecycleEpoch,
+              mutation.expectedMutationGeneration == documentMutationGeneration,
+              mutation.expectedContext.hasStableMutationIdentity,
+              currentDocumentContextFingerprint() == mutation.expectedContext else {
+            return
+        }
+        for pendingMutation in pendingMutations {
+            guard pendingMutation.expectedEpoch == mutation.expectedEpoch,
+                  pendingMutation.expectedMutationGeneration == mutation.expectedMutationGeneration,
+                  pendingMutation.expectedContext == mutation.expectedContext else {
+                // Never combine queued edits captured from different host
+                // fields or external document generations.
+                break
+            }
+            applyDocumentMutation(pendingMutation)
+            // Return may move focus in the host. Do not replay subsequent
+            // edits against an unverified document after that boundary.
+            if pendingMutation.kind == .returnKey {
+                break
+            }
         }
     }
 
     private func cancelDirectRecognition() {
         guard isRecognitionActive || recognitionTask != nil else { return }
+        guard directRecognitionStopTask == nil else { return }
         recognitionGeneration &+= 1
         let stopGeneration = recognitionGeneration
         let stopEpoch = lifecycleEpoch
@@ -2846,7 +3195,6 @@ public final class KeyboardViewController: UIInputViewController {
         recognitionExpectedSelectedText = nil
         isRecognitionStopping = true
         let coordinator = speechCaptureCoordinator
-        directRecognitionStopTask?.cancel()
         directRecognitionStopTask = Task { [weak self] in
             await coordinator.stopRecognition()
             guard let self,
@@ -2858,6 +3206,23 @@ public final class KeyboardViewController: UIInputViewController {
             if self.isViewVisible {
                 self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
             }
+        }
+    }
+
+    private func startDirectRecognitionStopTask() {
+        guard directRecognitionStopTask == nil else { return }
+        let coordinator = speechCaptureCoordinator
+        let stopGeneration = recognitionGeneration
+        let stopEpoch = lifecycleEpoch
+        directRecognitionStopTask = Task { [weak self] in
+            await coordinator.stopRecognition()
+            guard let self,
+                  self.recognitionGeneration == stopGeneration,
+                  self.lifecycleEpoch == stopEpoch,
+                  self.isViewVisible else { return }
+            self.directRecognitionStopTask = nil
+            self.isRecognitionStopping = false
+            self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
         }
     }
 }

@@ -69,13 +69,102 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         XCTAssertTrue(coordinator.beginDeactivationPending(for: token))
         coordinator.finish(token)
-        coordinator.completeDeactivationPendingIfOperationFinished(token)
+        XCTAssertTrue(coordinator.completeDeactivationPendingIfOperationFinished(token))
 
         let nextToken = coordinator.begin()
         XCTAssertNotNil(nextToken)
         if let nextToken {
             coordinator.finish(nextToken)
         }
+    }
+
+    func testSuccessfulOriginalDeactivationWinsOverFailedFallback() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        coordinator.invalidateAndHold(token)
+        XCTAssertTrue(coordinator.beginFallbackDeactivation(token))
+        XCTAssertTrue(coordinator.recordCallbackDuringFallback(token, succeeded: true))
+
+        XCTAssertEqual(
+            coordinator.completeFallbackDeactivation(token, succeeded: false),
+            .succeeded
+        )
+        XCTAssertFalse(coordinator.isTerminal)
+        XCTAssertNotNil(coordinator.begin())
+    }
+
+    func testSuccessfulLateOriginalDeactivationWinsOverFailedFallback() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        coordinator.invalidateAndHold(token)
+        XCTAssertTrue(coordinator.claimLateDeactivation(token))
+        XCTAssertTrue(coordinator.beginLateDeactivationFallback(token))
+        XCTAssertTrue(coordinator.recordCallbackDuringLateFallback(token, succeeded: true))
+
+        XCTAssertEqual(
+            coordinator.completeLateDeactivationFallback(token, succeeded: false),
+            .succeeded
+        )
+        XCTAssertFalse(coordinator.isTerminal)
+        XCTAssertNotNil(coordinator.begin())
+    }
+
+    func testLateActivationSuccessDoesNotMakeFailedFallbackLookLikeDeactivationSuccess() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        guard let token = coordinator.begin() else {
+            return XCTFail("Expected the coordinator to grant the first token")
+        }
+
+        coordinator.invalidateAndHold(token)
+        XCTAssertTrue(coordinator.beginFallbackDeactivation(token))
+        XCTAssertTrue(coordinator.recordActivationCallbackDuringFallback(token, activated: true))
+
+        XCTAssertEqual(
+            coordinator.completeFallbackDeactivation(token, succeeded: false),
+            .failed
+        )
+        XCTAssertTrue(coordinator.isTerminal)
+        XCTAssertNil(coordinator.begin())
+    }
+
+    func testMediaServicesResetClearsStaleAudioOwnershipAndQuarantine() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        let ownerToken = coordinator.acquireOwnership()
+        XCTAssertNotNil(ownerToken)
+        coordinator.beginSessionOperation()
+        coordinator.markTerminal()
+
+        coordinator.recoverAfterMediaServicesReset()
+
+        XCTAssertFalse(coordinator.isTerminal)
+        XCTAssertFalse(coordinator.hasPendingSessionOperation)
+        let nextOwnerToken = coordinator.acquireOwnership()
+        XCTAssertNotNil(nextOwnerToken)
+        if let nextOwnerToken {
+            coordinator.releaseOwnership(nextOwnerToken)
+        }
+        XCTAssertNotNil(coordinator.begin())
+    }
+
+    func testMediaServicesResetScopesLateOperationCompletionToItsGeneration() {
+        let coordinator = AppAudioSessionOperationCoordinator()
+        let oldGeneration = coordinator.beginSessionOperation()
+
+        coordinator.recoverAfterMediaServicesReset()
+        let newGeneration = coordinator.beginSessionOperation()
+        XCTAssertNotEqual(oldGeneration, newGeneration)
+
+        coordinator.completeSessionOperation(oldGeneration)
+        XCTAssertTrue(coordinator.hasPendingSessionOperation)
+
+        coordinator.completeSessionOperation(newGeneration)
+        XCTAssertFalse(coordinator.hasPendingSessionOperation)
     }
 
     func testStartDictationPublishesInjectedProbeResult() async {
@@ -92,10 +181,13 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         let controller = DictationSessionControllerSpy(startStatus: .microphoneActive(peakPower: -12))
         let model = VoiceInputLaunchModel(sessionController: controller)
 
-        model.handleOpenURL(try XCTUnwrap(URL(string: "voicekeyboard://start-dictation")))
+        model.handleOpenURL(
+            try XCTUnwrap(URL(string: "voicekeyboard://start-dictation?sessionID=url-session"))
+        )
         await waitForStatus(.microphoneActive(peakPower: -12), in: model)
 
-        XCTAssertEqual(controller.recordedStartCallCount(), 1)
+        XCTAssertEqual(controller.recordedKeyboardSessionStartCallCount(), 1)
+        XCTAssertEqual(controller.recordedStartCallCount(), 0)
     }
 
     func testKeyboardSessionURLUsesTheExistingSessionHandoff() async throws {
@@ -502,6 +594,65 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertFalse(transcript.isConsumed)
     }
 
+    func testSceneTransitionDuringStopDoesNotStrandStoppingBarrier() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
+        let activator = SceneTransitionStoppableMicrophoneActivator()
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { store },
+            transcriptStoreProvider: { transcriptStore }
+        )
+
+        _ = await controller.prepareSession()
+        let firstStart = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        )
+        XCTAssertTrue(store.saveCommand(firstStart))
+        await waitForStartCall(in: activator, expectedCount: 1)
+
+        let stop = SharedDictationSessionCommand.stop(
+            sessionID: firstStart.sessionID,
+            source: .keyboard,
+            requestedAt: Date(),
+            replacingCommandToken: firstStart.token
+        )
+        XCTAssertTrue(store.saveCommand(stop))
+        await waitForStopCall(in: activator)
+
+        // The audio run settles before the stoppable wrapper returns. This is
+        // the window in which the old implementation cancelled its monitor
+        // and left isStoppingMicrophoneActivation latched forever.
+        activator.finishAudioRun()
+        for _ in 0..<20 { await Task.yield() }
+        controller.setAppAvailable(false)
+        activator.finishStop()
+
+        await waitForSessionStatus(in: store) { status in
+            status == .cancelled(token: stop.token)
+        }
+
+        controller.setAppAvailable(true)
+        let secondStart = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            requestedAt: Date()
+        )
+        XCTAssertTrue(store.saveCommand(secondStart))
+        await waitForStartCall(in: activator, expectedCount: 2)
+        activator.finishAudioRun()
+
+        await waitForSessionStatus(in: store) { status in
+            if case .transcriptReady(token: secondStart.token) = status {
+                return true
+            }
+            return false
+        }
+    }
+
     func testContainingAppStartIsCancelledBySessionCancellation() async throws {
         let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -524,6 +675,37 @@ final class VoiceInputLaunchModelTests: XCTestCase {
 
         let result = await startTask.value
         XCTAssertEqual(result, .failed("Cancelled"))
+    }
+
+    func testStopInvalidatesContainingAppStartBeforeActivationTaskIsCreated() async throws {
+        let suiteName = "VoiceInputLaunchModelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let transcriptStore = try makeTranscriptStore()
+        let storeProvider = BlockingSessionStoreProvider(store: store)
+        let activator = MicrophoneActivatorSpy(status: .microphoneActive(peakPower: -12))
+        let controller = AppBackgroundDictationSessionController(
+            microphoneActivator: activator,
+            sessionStoreProvider: { storeProvider.resolve() },
+            transcriptStoreProvider: { transcriptStore }
+        )
+
+        controller.setAppAvailable(false)
+        let prepareStatus = await controller.prepareSession()
+        XCTAssertEqual(prepareStatus, .sessionReady)
+
+        storeProvider.blockNextCall()
+        let startTask = Task { await controller.startFromContainingApp() }
+        let didBlock = await storeProvider.waitUntilBlocked()
+        XCTAssertTrue(didBlock)
+
+        await controller.cancelActiveSession()
+        storeProvider.releaseBlockedCall()
+
+        let result = await startTask.value
+        XCTAssertEqual(result, .failed("Cancelled"))
+        XCTAssertEqual(activator.recordedCallCount(), 0)
     }
 
     func testCancelledStartCannotClearNewerStartState() async throws {
@@ -765,6 +947,29 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(activator.recordedCallCount(), expectedCount, file: file, line: line)
     }
 
+    private func waitForStartCall(
+        in activator: SceneTransitionStoppableMicrophoneActivator,
+        expectedCount: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedCallCount() < expectedCount {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedCallCount(), expectedCount, file: file, line: line)
+    }
+
+    private func waitForStopCall(
+        in activator: SceneTransitionStoppableMicrophoneActivator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<20 where activator.recordedStopCallCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(activator.recordedStopCallCount(), 1, file: file, line: line)
+    }
+
     private func waitForSessionStatus(
         in store: SharedDictationSessionStore,
         file: StaticString = #filePath,
@@ -812,6 +1017,53 @@ private final class MicrophoneActivatorSpy: MicrophoneActivating {
 
     func recordedCallCount() -> Int {
         callCount
+    }
+}
+
+private final class BlockingSessionStoreProvider: @unchecked Sendable {
+    private let store: SharedDictationSessionStore
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private var shouldBlockNextCall = false
+    private var hasBlockedCall = false
+
+    init(store: SharedDictationSessionStore) {
+        self.store = store
+    }
+
+    func blockNextCall() {
+        lock.lock()
+        shouldBlockNextCall = true
+        lock.unlock()
+    }
+
+    func waitUntilBlocked() async -> Bool {
+        for _ in 0..<200 {
+            let didBlock = lock.withLock { hasBlockedCall }
+            if didBlock {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    func releaseBlockedCall() {
+        release.signal()
+    }
+
+    func resolve() -> SharedDictationSessionStore {
+        lock.lock()
+        let shouldBlock = shouldBlockNextCall
+        shouldBlockNextCall = false
+        lock.unlock()
+        if shouldBlock {
+            lock.lock()
+            hasBlockedCall = true
+            lock.unlock()
+            _ = release.wait(timeout: .now() + 2)
+        }
+        return store
     }
 }
 
@@ -913,6 +1165,55 @@ private final class StoppableTranscriptMicrophoneActivator: MicrophoneActivating
         XCTAssertTrue(transcriptStore.save(transcript))
         continuation?.resume(returning: .transcriptShared(transcript.text))
         continuation = nil
+    }
+}
+
+@MainActor
+private final class SceneTransitionStoppableMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareMicrophoneActivating {
+    private var activationContinuations: [CheckedContinuation<VoiceInputLaunchStatus, Never>] = []
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var callCount = 0
+    private var stopCallCount = 0
+
+    func activate() async -> VoiceInputLaunchStatus {
+        await activate(sessionID: "test", commandToken: "test", ownerToken: "test")
+    }
+
+    func activate(
+        sessionID: String,
+        commandToken: String,
+        ownerToken: String
+    ) async -> VoiceInputLaunchStatus {
+        callCount += 1
+        return await withCheckedContinuation { continuation in
+            activationContinuations.append(continuation)
+        }
+    }
+
+    func stop(sessionID: String, commandToken: String) async {
+        stopCallCount += 1
+        await withCheckedContinuation { continuation in
+            stopContinuation = continuation
+        }
+    }
+
+    func finishAudioRun() {
+        let continuations = activationContinuations
+        activationContinuations.removeAll()
+        continuations.forEach { $0.resume(returning: .transcriptShared("settled")) }
+    }
+
+    func finishStop() {
+        stopContinuation?.resume()
+        stopContinuation = nil
+    }
+
+    func recordedCallCount() -> Int {
+        callCount
+    }
+
+    func recordedStopCallCount() -> Int {
+        stopCallCount
     }
 }
 

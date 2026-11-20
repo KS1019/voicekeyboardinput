@@ -24,6 +24,29 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         XCTAssertEqual(latestTranscript, transcript)
     }
 
+    func testDeliveryJournalRejectsAggregateDeletionOverflow() {
+        let context = SharedDictationDocumentContextFingerprint(
+            beforeInput: String(repeating: "x", count: 1_024),
+            afterInput: nil,
+            documentIdentifier: UUID()
+        )
+        let operations: [SharedDictationTranscriptDelivery.Operation] = [
+            .deleteBackward(256),
+            .deleteBackward(256),
+            .deleteBackward(1)
+        ]
+        let stepContexts = [context, context, context, context]
+
+        XCTAssertFalse(
+            SharedDictationTranscriptDelivery.isValidJournal(
+                operations: operations,
+                stepContexts: stepContexts,
+                beforeContext: context,
+                afterContext: context
+            )
+        )
+    }
+
     func testLatestTranscriptResolutionDistinguishesMissingFromUnavailable() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationTranscriptStore(defaults: defaults)
@@ -110,6 +133,22 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
                 "legacy key should fail closed: \(key)"
             )
         }
+    }
+
+    func testDuplicateConsumedTokensFailClosedWithoutDecodeTrap() throws {
+        let defaults = try makeDefaults()
+        let envelope: [String: Any] = [
+            "revision": 0,
+            "records": [:],
+            "consumedTokens": ["duplicate-token", "duplicate-token"]
+        ]
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: envelope),
+            forKey: "sharedDictation.transcriptEnvelope"
+        )
+        let store = SharedDictationTranscriptStore(defaults: defaults)
+
+        XCTAssertEqual(store.unconsumedTranscriptsResolution(), .unavailable)
     }
 
     func testCorruptLegacyDeliveryLeaseFailsClosed() throws {
@@ -299,6 +338,122 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
         XCTAssertEqual(recoveredStore.latestTranscript(), second)
     }
 
+    func testFileBackedStorageHealthMigratesLiveLegacyTranscriptBeforeCleanup() throws {
+        let defaults = try makeDefaults()
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "legacy-file-session",
+            commandToken: "legacy-file-command",
+            text: "must survive migration"
+        ))
+        defaults.set(
+            try JSONEncoder().encode(transcript),
+            forKey: "sharedDictation.transcriptRecord"
+        )
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceKeyboardTranscriptMigration-(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let envelopeURL = root.appendingPathComponent("envelope.json")
+        let store = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: defaults,
+            envelopeURL: envelopeURL,
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+
+        XCTAssertTrue(store.storageHealth())
+        XCTAssertEqual(store.latestTranscript(), transcript)
+        XCTAssertNil(defaults.object(forKey: "sharedDictation.transcriptRecord"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: envelopeURL.path))
+        XCTAssertNotNil(try Data(contentsOf: envelopeURL).range(of: Data(transcript.text.utf8)))
+    }
+
+    func testStorageHealthPhysicallyRedactsConsumedFilePayload() throws {
+        let defaults = try makeDefaults()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceKeyboardTranscriptRedaction-(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let envelopeURL = root.appendingPathComponent("envelope.json")
+        let backupURL = envelopeURL.appendingPathExtension("backup")
+        let store = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: defaults,
+            envelopeURL: envelopeURL,
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "consumed-file-session",
+            commandToken: "consumed-file-command",
+            text: "secret physically stored"
+        ))
+        XCTAssertTrue(store.save(transcript))
+
+        for url in [envelopeURL, backupURL] {
+            var envelope = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+            )
+            var records = try XCTUnwrap(envelope["records"] as? [String: Any])
+            var record = try XCTUnwrap(records[transcript.token] as? [String: Any])
+            record["text"] = transcript.text
+            record["isConsumed"] = true
+            records[transcript.token] = record
+            envelope["records"] = records
+            try JSONSerialization.data(withJSONObject: envelope).write(to: url, options: [.atomic])
+        }
+
+        let reopened = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: try makeDefaults(),
+            envelopeURL: envelopeURL,
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+        XCTAssertTrue(reopened.storageHealth())
+        XCTAssertEqual(reopened.latestTranscript()?.text, SharedDictationTranscript.redactedText)
+        for url in [envelopeURL, backupURL] {
+            XCTAssertNil(try Data(contentsOf: url).range(of: Data(transcript.text.utf8)))
+        }
+    }
+
+    func testStorageHealthQuarantinesExpiredInFlightDeliveryInsteadOfDeletingJournal() throws {
+        let defaults = try makeDefaults()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceKeyboardTranscriptExpiry-(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try XCTUnwrap(SharedDictationTranscriptStore(
+            defaults: defaults,
+            envelopeURL: root.appendingPathComponent("envelope.json"),
+            lockFileURL: root.appendingPathComponent("store.lock")
+        ))
+        let transcript = try XCTUnwrap(SharedDictationTranscript(
+            sessionID: "expired-in-flight-session",
+            commandToken: "expired-in-flight-command",
+            text: "ambiguous expired edit",
+            createdAt: Date().addingTimeInterval(-600)
+        ))
+        let context = SharedDictationDocumentContextFingerprint(
+            beforeInput: "before",
+            afterInput: "after",
+            documentIdentifier: UUID()
+        )
+        XCTAssertTrue(store.save(transcript))
+        XCTAssertTrue(store.beginDelivery(
+            transcript,
+            beforeContext: context,
+            afterContext: context,
+            operations: [.insertText(" ambiguous expired edit")],
+            stepContexts: [context, context],
+            ownerID: "expired-owner"
+        ))
+        XCTAssertTrue(store.beginDeliveryMutation(
+            transcriptToken: transcript.token,
+            operationIndex: 0,
+            ownerID: "expired-owner"
+        ))
+
+        XCTAssertTrue(store.storageHealth())
+        XCTAssertTrue(store.pendingDelivery(forSessionID: transcript.sessionID)?.isQuarantined == true)
+        XCTAssertEqual(store.latestTranscript()?.text, SharedDictationTranscript.redactedText)
+    }
+
     func testEmptyTranscriptIsRejectedButWhitespaceIsPreserved() throws {
         XCTAssertNil(SharedDictationTranscript(text: ""))
         let transcript = try XCTUnwrap(SharedDictationTranscript(text: "  \n"))
@@ -457,6 +612,10 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
 
         XCTAssertEqual(store.lastConsumedToken(), transcript.token)
         XCTAssertEqual(store.latestTranscript()?.isConsumed, true)
+        XCTAssertEqual(
+            store.latestTranscript()?.text,
+            SharedDictationTranscript.redactedText
+        )
         XCTAssertNil(store.claimLatestTranscript(
             afterLastConsumedToken: nil,
             now: Date(timeIntervalSince1970: 1_720_000_016)
@@ -629,6 +788,10 @@ final class SharedDictationTranscriptStoreTests: XCTestCase {
             now: Date(timeIntervalSince1970: 1_720_000_011)
         ))
         XCTAssertTrue(store.pendingDelivery(forSessionID: transcript.sessionID)?.isQuarantined == true)
+        XCTAssertEqual(
+            store.latestTranscript()?.text,
+            SharedDictationTranscript.redactedText
+        )
         XCTAssertNil(store.resumePendingDelivery(
             forSessionID: transcript.sessionID,
             now: Date(timeIntervalSince1970: 1_720_000_042),

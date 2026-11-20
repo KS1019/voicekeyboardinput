@@ -68,6 +68,7 @@ struct ContentView: View {
             Text("Set up Voice Keyboard, enable full access, then validate speech input from any host text field.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            privacyPolicyLink
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -88,7 +89,7 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("settings.openButton")
 
-                Text("If keyboard-process STT is unavailable, Mic opens this app so the app can transcribe and hand the result back through the shared App Group.")
+                Text("Mic opens this app. The app records and transcribes your voice, then hands the result back through the shared App Group for keyboard insertion.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -220,7 +221,7 @@ struct ContentView: View {
         Panel("Setup") {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Add Voice Keyboard in Settings > General > Keyboard > Keyboards.", systemImage: "keyboard")
-                Label("Turn Allow Full Access on before validating keyboard-side STT.", systemImage: "checkmark.shield")
+                Label("Turn Allow Full Access on before using voice input.", systemImage: "checkmark.shield")
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -229,7 +230,7 @@ struct ContentView: View {
 
     private var validationPanel: some View {
         Panel("Validation Notes") {
-            Text("The keyboard microphone button attempts keyboard-process STT first. If unavailable, it opens the containing app; the app records, transcribes, saves the transcript to the shared App Group, and the keyboard inserts that result when it appears again.")
+            Text("The keyboard microphone button opens the containing app. The app records, transcribes, saves the transcript to the shared App Group, and the keyboard inserts that result when it appears again.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -273,7 +274,16 @@ struct ContentView: View {
 
     private var appBackground: some View {
         Color(.systemGroupedBackground)
-        .ignoresSafeArea()
+            .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private var privacyPolicyLink: some View {
+        if let url = URL(string: "https://github.com/KS1019/voicekeyboardinput/blob/main/PRIVACY.md") {
+            Link("Privacy Policy", destination: url)
+                .font(.footnote.weight(.medium))
+                .accessibilityIdentifier("privacyPolicy.link")
+        }
     }
 
     private func previewSampleTranscript() {

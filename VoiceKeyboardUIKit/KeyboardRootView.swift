@@ -376,8 +376,29 @@ final class KeyboardRootView: UIView {
             isAvailable: isAvailable,
             tone: tone
         )
-        microphoneButton?.accessibilityLabel = title
+        microphoneButton?.accessibilityLabel = microphoneAccessibilityLabel(
+            for: title,
+            isAvailable: isAvailable
+        )
         removeMicrophoneButtonShadow()
+    }
+
+    private func microphoneAccessibilityLabel(
+        for title: String,
+        isAvailable: Bool
+    ) -> String {
+        guard isAvailable else { return "Voice input unavailable" }
+        switch title {
+        case "Stop":
+            return "Stop voice input"
+        case "Open app":
+            return "Open Voice Keyboard Input"
+        default:
+            // Keep action-specific labels such as “Check mic” and “Retry”
+            // intact; the button title is the best available description of
+            // those non-start actions.
+            return title
+        }
     }
 
     private func microphoneButtonConfiguration(
@@ -423,6 +444,7 @@ final class KeyboardRootView: UIView {
 
     private func updateStatus(_ message: String, announce: Bool = false) {
         statusLabel.text = message
+        updateVoiceInputAccessibilityValue(activity: voiceActivityStrip.accessibilityValue)
         if announce {
             UIAccessibility.post(notification: .announcement, argument: message)
         }
@@ -450,9 +472,12 @@ final class KeyboardRootView: UIView {
     private func updateVoiceInputAccessibilityValue(activity: String?) {
         let transcript = (transcriptLabel.text?.isEmpty == false ? transcriptLabel.text : nil)
             ?? Copy.emptyTranscriptAccessibilityValue
+        let status = statusLabel.text ?? ""
         let activity = activity ?? ""
-        transcriptContainerView.accessibilityValue = [transcript, activity]
-            .filter { !$0.isEmpty }
-            .joined(separator: ", ")
+        var values = [transcript]
+        for value in [status, activity] where !value.isEmpty && !values.contains(value) {
+            values.append(value)
+        }
+        transcriptContainerView.accessibilityValue = values.joined(separator: ", ")
     }
 }

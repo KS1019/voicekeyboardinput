@@ -368,9 +368,24 @@ final class VoiceCommandParserTests: XCTestCase {
     func testJapaneseImplicitCommandSequenceDoesNotParseNaturalLanguageChunks() {
         let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
 
-        for transcript in ["改行コード改行", "読点の使い方読点"] {
+        for transcript in [
+            "改行コード改行",
+            "読点の使い方読点",
+            "改行する句点",
+            "改行位置句点",
+            "説明改行句点"
+        ] {
             XCTAssertEqual(parser.parse(transcript).elements, [.text(transcript)], transcript)
         }
+    }
+
+    func testJapaneseNaturalLanguageCompoundWithMultipleAliasesRemainsLiteral() {
+        let parser = VoiceCommandParser(locale: VoiceKeyboardLocale(identifier: "ja-JP"))
+
+        XCTAssertEqual(
+            parser.parse("改行時読点").elements,
+            [.text("改行時読点")]
+        )
     }
 
     func testJapaneseListsAndComparisonsRemainLiteral() {

@@ -148,6 +148,7 @@ public final class SharedDictationSessionStore {
         static let claimOwners = "sharedDictation.session.claimOwners"
         static let deliveryFailureIntents = "sharedDictation.session.deliveryFailureIntents"
         static let cancellationIntents = "sharedDictation.session.cancellationIntents"
+        static let blockedKeyboardTranscriptTokens = "sharedDictation.session.blockedKeyboardTranscriptTokens"
         static let envelopeMigrationMarker = "sharedDictation.session.envelopeMigrationComplete"
     }
 
@@ -159,6 +160,7 @@ public final class SharedDictationSessionStore {
     private static let claimInterval: TimeInterval = 10
     private static let heartbeatRetentionInterval: TimeInterval = 30
     private static let heartbeatHistoryLimit = 16
+    private static let keyboardLifecycleBlockLimit = 64
     private static let maximumFutureClockSkew: TimeInterval = 300
     private static let maximumCommandHorizon: TimeInterval = 600
     private static let inProcessLock = NSRecursiveLock()
@@ -242,6 +244,46 @@ public final class SharedDictationSessionStore {
                 _ = loadEnvelope()
                 return !envelopeReadBlocked
             }
+            return true
+        } ?? false
+    }
+
+    /// Persists a fail-closed fence for a keyboard-originated transcript whose
+    /// controller disappeared without an intentional containing-app handoff.
+    /// This lives outside the in-memory controller so recreation cannot replay
+    /// an abandoned destructive edit.
+    @discardableResult
+    public func blockKeyboardTranscript(token: String) -> Bool {
+        guard !token.isEmpty, token.utf8.count <= Self.maximumTokenByteCount else {
+            return false
+        }
+        return withExclusiveAccess {
+            var tokens = load([String].self, forKey: Key.blockedKeyboardTranscriptTokens) ?? []
+            tokens.removeAll { $0 == token }
+            tokens.append(token)
+            if tokens.count > Self.keyboardLifecycleBlockLimit {
+                tokens.removeFirst(tokens.count - Self.keyboardLifecycleBlockLimit)
+            }
+            save(tokens, forKey: Key.blockedKeyboardTranscriptTokens)
+            return true
+        } ?? false
+    }
+
+    public func isKeyboardTranscriptBlocked(token: String) -> Bool {
+        withExclusiveAccess {
+            (load([String].self, forKey: Key.blockedKeyboardTranscriptTokens) ?? [])
+                .contains(token)
+        } ?? false
+    }
+
+    @discardableResult
+    public func clearKeyboardTranscriptBlock(token: String) -> Bool {
+        withExclusiveAccess {
+            var tokens = load([String].self, forKey: Key.blockedKeyboardTranscriptTokens) ?? []
+            let originalCount = tokens.count
+            tokens.removeAll { $0 == token }
+            guard tokens.count != originalCount else { return true }
+            save(tokens, forKey: Key.blockedKeyboardTranscriptTokens)
             return true
         } ?? false
     }
@@ -1867,12 +1909,6 @@ public final class SharedDictationSessionStore {
         }
         if allowRecoveryFromTranscriptReady,
            case .cancelled(let currentToken) = current,
-           case .transcriptReady(let nextToken) = next,
-           currentToken == nextToken {
-            return true
-        }
-        if allowRecoveryFromTranscriptReady,
-           case .failed(let currentToken, _) = current,
            case .transcriptReady(let nextToken) = next,
            currentToken == nextToken {
             return true

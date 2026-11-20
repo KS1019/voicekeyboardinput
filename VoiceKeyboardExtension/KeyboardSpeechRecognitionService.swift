@@ -126,17 +126,20 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         private let gate: LegacyAudioTapGate?
         private let engine: AVAudioEngine
         private let request: LegacyRequestHolder
+        private let tapInstalled: Bool
         private let teardownLock = NSLock()
         private var teardownTask: Task<Bool, Never>?
 
         init(
             gate: LegacyAudioTapGate?,
             engine: AVAudioEngine,
-            request: LegacyRequestHolder
+            request: LegacyRequestHolder,
+            tapInstalled: Bool
         ) {
             self.gate = gate
             self.engine = engine
             self.request = request
+            self.tapInstalled = tapInstalled
         }
 
         func waitForCompletion(timeout: TimeInterval) async -> Bool {
@@ -170,7 +173,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 // stopping the engine. This preserves the normal final
                 // callback ordering on the legacy recognition path.
                 request.endAudioIfNeeded()
-                let didRemoveTap = VKRemoveAudioEngineInputTap(engine)
+                let didRemoveTap = !tapInstalled || VKRemoveAudioEngineInputTap(engine)
                 let didStopEngine = VKStopAudioEngine(engine)
                 return didRemoveTap && didStopEngine
             }
@@ -603,12 +606,18 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
     private final class DeferredAnalyzerAudioCleanup: @unchecked Sendable {
         private let gate: AnalyzerAudioTapGate?
         private let engine: AVAudioEngine
+        private let tapInstalled: Bool
         private let teardownLock = NSLock()
         private var teardownTask: Task<Bool, Never>?
 
-        init(gate: AnalyzerAudioTapGate?, engine: AVAudioEngine) {
+        init(
+            gate: AnalyzerAudioTapGate?,
+            engine: AVAudioEngine,
+            tapInstalled: Bool
+        ) {
             self.gate = gate
             self.engine = engine
+            self.tapInstalled = tapInstalled
         }
 
         func waitForCompletion(timeout: TimeInterval) async -> Bool {
@@ -638,7 +647,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             if let teardownTask { return teardownTask }
             let task = Task.detached { [self] in
                 gate?.waitUntilDrained()
-                let didRemoveTap = VKRemoveAudioEngineInputTap(engine)
+                let didRemoveTap = !tapInstalled || VKRemoveAudioEngineInputTap(engine)
                 let didStopEngine = VKStopAudioEngine(engine)
                 return didRemoveTap && didStopEngine
             }
@@ -805,9 +814,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     )
                     diagnostics.failure("stale-audio-session-activation", error: terminalAudioQuarantineError!)
                     audioSessionQuarantineSucceeded = false
-                    lingeringAudioSessionTask = Task { [weak self] in
+                    lingeringAudioSessionTask = Task { [self] in
                         let status = await cleanup.task.value
-                        await self?.setAudioSessionQuarantineResult(status == .succeeded)
+                        self.setAudioSessionQuarantineResult(status == .succeeded)
                     }
                 }
                 throw .cancelled
@@ -840,10 +849,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
         // Keep only an activation-settlement waiter here. The cleanup path
         // owns engine teardown and the single matching deactivation; starting
         // deactivation from this waiter would race the engine quarantine.
-        lingeringAudioSessionTask = Task { [weak self] in
+        lingeringAudioSessionTask = Task { [self] in
             _ = await operation.task.value
-            guard let self else { return }
-            await self.noteAudioSessionActivationSettled(generation: generation)
+            self.noteAudioSessionActivationSettled(generation: generation)
         }
     }
 
@@ -1478,7 +1486,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
             audioSessionQuarantineSucceeded = false
             let engine = run.engine
             let tapInstalled = run.tapInstalled
-            audioQuarantineTask = Task.detached { [weak self] in
+            audioQuarantineTask = Task.detached { [self] in
                 let activationSucceeded = await pendingSessionActivation.task.value == .succeeded
                 var engineTeardownSucceeded = true
                 if let engine {
@@ -1490,12 +1498,12 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     )
                     if !engineTeardownSucceeded {
                         KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                        await self?.recordAudioEngineTeardownFailure(engine)
+                        await self.recordAudioEngineTeardownFailure(engine)
                     }
                 }
                 legacyRequestHolder?.endAudioIfNeeded()
                 guard engineTeardownSucceeded else {
-                    await self?.setAudioSessionQuarantineResult(false)
+                    await self.setAudioSessionQuarantineResult(false)
                     return
                 }
                 if !activationSucceeded {
@@ -1503,7 +1511,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     // it does not need a deactivation quarantine. Treat the
                     // cleanup as complete so a transient setup failure does
                     // not permanently poison the extension.
-                    await self?.setAudioSessionQuarantineResult(true)
+                    await self.setAudioSessionQuarantineResult(true)
                 } else if activationSucceeded {
                     let deactivation = DeferredAudioSessionOperation(
                         session: AVAudioSession.sharedInstance(),
@@ -1511,16 +1519,16 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     )
                     if await deactivation.task.value != .succeeded {
                         KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                        await self?.setAudioSessionQuarantineResult(false)
+                        await self.setAudioSessionQuarantineResult(false)
                     } else {
-                        await self?.setAudioSessionQuarantineResult(true)
+                        await self.setAudioSessionQuarantineResult(true)
                     }
                 }
             }
         } else if let engine = run.engine, let pendingEngineOperation {
             let tapInstalled = run.tapInstalled
             if let analyzerTapGate {
-                audioQuarantineTask = Task.detached { [weak self] in
+                audioQuarantineTask = Task.detached { [self] in
                     _ = await pendingEngineOperation.value
                     analyzerTapGate.waitUntilDrained()
                     let didTeardown = stopAudioEngineSafely(
@@ -1529,13 +1537,13 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     )
                     if !didTeardown {
                         KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                        await self?.recordAudioEngineTeardownFailure(engine)
+                        await self.recordAudioEngineTeardownFailure(engine)
                     } else if !sessionQuarantineAlreadyScheduled {
-                        await self?.setAudioSessionQuarantineResult(true)
+                        await self.setAudioSessionQuarantineResult(true)
                     }
                 }
             } else if let legacyTapGate {
-                audioQuarantineTask = Task.detached { [weak self] in
+                audioQuarantineTask = Task.detached { [self] in
                     _ = await pendingEngineOperation.value
                     legacyTapGate.waitUntilDrained()
                     let didTeardown = stopAudioEngineSafely(
@@ -1544,14 +1552,14 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     )
                     if !didTeardown {
                         KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                        await self?.recordAudioEngineTeardownFailure(engine)
+                        await self.recordAudioEngineTeardownFailure(engine)
                     } else if !sessionQuarantineAlreadyScheduled {
-                        await self?.setAudioSessionQuarantineResult(true)
+                        await self.setAudioSessionQuarantineResult(true)
                     }
                     legacyRequestHolder?.endAudioIfNeeded()
                 }
             } else {
-                audioQuarantineTask = Task.detached { [weak self] in
+                audioQuarantineTask = Task.detached { [self] in
                     _ = await pendingEngineOperation.value
                     let didTeardown = stopAudioEngineSafely(
                         engine,
@@ -1559,9 +1567,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     )
                     if !didTeardown {
                         KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                        await self?.recordAudioEngineTeardownFailure(engine)
+                        await self.recordAudioEngineTeardownFailure(engine)
                     } else if !sessionQuarantineAlreadyScheduled {
-                        await self?.setAudioSessionQuarantineResult(true)
+                        await self.setAudioSessionQuarantineResult(true)
                     }
                     legacyRequestHolder?.endAudioIfNeeded()
                 }
@@ -1571,31 +1579,38 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 let cleanup = DeferredLegacyAudioCleanup(
                     gate: legacyTapGate,
                     engine: engine,
-                    request: legacyRequestHolder!
+                    request: legacyRequestHolder!,
+                    tapInstalled: run.tapInstalled
                 )
                 if await cleanup.waitForCompletion(timeout: 2) == false {
                     KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                    audioQuarantineTask = Task { [weak self] in
+                    audioQuarantineTask = Task { [self] in
                         let succeeded = await cleanup.quarantine().value
                         if !succeeded {
-                            await self?.recordAudioEngineTeardownFailure(engine)
+                            self.recordAudioEngineTeardownFailure(engine)
                         }
                     }
                 }
             } else {
-                let cleanup = DeferredAnalyzerAudioCleanup(gate: analyzerTapGate, engine: engine)
+                let cleanup = DeferredAnalyzerAudioCleanup(
+                    gate: analyzerTapGate,
+                    engine: engine,
+                    tapInstalled: run.tapInstalled
+                )
                 if await cleanup.waitForCompletion(timeout: 2) == false {
                     KeyboardAudioSessionOperationCoordinator.shared.markTerminal()
-                    audioQuarantineTask = Task { [weak self] in
+                    audioQuarantineTask = Task { [self] in
                         let succeeded = await cleanup.quarantine().value
                         if !succeeded {
-                            await self?.recordAudioEngineTeardownFailure(engine)
+                            self.recordAudioEngineTeardownFailure(engine)
                         }
                     }
                 }
             }
         }
-        if !audioSessionQuarantineSucceeded, audioQuarantineTask == nil {
+        if !audioSessionQuarantineSucceeded,
+           audioQuarantineTask == nil,
+           lingeringAudioSessionTask == nil {
             activeRun = run
             return
         }
@@ -1625,13 +1640,9 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     await task.value
                 }
             }
-            self.lingeringAudioTeardownTask = Task { [weak self] in
-                guard let self else {
-                    await combinedQuarantineTask.value
-                    return
-                }
+            self.lingeringAudioTeardownTask = Task { [self] in
                 if await self.waitForAnalyzerCleanup(combinedQuarantineTask) == false {
-                    await self.markTerminalAudioQuarantine(generation: generation)
+                    self.markTerminalAudioQuarantine(generation: generation)
                     // Keep the terminal quarantine isolated from stopRecognition().
                     // A blocked engine/tap must not make the extension's stop path
                     // wait forever or race a session deactivation.
@@ -1710,7 +1721,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 "Audio route recovery did not complete; restart the keyboard extension."
             )
             diagnostics.failure("audio-route-quarantine", error: terminalAudioQuarantineError!)
-            let deferredCleanup = Task { [weak self] in
+            let deferredCleanup = Task { [self] in
                 await coordinator.waitUntilPendingOperationsSettle()
                 guard !coordinator.hasPendingOperation else { return }
                 let deferredDeactivation = DeferredAudioSessionOperation(
@@ -1718,7 +1729,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                     activate: false
                 )
                 let status = await deferredDeactivation.task.value
-                await self?.finishLingeringAudioSessionCleanup(
+                self.finishLingeringAudioSessionCleanup(
                     generation: generation,
                     succeeded: status == .succeeded
                 )
@@ -1736,14 +1747,14 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                 "Audio session deactivation did not complete; restart the keyboard extension."
             )
             diagnostics.failure("audio-session-deactivation", error: terminalAudioQuarantineError!)
-            lingeringAudioSessionTask = Task { [weak self] in
+            lingeringAudioSessionTask = Task { [self] in
                 // A timeout only means the bounded wait expired. If the
                 // original deactivation eventually succeeds, no second
                 // deactivation is needed (and issuing one can create a new
                 // AVAudioSession race on slow HFP teardown).
                 switch await operation.task.value {
                 case .succeeded:
-                    await self?.finishLingeringAudioSessionCleanup(
+                    self.finishLingeringAudioSessionCleanup(
                         generation: generation,
                         succeeded: true
                     )
@@ -1753,7 +1764,7 @@ actor KeyboardSpeechRecognitionService: SpeechRecognitionService {
                         activate: false
                     )
                     let status = await deferredDeactivation.task.value
-                    await self?.finishLingeringAudioSessionCleanup(
+                    self.finishLingeringAudioSessionCleanup(
                         generation: generation,
                         succeeded: status == .succeeded
                     )

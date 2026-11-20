@@ -3,16 +3,11 @@ import XCTest
 
 final class ContainingAppRouteTests: XCTestCase {
     func testStartDictationRouteBuildsExpectedURL() {
-        XCTAssertEqual(
-            ContainingAppRoute.startDictation.url?.absoluteString,
-            "voicekeyboard://start-dictation"
-        )
+        XCTAssertNil(ContainingAppRoute.startDictation.url)
     }
 
-    func testParsesStartDictationURL() throws {
-        let route = try XCTUnwrap(ContainingAppRoute(url: URL(string: "voicekeyboard://start-dictation")!))
-
-        XCTAssertEqual(route, .startDictation)
+    func testRejectsUnauthenticatedStartDictationURL() {
+        XCTAssertNil(ContainingAppRoute(url: URL(string: "voicekeyboard://start-dictation")!))
     }
 
     func testCarriesKeyboardSessionIDThroughStartDictationURL() throws {

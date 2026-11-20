@@ -8,6 +8,7 @@ public struct SharedDictationTranscript: Codable, Equatable, Sendable {
     public static let maximumUTF8ByteCount = VoiceKeyboardTextLimits.maximumUTF8ByteCount
     public static let maximumIdentifierByteCount = 256
     public static let maximumLifetime: TimeInterval = 86_400
+    public static let redactedText = "[consumed]"
     private static let maximumFutureClockSkew: TimeInterval = 300
     public let sessionID: String
     public let commandToken: String
@@ -131,6 +132,7 @@ public struct SharedDictationTranscriptDelivery: Codable, Equatable, Sendable {
     // small enough that a keyboard extension cannot spend its entire budget
     // rewriting the App Group envelope for one transcript.
     public static let maximumOperationCount = 64
+    public static let maximumTotalDeletionCount = 512
 
     public enum Operation: Codable, Equatable, Sendable {
         case insertText(String)
@@ -184,7 +186,15 @@ public struct SharedDictationTranscriptDelivery: Codable, Equatable, Sendable {
                   case let .deleteBackward(count):
                       return count > 0 && count <= TextDeletionCount.maximumValue
                   }
-              }),
+              }) else {
+            return false
+        }
+        let totalDeletionCount = operations.reduce(into: 0) { total, operation in
+            if case let .deleteBackward(count) = operation {
+                total += count
+            }
+        }
+        guard totalDeletionCount <= maximumTotalDeletionCount,
               (operations.isEmpty
                   ? stepContexts.isEmpty
                   : stepContexts.count == operations.count + 1),
@@ -495,6 +505,13 @@ public final class SharedDictationTranscriptStore {
             revision = try container.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
             records = try container.decode([String: SharedDictationTranscript].self, forKey: .records)
             consumedTokens = try container.decode([String].self, forKey: .consumedTokens)
+            guard consumedTokens.count == Set(consumedTokens).count else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .consumedTokens,
+                    in: container,
+                    debugDescription: "Duplicate consumed transcript token"
+                )
+            }
             consumedTokenDates = try container.decodeIfPresent(
                 [String: Date].self,
                 forKey: .consumedTokenDates
@@ -763,7 +780,13 @@ public final class SharedDictationTranscriptStore {
 
     public func storageHealth() -> Bool {
         withExclusiveAccess {
-            _ = loadTranscriptEnvelope()
+            let loadedEnvelope = loadTranscriptEnvelope()
+            guard !envelopeReadBlocked,
+                  migrateLegacyTranscriptPayloadsIfNeeded(loadedEnvelope),
+                  redactExpiredAndConsumedPayloads() else { return false }
+            if hasFileBackedEnvelope || defaults.bool(forKey: Key.envelopeMigrationMarker) {
+                cleanupLegacyTranscriptPayloads()
+            }
             return !envelopeReadBlocked
         } ?? false
     }
@@ -1445,7 +1468,7 @@ public final class SharedDictationTranscriptStore {
                 updatedEnvelope.records[transcriptToken] = SharedDictationTranscript(
                     sessionID: transcript.sessionID,
                     commandToken: transcript.commandToken,
-                    text: transcript.text,
+                    text: SharedDictationTranscript.redactedText,
                     createdAt: transcript.createdAt,
                     expiresAt: transcript.expiresAt,
                     isConsumed: true
@@ -1619,6 +1642,17 @@ public final class SharedDictationTranscriptStore {
         _ = withExclusiveAccess { markConsumedRecord(transcript) }
     }
 
+    /// Redacts a transcript when a delivery failure is proven before a
+    /// delivery journal exists. This closes the no-journal recovery gap while
+    /// keeping the write-once consumed fence durable.
+    @discardableResult
+    public func markConsumed(token: String) -> Bool {
+        withExclusiveAccess {
+            guard let transcript = loadRecord(forToken: token) else { return false }
+            return markConsumedRecord(transcript)
+        } ?? false
+    }
+
     public func lastConsumedToken() -> String? {
         withExclusiveAccess {
             if let consumedToken = loadTranscriptEnvelope()?.consumedTokens.last {
@@ -1749,6 +1783,11 @@ public final class SharedDictationTranscriptStore {
     }
 
     private func loadLegacyRecord(forToken token: String?) -> SharedDictationTranscript? {
+        guard let transcript = loadRawLegacyRecord(forToken: token) else { return nil }
+        return applyConsumption(to: transcript, consumedTokens: loadConsumedTokenIndex())
+    }
+
+    private func loadRawLegacyRecord(forToken token: String?) -> SharedDictationTranscript? {
         let key = token.map { Key.transcriptRecordPrefix + $0 } ?? Key.transcriptRecord
         guard let data = defaults.data(forKey: key) else {
             if defaults.object(forKey: key) != nil {
@@ -1763,7 +1802,7 @@ public final class SharedDictationTranscriptStore {
             envelopeReadBlocked = true
             return nil
         }
-        return applyConsumption(to: transcript, consumedTokens: loadConsumedTokenIndex())
+        return transcript
     }
 
     private func loadLatestRecord(forSessionID sessionID: String? = nil) -> SharedDictationTranscript? {
@@ -1817,7 +1856,7 @@ public final class SharedDictationTranscriptStore {
             if let primaryEnvelope,
                backupEnvelope.map({ $0.revision <= primaryEnvelope.revision }) ?? true {
                 envelopeReadBlocked = false
-                return primaryEnvelope
+                return normalizedConsumedRecords(in: primaryEnvelope)
             }
             if let backupEnvelopeURL,
                let backupEnvelope {
@@ -1828,7 +1867,7 @@ public final class SharedDictationTranscriptStore {
                     try? backupData.write(to: envelopeURL, options: [.atomic])
                 }
                 envelopeReadBlocked = false
-                return backupEnvelope
+                return normalizedConsumedRecords(in: backupEnvelope)
             }
             if FileManager.default.fileExists(atPath: envelopeURL.path)
                 || defaults.bool(forKey: Key.envelopeMigrationMarker) {
@@ -1855,6 +1894,78 @@ public final class SharedDictationTranscriptStore {
             return TranscriptEnvelope(records: [:], consumedTokens: [])
         }
         envelopeReadBlocked = false
+        return normalizedConsumedRecords(in: envelope)
+    }
+
+    private var hasFileBackedEnvelope: Bool {
+        guard let envelopeURL else { return false }
+        return FileManager.default.fileExists(atPath: envelopeURL.path)
+            || (backupEnvelopeURL.map {
+                FileManager.default.fileExists(atPath: $0.path)
+            } ?? false)
+    }
+
+    /// Materializes legacy UserDefaults data before removing the old keys.
+    /// A file-backed store must never treat an in-memory legacy read as an
+    /// already-completed migration: a live transcript would otherwise be
+    /// deleted by the cleanup pass without a durable replacement.
+    private func migrateLegacyTranscriptPayloadsIfNeeded(
+        _ loadedEnvelope: TranscriptEnvelope?
+    ) -> Bool {
+        guard envelopeURL != nil,
+              !hasFileBackedEnvelope,
+              !defaults.bool(forKey: Key.envelopeMigrationMarker) else {
+            return true
+        }
+
+        if let loadedEnvelope {
+            return saveTranscriptEnvelope(loadedEnvelope)
+        }
+
+        let records = loadRawLegacyRecords()
+        let consumedTokens = loadConsumedTokenIndex()
+        guard !envelopeReadBlocked else { return false }
+        var deliveryLeases: [String: DeliveryLease] = [:]
+        for token in records.keys {
+            switch loadLegacyDeliveryLease(forToken: token) {
+            case .missing:
+                continue
+            case .found(let lease):
+                deliveryLeases[token] = lease
+            case .unavailable:
+                envelopeReadBlocked = true
+                return false
+            }
+        }
+        guard !records.isEmpty || !consumedTokens.isEmpty || !deliveryLeases.isEmpty else {
+            return true
+        }
+        return saveTranscriptEnvelope(TranscriptEnvelope(
+            records: records,
+            consumedTokens: consumedTokens,
+            deliveryLeases: deliveryLeases
+        ))
+    }
+
+    private func loadRawTranscriptEnvelope() -> TranscriptEnvelope? {
+        if let envelopeURL {
+            let primaryEnvelope = decodeEnvelope(at: envelopeURL)
+            let backupEnvelope = backupEnvelopeURL.flatMap { decodeEnvelope(at: $0) }
+            if let primaryEnvelope,
+               backupEnvelope.map({ $0.revision <= primaryEnvelope.revision }) ?? true {
+                return primaryEnvelope
+            }
+            if let backupEnvelope { return backupEnvelope }
+            if hasFileBackedEnvelope || defaults.bool(forKey: Key.envelopeMigrationMarker) {
+                return nil
+            }
+        }
+        guard !defaults.bool(forKey: Key.envelopeMigrationMarker) else { return nil }
+        guard case .found(let data) = loadLegacyData(forKey: Key.transcriptEnvelope),
+              data.count <= Self.maximumEnvelopeByteCount,
+              let envelope = try? decoder.decode(TranscriptEnvelope.self, from: data) else {
+            return nil
+        }
         return envelope
     }
 
@@ -1904,6 +2015,7 @@ public final class SharedDictationTranscriptStore {
                     guard didWriteBackup else { return false }
                 }
                 defaults.set(true, forKey: Key.envelopeMigrationMarker)
+                cleanupLegacyTranscriptPayloads()
                 return true
             } catch {
                 return false
@@ -1972,6 +2084,19 @@ public final class SharedDictationTranscriptStore {
         return records
     }
 
+    private func loadRawLegacyRecords() -> [String: SharedDictationTranscript] {
+        var records: [String: SharedDictationTranscript] = [:]
+        for token in Set(loadTranscriptTokens()) {
+            if let transcript = loadRawLegacyRecord(forToken: token) {
+                records[token] = transcript
+            }
+        }
+        if let transcript = loadRawLegacyRecord(forToken: nil) {
+            records[transcript.token] = transcript
+        }
+        return records
+    }
+
     private func applyConsumption(
         to transcript: SharedDictationTranscript?,
         consumedTokens: [String]
@@ -1981,11 +2106,21 @@ public final class SharedDictationTranscriptStore {
         return SharedDictationTranscript(
             sessionID: transcript.sessionID,
             commandToken: transcript.commandToken,
-            text: transcript.text,
+            text: SharedDictationTranscript.redactedText,
             createdAt: transcript.createdAt,
             expiresAt: transcript.expiresAt,
             isConsumed: true
         )
+    }
+
+    private func normalizedConsumedRecords(
+        in envelope: TranscriptEnvelope
+    ) -> TranscriptEnvelope {
+        var normalized = envelope
+        normalized.records = envelope.records.compactMapValues {
+            applyConsumption(to: $0, consumedTokens: envelope.consumedTokens)
+        }
+        return normalized
     }
 
     private func loadTranscriptTokens() -> [String] {
@@ -2115,13 +2250,25 @@ public final class SharedDictationTranscriptStore {
         records[transcript.token] = SharedDictationTranscript(
             sessionID: transcript.sessionID,
             commandToken: transcript.commandToken,
-            text: transcript.text,
+            text: SharedDictationTranscript.redactedText,
             createdAt: transcript.createdAt,
             expiresAt: transcript.expiresAt,
             isConsumed: true
         )
         var pendingDeliveries = existingEnvelope?.pendingDeliveries ?? [:]
-        pendingDeliveries.removeValue(forKey: transcript.token)
+        if let pendingDelivery = pendingDeliveries[transcript.token],
+           pendingDelivery.isQuarantined
+               || pendingDelivery.mutationInFlight
+               || pendingDelivery.appliedOperationCount < pendingDelivery.operations.count {
+            // Expiry/redaction must not erase evidence of a non-transactional
+            // host edit. Retain a bounded quarantine journal so recovery can
+            // never mistake a partial insertion for a clean completion.
+            pendingDeliveries[transcript.token] = pendingDelivery.isQuarantined
+                ? pendingDelivery
+                : pendingDelivery.quarantined()
+        } else {
+            pendingDeliveries.removeValue(forKey: transcript.token)
+        }
         var deliveryLeases = existingEnvelope?.deliveryLeases ?? [:]
         deliveryLeases.removeValue(forKey: transcript.token)
         guard saveTranscriptEnvelope(TranscriptEnvelope(
@@ -2137,6 +2284,10 @@ public final class SharedDictationTranscriptStore {
                 forKey: Key.consumedTokenIndex
             )
             defaults.set(transcript.token, forKey: Key.consumedToken)
+            defaults.removeObject(forKey: Key.transcriptRecordPrefix + transcript.token)
+            if loadLegacyRecord(forToken: nil)?.token == transcript.token {
+                defaults.removeObject(forKey: Key.transcriptRecord)
+            }
             if loadDeliveryLease(forToken: transcript.token)?.transcriptToken == transcript.token {
                 defaults.removeObject(forKey: Key.deliveryLeasePrefix + transcript.token)
                 defaults.removeObject(forKey: Key.deliveryLease)
@@ -2166,6 +2317,42 @@ public final class SharedDictationTranscriptStore {
             }
         }
         return body()
+    }
+
+    /// Expiry is a privacy boundary, not only a read filter. Redact every
+    /// expired or already-consumed record while the store lock is held so
+    /// plaintext cannot remain in the App Group envelope or legacy defaults.
+    private func redactExpiredAndConsumedPayloads(now: Date = Date()) -> Bool {
+        let envelope = loadRawTranscriptEnvelope()
+        let records = envelope?.records ?? loadRawLegacyRecords()
+        let consumedTokens = envelope?.consumedTokens ?? loadConsumedTokenIndex()
+        guard !envelopeReadBlocked else { return false }
+        for transcript in records.values where
+            (transcript.isConsumed
+                || consumedTokens.contains(transcript.token)
+                || transcript.isExpired(at: now))
+                && transcript.text != SharedDictationTranscript.redactedText {
+            guard markConsumedRecord(transcript) else { return false }
+        }
+        return !envelopeReadBlocked
+    }
+
+    /// Once the atomic file envelope is authoritative, remove the old
+    /// UserDefaults payloads. Keeping them would allow a rollback or an older
+    /// process to rediscover plaintext that was already consumed/redacted.
+    private func cleanupLegacyTranscriptPayloads() {
+        guard envelopeURL != nil else { return }
+        for key in defaults.dictionaryRepresentation().keys where
+            key == Key.transcriptEnvelope
+                || key == Key.transcriptRecord
+                || key.hasPrefix(Key.transcriptRecordPrefix)
+                || key == Key.transcriptIndex
+                || key == Key.consumedToken
+                || key == Key.consumedTokenIndex
+                || key == Key.deliveryLease
+                || key.hasPrefix(Key.deliveryLeasePrefix) {
+            defaults.removeObject(forKey: key)
+        }
     }
 
     private func acquireFileLock() -> Bool {

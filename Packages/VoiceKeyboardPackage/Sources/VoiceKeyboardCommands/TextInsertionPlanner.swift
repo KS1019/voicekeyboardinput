@@ -199,10 +199,26 @@ package struct TextInsertionPlanner: Sendable {
             }
         }
         let trailingToken = String(characters[tokenStart...])
+        let trailingPunctuation = Set<Character>([
+            ".", ",", ";", ":", "!", "?", ")", "]", "}",
+            "）", "］", "｝", "】", "〕", "〉", "》", "」", "』", "”", "’", "»", "›"
+        ])
+        let trailingPunctuationCount = trailingToken.reversed().prefix {
+            trailingPunctuation.contains($0)
+        }.count
+        let structuredToken = String(trailingToken.dropLast(trailingPunctuationCount))
+        let leadingWrappers = Set<Character>([
+            "(", "[", "{", "（", "［", "｛", "【", "〔", "〈", "《", "「", "『",
+            "\"", "'", "“", "‘"
+        ])
+        let leadingWrapperCount = structuredToken.prefix {
+            leadingWrappers.contains($0)
+        }.count
+        let structuredCore = String(structuredToken.dropFirst(leadingWrapperCount))
         let decimalSeparators: Set<Character> = [
             ".", "．", "｡", "﹒", "․", ",", "，", "٫", "٬", "\u{00A0}", "\u{202F}", "\u{2007}", "\u{2009}"
         ]
-        let trailingCharacters = Array(trailingToken)
+        let trailingCharacters = Array(structuredCore)
         let hasNumericSeparator = trailingCharacters.indices.contains { index in
             guard decimalSeparators.contains(trailingCharacters[index]),
                   index > trailingCharacters.startIndex,
@@ -210,13 +226,18 @@ package struct TextInsertionPlanner: Sendable {
             return trailingCharacters[index - 1].isNumber
                 && trailingCharacters[index + 1].isNumber
         }
-        if trailingToken.contains("@")
-            || trailingToken.contains("://")
-            || isSchemeLessHostToken(trailingToken)
+        if structuredCore.contains("@")
+            || structuredCore.contains("://")
+            || isSchemeLessHostToken(structuredCore)
             || hasNumericSeparator {
             // Treat URLs, e-mail addresses, and decimal-like tokens as one
-            // word. Removing only `com` or `14` leaves a malformed token.
-            return trailingWhitespaceCount + trailingToken.count
+            // word while keeping sentence punctuation consistent with normal
+            // word deletion. Removing only `com` or `14` leaves a malformed
+            // token, but the surrounding comma or period is a separate edit.
+            return trailingWhitespaceCount
+                + (trailingPunctuationCount == 0
+                    ? max(structuredToken.count - leadingWrapperCount, 1)
+                    : 1)
         }
 
         if trimmed.last?.isJapaneseText == true {
@@ -401,9 +422,14 @@ private extension Character {
     var isJapaneseText: Bool {
         unicodeScalars.contains { scalar in
             switch scalar.value {
-            case 0x3040...0x30FF, 0x3400...0x9FFF, 0xFF61...0xFF9F:
+            case 0x3040...0x30FF,
+                 0x3400...0x9FFF,
+                 0xF900...0xFAFF,
+                 0xFF61...0xFF9F,
+                 0x1AFF0...0x1B16F:
                 true
-            case 0x20000...0x2FA1F:
+            case 0x20000...0x2FA1F,
+                 0x30000...0x3347F:
                 true
             default:
                 false

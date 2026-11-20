@@ -221,8 +221,12 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private var activationGeneration: UInt64 = 0
     private var isMicrophoneActivationActive = false
     private var isStoppingMicrophoneActivation = false
+    private var stoppingBarrierGeneration: UInt64 = 0
+    private var activeStoppingBarrierGeneration: UInt64?
+    private var stoppingBarrierCommandToken: String?
     private var startReservationToken: String?
     private var startIntentInFlight = false
+    private var startCancellationGeneration: UInt64 = 0
     private var lastClaimedCommandToken: String?
     private var isAppAvailable = true
 
@@ -281,15 +285,19 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     func prepareSession() async -> VoiceInputLaunchStatus {
         if heartbeatToken != nil {
             writeHeartbeat()
-            if heartbeatTask == nil, isAppAvailable || isMicrophoneActivationActive {
+            _ = await transcriptStoreCall({ $0.storageHealth() })
+            if heartbeatTask == nil,
+               isAppAvailable || isMicrophoneActivationActive || isStoppingMicrophoneActivation {
                 startHeartbeatTask()
             }
-            if commandMonitorTask == nil, isAppAvailable || isMicrophoneActivationActive {
+            if commandMonitorTask == nil,
+               isAppAvailable || isMicrophoneActivationActive || isStoppingMicrophoneActivation {
                 startCommandMonitor()
             }
             return .sessionReady
         }
-        guard await sessionStoreCall({ $0.storageHealth() }) == true else {
+        guard await transcriptStoreCall({ $0.storageHealth() }) == true,
+              await sessionStoreCall({ $0.storageHealth() }) == true else {
             return .failed("Shared App Group storage is unavailable.")
         }
         guard await recoverStaleSession() else {
@@ -340,17 +348,19 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         if !isAvailable {
             heartbeatState = isMicrophoneActivationActive ? .recording : .unavailable
             writeHeartbeat()
-            if isMicrophoneActivationActive {
+            if isMicrophoneActivationActive || isStoppingMicrophoneActivation {
                 // The containing app can become inactive while the keyboard
-                // is visible. Keep consuming the keyboard's Stop command so
-                // an active audio run is not left alive until its timeout.
+                // is visible. Keep the command monitor alive until an audio
+                // stop barrier settles; otherwise a scene transition can
+                // cancel the monitor after the activation task finishes and
+                // leave the barrier latched for the rest of the process.
                 startCommandMonitor()
             } else {
                 commandMonitorGeneration &+= 1
                 commandMonitorTask?.cancel()
                 commandMonitorTask = nil
             }
-            if !isMicrophoneActivationActive {
+            if !isMicrophoneActivationActive && !isStoppingMicrophoneActivation {
                 heartbeatTask?.cancel()
                 heartbeatTask = nil
             } else {
@@ -377,6 +387,8 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }
         startIntentInFlight = true
         defer { startIntentInFlight = false }
+        startCancellationGeneration &+= 1
+        let startGeneration = startCancellationGeneration
         let command: SharedDictationSessionCommand
         let shouldPublishCommand: Bool
         switch await firstUnclaimedKeyboardCommand() {
@@ -393,14 +405,22 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         case .unavailable:
             return .failed("Shared App Group storage is unavailable.")
         }
+        guard isCurrentStart(startGeneration) else {
+            await cancelUnclaimedStart(command, ownerToken: heartbeatToken)
+            return .failed("Cancelled")
+        }
         if shouldPublishCommand {
             guard await sessionStoreCall({ $0.saveCommand(command) }) == true else {
                 return .failed("Shared App Group storage is busy. Please try again.")
             }
+            guard isCurrentStart(startGeneration) else {
+                await cancelUnclaimedStart(command, ownerToken: heartbeatToken)
+                return .failed("Cancelled")
+            }
         }
         let ownerToken = heartbeatToken
         guard let ownerToken,
-              !Task.isCancelled else {
+              isCurrentStart(startGeneration) else {
             return .failed("Another app scene is already handling this voice input.")
         }
         startReservationToken = command.token
@@ -408,9 +428,16 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         isMicrophoneActivationActive = true
         activeSessionID = command.sessionID
         activeCommandToken = command.token
-        guard await sessionStoreCall({
+        let didClaim = await sessionStoreCall({
                   $0.claimCommand(token: command.token, ownerToken: ownerToken)
-              }) == true else {
+              }) == true
+        guard isCurrentStart(startGeneration) else {
+            if didClaim {
+                await cancelClaimedStart(command, ownerToken: ownerToken)
+            }
+            return .failed("Cancelled")
+        }
+        guard didClaim else {
             startReservationToken = nil
             isMicrophoneActivationActive = false
             activeSessionID = nil
@@ -424,14 +451,13 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }
         startReservationToken = nil
         let startedAt = Date()
+        guard isCurrentStart(startGeneration) else {
+            await cancelClaimedStart(command, ownerToken: ownerToken)
+            return .failed("Cancelled")
+        }
         guard await saveOwnedStatus(.commandAcknowledged(
             token: command.token,
             acknowledgedAt: startedAt
-        )),
-        await saveOwnedStatus(.recording(
-            token: command.token,
-            startedAt: startedAt,
-            timeoutSeconds: 8
         )) else {
             _ = await saveOwnedStatus(.failed(
                 token: command.token,
@@ -450,8 +476,37 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             await persistHeartbeat()
             return .failed("Shared App Group storage is busy. Please try again.")
         }
+        guard isCurrentStart(startGeneration) else {
+            await cancelClaimedStart(command, ownerToken: ownerToken)
+            return .failed("Cancelled")
+        }
+        guard await saveOwnedStatus(.recording(
+            token: command.token,
+            startedAt: startedAt,
+            timeoutSeconds: 8
+        )) else {
+            _ = await saveOwnedStatus(.failed(
+                token: command.token,
+                message: "Shared App Group storage could not persist the recording state."
+            ))
+            isMicrophoneActivationActive = false
+            startReservationToken = nil
+            activeSessionID = nil
+            activeCommandToken = nil
+            heartbeatState = isAppAvailable ? .armed : .unavailable
+            await persistHeartbeat()
+            return .failed("Shared App Group storage is busy. Please try again.")
+        }
+        guard isCurrentStart(startGeneration) else {
+            await cancelClaimedStart(command, ownerToken: ownerToken)
+            return .failed("Cancelled")
+        }
         heartbeatState = .recording
         await persistHeartbeat()
+        guard isCurrentStart(startGeneration) else {
+            await cancelClaimedStart(command, ownerToken: ownerToken)
+            return .failed("Cancelled")
+        }
 
         let activationTask = Task { [weak self] () -> VoiceInputLaunchStatus in
             guard let self else { return .failed("Voice input controller was released.") }
@@ -486,10 +541,12 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }
         startIntentInFlight = true
         defer { startIntentInFlight = false }
+        startCancellationGeneration &+= 1
+        let startGeneration = startCancellationGeneration
         if heartbeatToken == nil {
             _ = await prepareSession()
         }
-        guard heartbeatToken != nil else {
+        guard isCurrentStart(startGeneration), heartbeatToken != nil else {
             return .failed("Voice input session is still preparing. Please try again.")
         }
         // A cold URL launch can arrive before SwiftUI's root .task has
@@ -498,7 +555,9 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         if commandMonitorTask == nil {
             _ = await prepareSession()
         }
-        guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }) else {
+        guard isCurrentStart(startGeneration) else { return .failed("Cancelled") }
+        guard let historyResolution = await sessionStoreCall({ $0.commandHistoryResolution() }),
+              isCurrentStart(startGeneration) else {
             return .failed("Shared App Group storage is unavailable.")
         }
         guard case .available(let commands) = historyResolution else {
@@ -512,6 +571,10 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }) else {
             return .failed("The keyboard dictation request is no longer available.")
         }
+        guard isCurrentStart(startGeneration) else {
+            await cancelUnclaimedStart(command, ownerToken: heartbeatToken)
+            return .failed("Cancelled")
+        }
         // Claim the exact command before starting. The monitor will therefore
         // ignore it and cannot create a second microphone activation.
         let ownerToken = heartbeatToken
@@ -523,9 +586,16 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         isMicrophoneActivationActive = true
         activeSessionID = command.sessionID
         activeCommandToken = command.token
-        guard await sessionStoreCall({
+        let didClaim = await sessionStoreCall({
                   $0.claimCommand(token: command.token, ownerToken: ownerToken)
-              }) == true else {
+              }) == true
+        guard isCurrentStart(startGeneration) else {
+            if didClaim {
+                await cancelClaimedStart(command, ownerToken: ownerToken)
+            }
+            return .failed("Cancelled")
+        }
+        guard didClaim else {
             startReservationToken = nil
             isMicrophoneActivationActive = false
             activeSessionID = nil
@@ -533,8 +603,9 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             return .failed("Another app scene is already handling this voice input.")
         }
         lastClaimedCommandToken = command.token
-        await startDictation(for: command)
+        await startDictation(for: command, startGeneration: startGeneration)
         startIntentInFlight = false
+        guard isCurrentStart(startGeneration) else { return .failed("Cancelled") }
         guard let activationTask = activeStartTask else {
             return .failed("Voice input could not be started.")
         }
@@ -542,6 +613,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     func cancelActiveSession() async {
+        startCancellationGeneration &+= 1
         commandMonitorGeneration &+= 1
         commandMonitorTask?.cancel()
         commandMonitorTask = nil
@@ -549,8 +621,24 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         heartbeatTask = nil
         let activationTask = activeStartTask
         activeStartTask = nil
-        activationTask?.cancel()
-        isStoppingMicrophoneActivation = activationTask != nil
+        let sessionID = activeSessionID
+        let commandToken = activeCommandToken
+        if let stoppableActivator = microphoneActivator as? any StoppableSessionAwareMicrophoneActivating,
+           let sessionID,
+           let commandToken {
+            // A user Stop is a finalize request, not a recognition abort.
+            // The concrete activator lets the active run publish its last
+            // Speech result before the task is released.
+            await stoppableActivator.stop(
+                sessionID: sessionID,
+                commandToken: commandToken
+            )
+        } else {
+            activationTask?.cancel()
+        }
+        let stoppingBarrier = activationTask.map { _ in
+            beginStoppingBarrier(for: activeCommandToken)
+        }
         if let activeCommandToken {
             _ = await saveOwnedStatus(.cancelled(token: activeCommandToken))
         }
@@ -563,11 +651,45 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         if let activationTask {
             _ = await activationTask.value
         }
-        isStoppingMicrophoneActivation = false
+        if let stoppingBarrier {
+            releaseStoppingBarrier(stoppingBarrier)
+        }
+        if isAppAvailable {
+            heartbeatState = .armed
+            writeHeartbeat()
+            startHeartbeatTask()
+            startCommandMonitor()
+        }
+    }
+
+    private func makeStopClaimRenewalTask(
+        commandToken: String,
+        ownerToken: String
+    ) -> Task<Void, Never> {
+        Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                let renewed = await self.sessionStoreCall {
+                    $0.renewCommandClaim(token: commandToken, ownerToken: ownerToken)
+                } ?? false
+                if renewed {
+                    consecutiveFailures = 0
+                } else {
+                    consecutiveFailures += 1
+                    // A short App Group/file-lock failure is recoverable. A
+                    // sustained false result means ownership was lost; stop
+                    // renewing rather than masking an owner mismatch forever.
+                    guard consecutiveFailures < 8 else { return }
+                }
+            }
+        }
     }
 
     private func startCommandMonitor() {
-        guard (isAppAvailable || isMicrophoneActivationActive), commandMonitorTask == nil else { return }
+        guard (isAppAvailable || isMicrophoneActivationActive || isStoppingMicrophoneActivation),
+              commandMonitorTask == nil else { return }
         commandMonitorGeneration &+= 1
         let generation = commandMonitorGeneration
         commandMonitorTask = Task { [weak self] in
@@ -578,15 +700,19 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
             }
             while !Task.isCancelled {
                 guard let self else { return }
-                guard self.isAppAvailable || self.isMicrophoneActivationActive else { return }
-                await self.consumeCommandIfNeeded()
+                guard self.isAppAvailable
+                    || self.isMicrophoneActivationActive
+                    || self.isStoppingMicrophoneActivation else { return }
+                await self.consumeCommandIfNeeded(monitorGeneration: generation)
                 try? await Task.sleep(for: .milliseconds(250))
             }
         }
     }
 
-    private func consumeCommandIfNeeded() async {
+    private func consumeCommandIfNeeded(monitorGeneration: UInt64) async {
+        guard isCurrentCommandMonitor(monitorGeneration) else { return }
         guard await recoverCompletedTranscriptIfPresent() else { return }
+        guard isCurrentCommandMonitor(monitorGeneration) else { return }
         guard startReservationToken == nil,
               !isStoppingMicrophoneActivation,
               !startIntentInFlight else { return }
@@ -602,6 +728,12 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         }) ?? nil else {
             return
         }
+        guard isCurrentCommandMonitor(monitorGeneration) else {
+            // Do not release a stale claim here. The same heartbeat owner can
+            // reclaim this token after the lease expires, creating an ABA
+            // window where an old monitor releases the new monitor's claim.
+            return
+        }
         lastClaimedCommandToken = command.token
         guard command.source == .keyboard else { return }
 
@@ -611,7 +743,9 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                   !isStoppingMicrophoneActivation,
                   !startIntentInFlight,
                   startReservationToken == nil else {
-                if startReservationToken != command.token {
+                if startReservationToken != command.token,
+                   activeCommandToken != command.token {
+                    guard isCurrentCommandMonitor(monitorGeneration) else { return }
                     _ = await sessionStoreCall {
                         $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
                     }
@@ -626,32 +760,72 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
                 return
             }
-            await startDictation(for: command)
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                return
+            }
+            let startGeneration = startCancellationGeneration
+            await startDictation(
+                for: command,
+                startGeneration: startGeneration
+            )
         case .stop:
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                await abandonStaleCommandClaim(
+                    command,
+                    ownerToken: ownerToken,
+                    cursor: cursorBeforeClaim,
+                    monitorGeneration: monitorGeneration
+                )
+                return
+            }
             guard let ownerToken = heartbeatToken else { return }
             guard activeSessionID == command.sessionID else {
                 if let replacedToken = command.replacesCommandToken,
                    let owner = await sessionStoreCall({ $0.claimOwner(forCommandToken: replacedToken) }) ?? nil,
                    owner != ownerToken {
-                    _ = await sessionStoreCall {
-                        $0.releaseCommandClaim(
-                            token: command.token,
-                            ownerToken: ownerToken
-                        )
-                    }
-                    // Keep the monitor cursor before this token. The owner of
-                    // the start command can claim the stop on its next poll.
-                    lastClaimedCommandToken = cursorBeforeClaim
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
                     return
                 }
                 if activeSessionID != nil {
                     if let replacedToken = command.replacesCommandToken {
                         _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                        guard isCurrentCommandMonitor(monitorGeneration) else {
+                            await abandonStaleCommandClaim(
+                                command,
+                                ownerToken: ownerToken,
+                                cursor: cursorBeforeClaim,
+                                monitorGeneration: monitorGeneration
+                            )
+                            return
+                        }
                     }
                     _ = await saveOwnedStatus(.failed(
                         token: command.token,
                         message: "Voice input is already active in another session."
                     ))
+                    guard isCurrentCommandMonitor(monitorGeneration) else {
+                        await abandonStaleCommandClaim(
+                            command,
+                            ownerToken: ownerToken,
+                            cursor: cursorBeforeClaim,
+                            monitorGeneration: monitorGeneration
+                        )
+                        return
+                    }
                     return
                 }
                 // A stop can arrive while the containing app has not yet
@@ -662,18 +836,31 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                     guard let transcriptResolution = await transcriptStoreCall({
                         $0.latestTranscriptResolution(forSessionID: command.sessionID)
                     }) else {
-                        _ = await sessionStoreCall {
-                            $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
-                        }
-                        lastClaimedCommandToken = cursorBeforeClaim
+                        await abandonStaleCommandClaim(
+                            command,
+                            ownerToken: ownerToken,
+                            cursor: cursorBeforeClaim,
+                            monitorGeneration: monitorGeneration
+                        )
+                        return
+                    }
+                    guard isCurrentCommandMonitor(monitorGeneration) else {
+                        await abandonStaleCommandClaim(
+                            command,
+                            ownerToken: ownerToken,
+                            cursor: cursorBeforeClaim,
+                            monitorGeneration: monitorGeneration
+                        )
                         return
                     }
                     switch transcriptResolution {
                     case .unavailable:
-                        _ = await sessionStoreCall {
-                            $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
-                        }
-                        lastClaimedCommandToken = cursorBeforeClaim
+                        await abandonStaleCommandClaim(
+                            command,
+                            ownerToken: ownerToken,
+                            cursor: cursorBeforeClaim,
+                            monitorGeneration: monitorGeneration
+                        )
                         return
                     case .found(let transcript)
                         where transcript.commandToken == replacedToken
@@ -689,36 +876,118 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                                 ownerToken: ownerToken
                             )
                         }) == true else {
-                            _ = await sessionStoreCall {
-                                $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
-                            }
-                            lastClaimedCommandToken = cursorBeforeClaim
+                            await abandonStaleCommandClaim(
+                                command,
+                                ownerToken: ownerToken,
+                                cursor: cursorBeforeClaim,
+                                monitorGeneration: monitorGeneration
+                            )
+                            return
+                        }
+                        guard isCurrentCommandMonitor(monitorGeneration) else {
+                            await abandonStaleCommandClaim(
+                                command,
+                                ownerToken: ownerToken,
+                                cursor: cursorBeforeClaim,
+                                monitorGeneration: monitorGeneration
+                            )
                             return
                         }
                     case .found, .missing:
                         _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                        guard isCurrentCommandMonitor(monitorGeneration) else {
+                            await abandonStaleCommandClaim(
+                                command,
+                                ownerToken: ownerToken,
+                                cursor: cursorBeforeClaim,
+                                monitorGeneration: monitorGeneration
+                            )
+                            return
+                        }
                     }
                 }
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 heartbeatState = isAppAvailable ? .armed : .unavailable
                 await persistHeartbeat()
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 return
             }
             let activationTask = activeStartTask
+            _ = await sessionStoreCall {
+                $0.renewCommandClaim(token: command.token, ownerToken: ownerToken)
+            }
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                await abandonStaleCommandClaim(
+                    command,
+                    ownerToken: ownerToken,
+                    cursor: cursorBeforeClaim,
+                    monitorGeneration: monitorGeneration
+                )
+                return
+            }
+            let stopClaimRenewalTask = makeStopClaimRenewalTask(
+                commandToken: command.token,
+                ownerToken: ownerToken
+            )
+            defer { stopClaimRenewalTask.cancel() }
             _ = await saveOwnedStatus(.commandAcknowledged(
                 token: command.token,
                 acknowledgedAt: Date()
             ))
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                await abandonStaleCommandClaim(
+                    command,
+                    ownerToken: ownerToken,
+                    cursor: cursorBeforeClaim,
+                    monitorGeneration: monitorGeneration
+                )
+                return
+            }
             if let stoppableActivator = microphoneActivator as? any StoppableSessionAwareMicrophoneActivating {
-                isStoppingMicrophoneActivation = true
+                let stoppingBarrier = beginStoppingBarrier(for: command.token)
                 await stoppableActivator.stop(
                     sessionID: command.sessionID,
                     commandToken: activeCommandToken ?? ""
                 )
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 if let activationTask {
                     _ = await activationTask.value
                 }
-                isStoppingMicrophoneActivation = false
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
+                releaseStoppingBarrier(stoppingBarrier)
                 if let replacedToken = command.replacesCommandToken {
                     switch await resolveActiveStopTranscript(
                         sessionID: command.sessionID,
@@ -738,12 +1007,48 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                         // cross-store race window.
                         heartbeatState = isAppAvailable ? .armed : .unavailable
                         await persistHeartbeat()
+                        guard isCurrentCommandMonitor(monitorGeneration) else {
+                            await abandonStaleCommandClaim(
+                                command,
+                                ownerToken: ownerToken,
+                                cursor: cursorBeforeClaim,
+                                monitorGeneration: monitorGeneration
+                            )
+                            return
+                        }
+                        return
+                    }
+                    guard isCurrentCommandMonitor(monitorGeneration) else {
+                        await abandonStaleCommandClaim(
+                            command,
+                            ownerToken: ownerToken,
+                            cursor: cursorBeforeClaim,
+                            monitorGeneration: monitorGeneration
+                        )
                         return
                     }
                 }
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 heartbeatState = isAppAvailable ? .armed : .unavailable
                 await persistHeartbeat()
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
             } else {
                 activeStartTask = nil
                 activationTask?.cancel()
@@ -751,10 +1056,37 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 activeSessionID = nil
                 activeCommandToken = nil
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 heartbeatState = isAppAvailable ? .armed : .unavailable
                 await persistHeartbeat()
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 if let activationTask {
                     _ = await activationTask.value
+                }
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
                 }
             }
         case .cancel:
@@ -763,39 +1095,102 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 if let replacedToken = command.replacesCommandToken,
                    let owner = await sessionStoreCall({ $0.claimOwner(forCommandToken: replacedToken) }) ?? nil,
                    owner != ownerToken {
-                    _ = await sessionStoreCall {
-                        $0.releaseCommandClaim(
-                            token: command.token,
-                            ownerToken: ownerToken
-                        )
-                    }
-                    lastClaimedCommandToken = cursorBeforeClaim
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
                     return
                 }
+                guard isCurrentCommandMonitor(monitorGeneration) else { return }
                 if let replacedToken = command.replacesCommandToken {
                     _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                    guard isCurrentCommandMonitor(monitorGeneration) else {
+                        await abandonStaleCommandClaim(
+                            command,
+                            ownerToken: ownerToken,
+                            cursor: cursorBeforeClaim,
+                            monitorGeneration: monitorGeneration
+                        )
+                        return
+                    }
                 }
                 _ = await saveOwnedStatus(.cancelled(token: command.token))
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 heartbeatState = isAppAvailable ? .armed : .unavailable
                 await persistHeartbeat()
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
                 return
             }
             let activationTask = activeStartTask
             activeStartTask = nil
             activationTask?.cancel()
-            isStoppingMicrophoneActivation = true
+            let stoppingBarrier = beginStoppingBarrier(for: command.token)
             isMicrophoneActivationActive = false
             activeSessionID = nil
             activeCommandToken = nil
             startReservationToken = nil
             if let replacedToken = command.replacesCommandToken {
                 _ = await saveOwnedStatus(.cancelled(token: replacedToken))
+                guard isCurrentCommandMonitor(monitorGeneration) else {
+                    await abandonStaleCommandClaim(
+                        command,
+                        ownerToken: ownerToken,
+                        cursor: cursorBeforeClaim,
+                        monitorGeneration: monitorGeneration
+                    )
+                    return
+                }
             }
             _ = await saveOwnedStatus(.cancelled(token: command.token))
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                await abandonStaleCommandClaim(
+                    command,
+                    ownerToken: ownerToken,
+                    cursor: cursorBeforeClaim,
+                    monitorGeneration: monitorGeneration
+                )
+                return
+            }
             heartbeatState = isAppAvailable ? .armed : .unavailable
             await persistHeartbeat()
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                await abandonStaleCommandClaim(
+                    command,
+                    ownerToken: ownerToken,
+                    cursor: cursorBeforeClaim,
+                    monitorGeneration: monitorGeneration
+                )
+                return
+            }
             if let activationTask { _ = await activationTask.value }
-            isStoppingMicrophoneActivation = false
+            guard isCurrentCommandMonitor(monitorGeneration) else {
+                await abandonStaleCommandClaim(
+                    command,
+                    ownerToken: ownerToken,
+                    cursor: cursorBeforeClaim,
+                    monitorGeneration: monitorGeneration
+                )
+                return
+            }
+            releaseStoppingBarrier(stoppingBarrier)
         }
     }
 
@@ -871,8 +1266,14 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     }
 
     private func startDictation(
-        for command: SharedDictationSessionCommand
+        for command: SharedDictationSessionCommand,
+        startGeneration: UInt64? = nil
     ) async {
+        if let startGeneration,
+           !isCurrentStart(startGeneration) {
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
+            return
+        }
         guard !isStoppingMicrophoneActivation,
               (!isMicrophoneActivationActive || startReservationToken == command.token) else {
             _ = await saveOwnedStatus(.failed(
@@ -893,26 +1294,46 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
         startReservationToken = nil
 
         let startedAt = Date()
+        if let startGeneration,
+           !isCurrentStart(startGeneration) {
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
+            return
+        }
         guard await saveOwnedStatus(.commandAcknowledged(
             token: command.token,
             acknowledgedAt: startedAt
-        )),
-        await saveOwnedStatus(.recording(
+        )) else {
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
+            return
+        }
+        if let startGeneration,
+           !isCurrentStart(startGeneration) {
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
+            return
+        }
+        guard await saveOwnedStatus(.recording(
             token: command.token,
             startedAt: startedAt,
             timeoutSeconds: 8
         )) else {
-            _ = await saveOwnedStatus(.failed(
-                token: command.token,
-                message: "Shared App Group storage could not persist the recording state."
-            ))
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
             activeSessionID = nil
             activeCommandToken = nil
             isMicrophoneActivationActive = false
             return
         }
+        if let startGeneration,
+           !isCurrentStart(startGeneration) {
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
+            return
+        }
         heartbeatState = .recording
         await persistHeartbeat()
+        if let startGeneration,
+           !isCurrentStart(startGeneration) {
+            await cancelClaimedStart(command, ownerToken: heartbeatToken)
+            return
+        }
 
         activeStartTask = Task { [weak self] in
             guard let self else { return .failed("Voice input controller was released.") }
@@ -927,6 +1348,92 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                   self.activeCommandToken == command.token else { return result }
             await self.saveCompletionStatus(for: command, result: result)
             return result
+        }
+    }
+
+    private func isCurrentStart(_ generation: UInt64) -> Bool {
+        generation == startCancellationGeneration && !Task.isCancelled
+    }
+
+    private func isCurrentCommandMonitor(_ generation: UInt64) -> Bool {
+        generation == commandMonitorGeneration && !Task.isCancelled
+    }
+
+    private func beginStoppingBarrier(for commandToken: String?) -> UInt64 {
+        stoppingBarrierGeneration &+= 1
+        let barrierGeneration = stoppingBarrierGeneration
+        activeStoppingBarrierGeneration = barrierGeneration
+        stoppingBarrierCommandToken = commandToken
+        isStoppingMicrophoneActivation = true
+        return barrierGeneration
+    }
+
+    private func releaseStoppingBarrier(_ barrierGeneration: UInt64) {
+        guard activeStoppingBarrierGeneration == barrierGeneration else { return }
+        activeStoppingBarrierGeneration = nil
+        stoppingBarrierCommandToken = nil
+        isStoppingMicrophoneActivation = false
+    }
+
+    private func releaseStoppingBarrierOwned(by commandToken: String) {
+        guard stoppingBarrierCommandToken == commandToken,
+              let barrierGeneration = activeStoppingBarrierGeneration else {
+            return
+        }
+        releaseStoppingBarrier(barrierGeneration)
+    }
+
+    private func abandonStaleCommandClaim(
+        _ command: SharedDictationSessionCommand,
+        ownerToken: String?,
+        cursor: String?,
+        monitorGeneration: UInt64
+    ) async {
+        guard isCurrentCommandMonitor(monitorGeneration) else {
+            // A cancelled monitor must not release a claim or restore shared
+            // cursor/barrier state. Its lease will expire safely; releasing
+            // by heartbeat owner alone is vulnerable to an ABA race with a
+            // replacement monitor.
+            return
+        }
+        _ = await sessionStoreCall {
+            $0.releaseCommandClaim(token: command.token, ownerToken: ownerToken)
+        }
+        guard isCurrentCommandMonitor(monitorGeneration) else { return }
+        lastClaimedCommandToken = cursor
+        releaseStoppingBarrierOwned(by: command.token)
+    }
+
+    private func cancelClaimedStart(
+        _ command: SharedDictationSessionCommand,
+        ownerToken: String?
+    ) async {
+        if let ownerToken {
+            _ = await sessionStoreCall {
+                $0.saveStatus(.cancelled(token: command.token), ownerToken: ownerToken)
+            }
+        }
+        guard activeCommandToken == command.token else { return }
+        activeStartTask = nil
+        activeSessionID = nil
+        activeCommandToken = nil
+        isMicrophoneActivationActive = false
+        startReservationToken = nil
+        heartbeatState = isAppAvailable ? .armed : .unavailable
+    }
+
+    private func cancelUnclaimedStart(
+        _ command: SharedDictationSessionCommand,
+        ownerToken: String?
+    ) async {
+        guard let ownerToken,
+              await sessionStoreCall({
+                  $0.claimCommand(token: command.token, ownerToken: ownerToken)
+              }) == true else {
+            return
+        }
+        _ = await sessionStoreCall {
+            $0.saveStatus(.cancelled(token: command.token), ownerToken: ownerToken)
         }
     }
 
@@ -1004,11 +1511,20 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
     private func startHeartbeatTask() {
         heartbeatTask?.cancel()
         heartbeatTask = Task { [weak self] in
+            var transcriptCleanupTicks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
-                guard let self, self.isAppAvailable || self.isMicrophoneActivationActive else { return }
+                guard let self,
+                      self.isAppAvailable
+                        || self.isMicrophoneActivationActive
+                        || self.isStoppingMicrophoneActivation else { return }
                 self.writeHeartbeat()
+                transcriptCleanupTicks += 1
+                if transcriptCleanupTicks >= 60 {
+                    transcriptCleanupTicks = 0
+                    _ = await self.transcriptStoreCall({ $0.storageHealth() })
+                }
             }
         }
     }
@@ -1040,7 +1556,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
               let activeCommandToken else { return }
         activeStartTask?.cancel()
         activeStartTask = nil
-        isStoppingMicrophoneActivation = true
+        let stoppingBarrier = beginStoppingBarrier(for: activeCommandToken)
         isMicrophoneActivationActive = false
         self.activeSessionID = nil
         self.activeCommandToken = nil
@@ -1051,7 +1567,7 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 commandToken: activeCommandToken
             )
         }
-        isStoppingMicrophoneActivation = false
+        releaseStoppingBarrier(stoppingBarrier)
     }
 
     /// Production app status transitions must prove that this scene still
@@ -1139,7 +1655,12 @@ final class AppBackgroundDictationSessionController: DictationSessionControlling
                 status = resolvedStatus
             }
             switch status {
-            case .commandAcknowledged, .recording, .transcribing, .failed,
+            case .failed:
+                // A failed delivery is a durable no-replay fence. Only an
+                // explicit, owner-authorized Stop recovery may promote a
+                // transcript; cold startup must never do so implicitly.
+                continue
+            case .commandAcknowledged, .recording, .transcribing,
                  .idle, .commandPending, .cancelled:
                 // The transcript is the durable completion marker. Promote
                 // it even when status publication was interrupted or a newer
@@ -1220,11 +1741,28 @@ protocol StoppableSessionAwareMicrophoneActivating: SessionAwareMicrophoneActiva
 
 @MainActor
 final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareMicrophoneActivating {
+    private struct RequestKey: Hashable {
+        let sessionID: String
+        let commandToken: String
+    }
+
+    private final class ActiveRunLease {
+        let sessionID: String
+        let commandToken: String
+        let run: AppSpeechDictationRun
+
+        init(sessionID: String, commandToken: String, run: AppSpeechDictationRun) {
+            self.sessionID = sessionID
+            self.commandToken = commandToken
+            self.run = run
+        }
+    }
+
     private let transcriptStoreProvider: @Sendable () -> SharedDictationTranscriptStore?
     private let sessionStoreProvider: @Sendable () -> SharedDictationSessionStore?
-    private var activeRun: AppSpeechDictationRun?
-    private var stopRequestedSessionIDs: Set<String> = []
-    private var permissionGates: [String: AppPermissionRequestGate<Bool>] = [:]
+    private var activeRun: ActiveRunLease?
+    private var stopRequestedRequests: Set<RequestKey> = []
+    private var permissionGates: [RequestKey: AppPermissionRequestGate<Bool>] = [:]
 
     init(
         transcriptStoreProvider: @escaping @Sendable () -> SharedDictationTranscriptStore? = {
@@ -1251,18 +1789,19 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
         commandToken: String,
         ownerToken: String
     ) async -> VoiceInputLaunchStatus {
-        defer { stopRequestedSessionIDs.remove(sessionID) }
-        guard await requestRecordPermission(for: sessionID) else {
+        let requestKey = RequestKey(sessionID: sessionID, commandToken: commandToken)
+        defer { stopRequestedRequests.remove(requestKey) }
+        guard await requestRecordPermission(for: requestKey) else {
             return .permissionDenied
         }
-        guard !stopRequestedSessionIDs.contains(sessionID), !Task.isCancelled else {
+        guard !stopRequestedRequests.contains(requestKey), !Task.isCancelled else {
             return .failed("Cancelled")
         }
 
-        guard await requestSpeechRecognitionAuthorization(for: sessionID) else {
+        guard await requestSpeechRecognitionAuthorization(for: requestKey) else {
             return .failed("Enable speech recognition access in Settings to use keyboard voice input.")
         }
-        guard !stopRequestedSessionIDs.contains(sessionID), !Task.isCancelled else {
+        guard !stopRequestedRequests.contains(requestKey), !Task.isCancelled else {
             return .failed("Cancelled")
         }
         guard activeRun == nil else {
@@ -1270,11 +1809,15 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
         }
 
         let run = AppSpeechDictationRun(locale: Locale.current, maximumDuration: 8)
-        activeRun = run
-        defer { if activeRun === run { activeRun = nil } }
+        activeRun = ActiveRunLease(
+            sessionID: sessionID,
+            commandToken: commandToken,
+            run: run
+        )
 
         do {
             let transcriptText = try await run.start()
+            retainRunUntilAudioOwnershipRelease(run)
             guard let transcript = SharedDictationTranscript(
                 sessionID: sessionID,
                 commandToken: commandToken,
@@ -1301,23 +1844,37 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
             }
             return .transcriptShared(transcript.text)
         } catch {
+            retainRunUntilAudioOwnershipRelease(run)
             return .failed(error.localizedDescription)
         }
     }
 
     func stop(sessionID: String, commandToken: String) async {
-        stopRequestedSessionIDs.insert(sessionID)
-        permissionGates[sessionID]?.cancel()
-        activeRun?.finishForUserStop()
+        let requestKey = RequestKey(sessionID: sessionID, commandToken: commandToken)
+        stopRequestedRequests.insert(requestKey)
+        permissionGates[requestKey]?.cancel()
+        guard let activeRun,
+              activeRun.sessionID == sessionID,
+              activeRun.commandToken == commandToken else { return }
+        activeRun.run.finishForUserStop()
     }
 
-    private func requestRecordPermission(for sessionID: String) async -> Bool {
+    private func retainRunUntilAudioOwnershipRelease(_ run: AppSpeechDictationRun) {
+        Task { @MainActor [weak self, run] in
+            await run.waitForAudioOwnershipRelease()
+            guard let self,
+                  self.activeRun?.run === run else { return }
+            self.activeRun = nil
+        }
+    }
+
+    private func requestRecordPermission(for requestKey: RequestKey) async -> Bool {
         guard !Task.isCancelled else { return false }
         let gate = AppPermissionRequestGate(cancelledValue: false)
-        permissionGates[sessionID] = gate
+        permissionGates[requestKey] = gate
         defer {
-            if permissionGates[sessionID] === gate {
-                permissionGates.removeValue(forKey: sessionID)
+            if permissionGates[requestKey] === gate {
+                permissionGates.removeValue(forKey: requestKey)
             }
         }
         return await withTaskCancellationHandler(operation: {
@@ -1336,17 +1893,17 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
         })
     }
 
-    private func requestSpeechRecognitionAuthorization(for sessionID: String) async -> Bool {
+    private func requestSpeechRecognitionAuthorization(for requestKey: RequestKey) async -> Bool {
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized:
             return true
         case .notDetermined:
             guard !Task.isCancelled else { return false }
             let gate = AppPermissionRequestGate(cancelledValue: false)
-            permissionGates[sessionID] = gate
+            permissionGates[requestKey] = gate
             defer {
-                if permissionGates[sessionID] === gate {
-                    permissionGates.removeValue(forKey: sessionID)
+                if permissionGates[requestKey] === gate {
+                    permissionGates.removeValue(forKey: requestKey)
                 }
             }
             return await withTaskCancellationHandler(operation: {

@@ -20,8 +20,17 @@ struct AppAudioInputProbe: AudioCaptureProbing {
             coordinator.releaseOwnership(ownershipToken)
             throw .unavailableInCurrentProcess
         }
+        let generation = coordinator.currentGeneration()
+        let resetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: session,
+            queue: nil
+        ) { _ in
+            coordinator.recoverAfterMediaServicesReset()
+        }
 
         defer {
+            NotificationCenter.default.removeObserver(resetObserver)
             tapGate.invalidate()
             let tapWasInstalled = tapIsInstalled
             let sessionWasActive = sessionIsActive
@@ -31,6 +40,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                 if let audioSessionOperation {
                     switch await audioSessionOperation.value {
                     case .succeeded:
+                        guard coordinator.isCurrentGeneration(generation) else { return }
                         let deactivation = Self.makeSessionOperation(
                             session,
                             active: false,
@@ -41,7 +51,8 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                             timeout: 2,
                             coordinator: coordinator,
                             operationToken: operationToken,
-                            ownershipToken: ownershipToken
+                            ownershipToken: ownershipToken,
+                            generation: generation
                         )
                     case .failed, .timedOut:
                         // Activation never became usable, so no late
@@ -55,12 +66,13 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                 if let audioEngineOperation {
                     _ = await audioEngineOperation.value
                 }
+                guard coordinator.isCurrentGeneration(generation) else { return }
                 tapGate.waitUntilDrained()
                 let didRemoveTap = !tapWasInstalled || VKRemoveAudioEngineInputTap(engine)
                 let didStopEngine = VKStopAudioEngine(engine)
                 guard didRemoveTap && didStopEngine else {
                     coordinator.finish(operationToken)
-                    coordinator.markTerminal()
+                    coordinator.markTerminal(forGeneration: generation)
                     coordinator.releaseOwnershipAfterTerminal(ownershipToken)
                     return
                 }
@@ -72,14 +84,26 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                     coordinator.releaseOwnership(ownershipToken)
                     return
                 }
-                await coordinator.waitForPendingSessionOperationsUntilSettled()
-                if coordinator.hasPendingSessionOperation {
+                _ = await coordinator.waitForPendingSessionOperationsUntilSettled(
+                    generation: generation
+                )
+                if coordinator.hasPendingSessionOperation(forGeneration: generation) {
                     // setPreferredInput can complete after the user-facing
                     // timeout, especially while a Bluetooth HFP route is
-                    // materializing. Keep the fence and ownership until the
-                    // AVAudioSession operation has actually settled. Do not
-                    // issue a deactivation while that operation is unknown.
-                    coordinator.markTerminal()
+                    // materializing. Keep the terminal fence while the
+                    // AVAudioSession operation is unknown, release the
+                    // user-facing owner lease, and retain a bounded late
+                    // cleanup observer. If the operation eventually settles,
+                    // deactivate the session exactly once before clearing the
+                    // terminal fence.
+                    coordinator.markTerminal(forGeneration: generation)
+                    coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+                    Self.scheduleLateSessionDeactivation(
+                        session,
+                        coordinator: coordinator,
+                        ownershipToken: ownershipToken,
+                        generation: generation
+                    )
                     return
                 }
                 let deactivation = Self.makeSessionOperation(
@@ -92,7 +116,8 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                     timeout: 2,
                     coordinator: coordinator,
                     operationToken: operationToken,
-                    ownershipToken: ownershipToken
+                    ownershipToken: ownershipToken,
+                    generation: generation
                 )
             }
             Task {
@@ -114,7 +139,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                 throw AudioCaptureProbeError.unavailableInCurrentProcess
             case .timedOut:
                 lingeringAudioSessionOperation = activation
-                coordinator.markTerminal()
+                coordinator.markTerminal(forGeneration: generation)
                 throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
             guard coordinator.isCurrent(operationToken) else { throw CancellationError() }
@@ -153,7 +178,7 @@ struct AppAudioInputProbe: AudioCaptureProbing {
                 throw AudioCaptureProbeError.unavailableInCurrentProcess
             case .timedOut:
                 lingeringAudioEngineOperation = audioEngineOperation
-                coordinator.markTerminal()
+                coordinator.markTerminal(forGeneration: generation)
                 throw AudioCaptureProbeError.unavailableInCurrentProcess
             }
             try await Task.sleep(for: .seconds(duration.seconds))
@@ -185,9 +210,9 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         active: Bool,
         coordinator: AppAudioSessionOperationCoordinator
     ) -> Task<AppAudioEngineOperationStatus, Never> {
-        coordinator.beginSessionOperation()
+        let operationGeneration = coordinator.beginSessionOperation()
         return Task.detached {
-            defer { coordinator.completeSessionOperation() }
+            defer { coordinator.completeSessionOperation(operationGeneration) }
             do {
                 if active {
                     try session.setCategory(
@@ -211,13 +236,14 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         timeout: TimeInterval,
         coordinator: AppAudioSessionOperationCoordinator,
         operationToken: UInt64,
-        ownershipToken: UInt64
+        ownershipToken: UInt64,
+        generation: UInt64
     ) async {
         let status = await waitForOperation(operation, timeout: timeout)
         let finalStatus: AppAudioEngineOperationStatus
         switch status {
         case .timedOut:
-            coordinator.markTerminal()
+            coordinator.markTerminal(forGeneration: generation)
             finalStatus = await operation.value
         case .succeeded, .failed:
             finalStatus = status
@@ -228,8 +254,52 @@ struct AppAudioInputProbe: AudioCaptureProbing {
         case .succeeded:
             coordinator.releaseOwnership(ownershipToken)
         case .failed, .timedOut:
-            coordinator.markTerminal()
+            coordinator.markTerminal(forGeneration: generation)
             coordinator.releaseOwnershipAfterTerminal(ownershipToken)
+        }
+    }
+
+    private static func scheduleLateSessionDeactivation(
+        _ session: AVAudioSession,
+        coordinator: AppAudioSessionOperationCoordinator,
+        ownershipToken: UInt64,
+        generation: UInt64
+    ) {
+        Task.detached {
+            while !Task.isCancelled {
+                guard coordinator.isCurrentGeneration(generation) else { return }
+                if coordinator.hasPendingSessionOperation(forGeneration: generation) {
+                    do {
+                        try await Task.sleep(for: .milliseconds(100))
+                    } catch {
+                        return
+                    }
+                    continue
+                }
+                if let operationToken = coordinator.beginForCleanup(
+                    expectedGeneration: generation
+                ) {
+                    let deactivation = Self.makeSessionOperation(
+                        session,
+                        active: false,
+                        coordinator: coordinator
+                    )
+                    await Self.settleDeactivation(
+                        deactivation,
+                        timeout: 2,
+                        coordinator: coordinator,
+                        operationToken: operationToken,
+                        ownershipToken: ownershipToken,
+                        generation: generation
+                    )
+                    return
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    return
+                }
+            }
         }
     }
 

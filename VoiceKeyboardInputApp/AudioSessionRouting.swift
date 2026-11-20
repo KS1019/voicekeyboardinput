@@ -179,9 +179,9 @@ enum AppAudioSessionRouting {
         on session: AVAudioSession
     ) async throws {
         let coordinator = AppAudioSessionOperationCoordinator.shared
-        coordinator.beginSessionOperation()
+        let operationGeneration = coordinator.beginSessionOperation()
         let operation = Task.detached { () -> Bool in
-            defer { coordinator.completeSessionOperation() }
+            defer { coordinator.completeSessionOperation(operationGeneration) }
             do {
                 try session.setPreferredInput(input)
                 return true
@@ -203,7 +203,7 @@ enum AppAudioSessionRouting {
             }
         }
         guard let result else {
-            coordinator.markTerminal()
+            coordinator.markTerminal(forGeneration: operationGeneration)
             throw AppAudioSessionRoutingError.operationTimedOut
         }
         guard result else { throw AppAudioSessionRoutingError.preferredInputDidNotBecomeCurrent }

@@ -4,6 +4,7 @@ import CryptoKit
 public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sendable {
     private let beforeInput: String
     private let beforeInputSuffix: String?
+    private let beforeInputTailSuffix: String?
     private let beforeInputLength: Int?
     private let afterInput: String
     private let documentIdentifier: String?
@@ -17,6 +18,7 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
     ) {
         self.beforeInput = Self.fingerprint(beforeInput)
         self.beforeInputSuffix = beforeInput.map { Self.fingerprintSuffix($0) }
+        self.beforeInputTailSuffix = beforeInput.map { Self.fingerprintTailSuffix($0) }
         self.beforeInputLength = beforeInput?.count
         self.afterInput = Self.fingerprint(afterInput)
         self.documentIdentifier = documentIdentifier?.uuidString
@@ -65,6 +67,7 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
     private enum CodingKeys: String, CodingKey {
         case beforeInput
         case beforeInputSuffix
+        case beforeInputTailSuffix
         case beforeInputLength
         case afterInput
         case documentIdentifier
@@ -75,6 +78,7 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
         let container = try decoder.container(keyedBy: CodingKeys.self)
         beforeInput = try container.decode(String.self, forKey: .beforeInput)
         beforeInputSuffix = try container.decodeIfPresent(String.self, forKey: .beforeInputSuffix)
+        beforeInputTailSuffix = try container.decodeIfPresent(String.self, forKey: .beforeInputTailSuffix)
         beforeInputLength = try container.decodeIfPresent(Int.self, forKey: .beforeInputLength)
         afterInput = try container.decode(String.self, forKey: .afterInput)
         documentIdentifier = try container.decodeIfPresent(String.self, forKey: .documentIdentifier)
@@ -95,6 +99,12 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
         fingerprint(String(context.suffix(suffixCharacterLimit)))
     }
 
+    private static let tailSuffixCharacterLimit = 64
+
+    private static func fingerprintTailSuffix(_ context: String) -> String {
+        fingerprint(String(context.suffix(tailSuffixCharacterLimit)))
+    }
+
     private func beforeInputMatches(_ rawContext: String?) -> Bool {
         guard let rawContext else {
             return beforeInput == Self.fingerprint(nil)
@@ -102,24 +112,27 @@ public struct SharedDictationDocumentContextFingerprint: Codable, Equatable, Sen
         guard beforeInput == Self.fingerprint(rawContext) else {
             guard let beforeInputSuffix,
                   let beforeInputLength,
-                  beforeInputLength >= rawContext.count else {
+                  let beforeInputTailSuffix,
+                  rawContext.count >= Self.tailSuffixCharacterLimit,
+                  beforeInputLength >= Self.tailSuffixCharacterLimit else {
                 return false
             }
             return beforeInputSuffix == Self.fingerprintSuffix(rawContext)
+                || beforeInputTailSuffix == Self.fingerprintTailSuffix(rawContext)
         }
         return true
     }
 
     private func beforeInputMatches(_ other: SharedDictationDocumentContextFingerprint) -> Bool {
         guard beforeInput != other.beforeInput else { return true }
-        guard let beforeInputSuffix,
+        guard let beforeInputTailSuffix,
+              let otherTailSuffix = other.beforeInputTailSuffix,
               let beforeInputLength,
-              let otherSuffix = other.beforeInputSuffix,
               let otherLength = other.beforeInputLength,
-              beforeInputLength >= otherLength else {
+              min(beforeInputLength, otherLength) >= Self.tailSuffixCharacterLimit else {
             return false
         }
-        return beforeInputSuffix == otherSuffix
+        return beforeInputTailSuffix == otherTailSuffix
     }
 }
 

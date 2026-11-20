@@ -13,6 +13,7 @@ final class KeyboardRootViewTests: XCTestCase {
 
         XCTAssertTrue(button.isEnabled)
         XCTAssertEqual(button.configuration?.title, "Stop")
+        XCTAssertEqual(button.accessibilityLabel, "Stop voice input")
     }
 
     func testRecognitionUnavailableDisablesMicrophoneButton() throws {
@@ -77,6 +78,28 @@ final class KeyboardRootViewTests: XCTestCase {
         let value = try XCTUnwrap(elements.first?.accessibilityValue)
         XCTAssertTrue(value.contains("Meeting notes"))
         XCTAssertTrue(value.contains("Listening"))
+    }
+
+    func testVoiceInputAccessibilityIncludesStatusGuidance() throws {
+        let view = KeyboardRootView()
+        let snapshot = SpeechCapturePresentationSnapshot(
+            transcriptText: "Shared App Group storage is unavailable.",
+            statusText: "Check App Group signing for the app and keyboard.",
+            microphoneTitle: "App Group unavailable",
+            microphoneTone: .critical,
+            activeMicrophoneBars: .inactive,
+            voiceActivityState: .unavailable
+        )
+
+        view.render(speechCapture: snapshot)
+
+        let element = try XCTUnwrap(view.descendants().first {
+            $0.isAccessibilityElement && $0.accessibilityLabel == "Voice input"
+        })
+        XCTAssertTrue(
+            try XCTUnwrap(element.accessibilityValue)
+                .contains("Check App Group signing")
+        )
     }
 
     func testNextKeyboardVisibilityUpdatesButtonState() throws {

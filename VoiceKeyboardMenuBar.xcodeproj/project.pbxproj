@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0739B096A0693CDD9B8DBA89 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8AB7CF44887F048892CE2687 /* Assets.xcassets */; };
 		1584F1D2760B09C5D517F018 /* VoiceKeyboardMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F53D3510147EA6B672C7252 /* VoiceKeyboardMenuBarApp.swift */; };
 		68A342EAB9185693240BCD18 /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 5D0625900EC4396264AFE708 /* VoiceKeyboardModels */; };
 		7C4DB358A7D37970A42BF396 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 774689B7419C5CDA9D99280F /* MenuBarContentView.swift */; };
@@ -30,6 +31,7 @@
 		2EAC3B1D99ECF8B3F3259D8A /* VoiceKeyboardMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoiceKeyboardMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4243642F8AAC1133D5C77DDD /* VoiceKeyboardMenuBarTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VoiceKeyboardMenuBarTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		774689B7419C5CDA9D99280F /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
+		8AB7CF44887F048892CE2687 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		937D20FB6380179CDFCFBD56 /* VoiceKeyboardMenuBar.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VoiceKeyboardMenuBar.entitlements; sourceTree = "<group>"; };
 		A27C535F41D41C9C63F98C04 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FEDAB563988843C986785467 /* MenuBarDebugTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarDebugTextTests.swift; sourceTree = "<group>"; };
@@ -51,6 +53,7 @@
 		0A3F822846F261EF7255142B /* VoiceKeyboardMenuBar */ = {
 			isa = PBXGroup;
 			children = (
+				8AB7CF44887F048892CE2687 /* Assets.xcassets */,
 				A27C535F41D41C9C63F98C04 /* Info.plist */,
 				774689B7419C5CDA9D99280F /* MenuBarContentView.swift */,
 				937D20FB6380179CDFCFBD56 /* VoiceKeyboardMenuBar.entitlements */,
@@ -102,6 +105,7 @@
 			buildConfigurationList = 07B9416CC5AFBD26FBB7B887 /* Build configuration list for PBXNativeTarget "VoiceKeyboardMenuBar" */;
 			buildPhases = (
 				F14B09A4A6942A11A6EA6E23 /* Sources */,
+				D1431BE1F72CEB59443E92A9 /* Resources */,
 				6E35E5F276E67314E56019D6 /* Frameworks */,
 			);
 			buildRules = (
@@ -171,6 +175,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D1431BE1F72CEB59443E92A9 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0739B096A0693CDD9B8DBA89 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		2C61C5433D24077F7CD4C7AF /* Sources */ = {

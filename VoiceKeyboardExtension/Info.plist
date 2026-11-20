@@ -38,9 +38,5 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).KeyboardViewController</string>
 	</dict>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Voice Keyboard uses the microphone only when you explicitly start keyboard voice input validation.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Voice Keyboard uses speech recognition only when you explicitly start keyboard voice input.</string>
 </dict>
 </plist>

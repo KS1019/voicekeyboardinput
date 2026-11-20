@@ -509,6 +509,16 @@ package struct VoiceCommandParser: Sendable {
             if let match = japaneseUnspacedAliases.first(where: {
                 remaining.hasPrefix($0.alias) && $0.command.isSafeUnspacedJapaneseCommand
             }) {
+                if !hasSeenCommand,
+                   (Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)
+                    || Self.containsJapaneseImplicitSequenceBridge(literalSinceCommand)) {
+                    return false
+                }
+                if hasSeenCommand,
+                   !literalSinceCommand.isEmpty,
+                   literalSinceCommand.count < 2 {
+                    return false
+                }
                 if hasSeenCommand,
                    (Self.containsJapaneseNaturalLanguageCue(literalSinceCommand)
                     || Self.containsJapaneseLeadingNaturalLanguageCue(literalSinceCommand)
@@ -617,7 +627,7 @@ package struct VoiceCommandParser: Sendable {
         // as "読点と句点" unless the user provides an explicit boundary.
         "と", "や", "も", "へ", "で", "から", "まで", "って", "という",
         "及び", "および", "又は", "または", "あるいは", "ならびに", "か", "とか", "なら", "また", "ないし",
-        "もしくは", "若しくは", "並びに", "より", "直後", "後"
+        "もしくは", "若しくは", "並びに", "より", "直後", "後", "する", "位置", "説明"
     ]
 
     private static func containsJapaneseImplicitSequenceBridge(_ word: String) -> Bool {

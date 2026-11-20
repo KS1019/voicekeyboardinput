@@ -551,6 +551,90 @@ final class TextInsertionPlannerTests: XCTestCase {
         }
     }
 
+    func testPlansDeleteWordForURLCoreWithoutTrailingPunctuation() {
+        let planner = TextInsertionPlanner()
+
+        for context in [
+            "visit example.com,",
+            "visit https://example.com!"
+        ] {
+            XCTAssertEqual(
+                planner.plan(
+                    ParsedTranscript(elements: [.command(.deleteWord)]),
+                    documentContextBeforeInput: context
+                ),
+                [.deleteBackward(count: deleteCount(1))],
+                context
+            )
+        }
+    }
+
+    func testPlansDeleteWordWithoutRemovingStructuredTokenWrappers() {
+        let planner = TextInsertionPlanner()
+
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "（https://example.com）"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "（https://example.com"
+            ),
+            [.deleteBackward(count: deleteCount("https://example.com".count))]
+        )
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "“user@example.com”"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "3.14!!!"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+    }
+
+    func testPlansDeleteWordForNewCJKExtensionCharactersAsJapaneseText() {
+        let planner = TextInsertionPlanner()
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "\u{30000}\u{30001}"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+    }
+
+    func testPlansDeleteWordForCompatibilityIdeographsAsJapaneseText() {
+        let planner = TextInsertionPlanner()
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "\u{FA11}\u{FA19}"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+    }
+
+    func testPlansDeleteWordForCJKExtensionJCharactersAsJapaneseText() {
+        let planner = TextInsertionPlanner()
+        XCTAssertEqual(
+            planner.plan(
+                ParsedTranscript(elements: [.command(.deleteWord)]),
+                documentContextBeforeInput: "\u{323B0}\u{323B1}"
+            ),
+            [.deleteBackward(count: deleteCount(1))]
+        )
+    }
+
     func testPlansDeleteAfterInsertedTextAgainstVirtualContext() {
         let planner = TextInsertionPlanner()
         let transcript = ParsedTranscript(elements: [

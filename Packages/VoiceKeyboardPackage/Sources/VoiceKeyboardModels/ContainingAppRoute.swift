@@ -17,13 +17,9 @@ public enum ContainingAppRoute: Equatable, Sendable {
             guard queryItems.allSatisfy({ $0.name == "sessionID" }), queryItems.count <= 1 else {
                 return nil
             }
-            let sessionID = queryItems.first?.value
-            guard sessionID?.isEmpty != true else { return nil }
-            if let sessionID {
-                self = .startDictationForKeyboardSession(sessionID: sessionID)
-            } else {
-                self = .startDictation
-            }
+            guard let sessionID = queryItems.first?.value,
+                  !sessionID.isEmpty else { return nil }
+            self = .startDictationForKeyboardSession(sessionID: sessionID)
         default:
             return nil
         }
@@ -35,7 +31,9 @@ public enum ContainingAppRoute: Equatable, Sendable {
 
         switch self {
         case .startDictation:
-            components.host = "start-dictation"
+            // A bare custom URL cannot authenticate a keyboard handoff and
+            // must never trigger microphone capture.
+            return nil
         case let .startDictationForKeyboardSession(sessionID):
             components.host = "start-dictation"
             components.queryItems = [URLQueryItem(name: "sessionID", value: sessionID)]

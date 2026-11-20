@@ -97,6 +97,48 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         XCTAssertTrue(store.saveStatus(.cancelled(token: stop.token), ownerToken: ownerToken))
     }
 
+    func testOwnedStopCannotResurrectAFailedDelivery() throws {
+        let defaults = try makeDefaults()
+        let store = SharedDictationSessionStore(defaults: defaults)
+        let ownerToken = "failed-delivery-owner"
+        let start = SharedDictationSessionCommand.start(
+            source: .keyboard,
+            sessionID: "failed-delivery-session"
+        )
+        let stop = SharedDictationSessionCommand.stop(
+            sessionID: start.sessionID,
+            source: .keyboard,
+            replacingCommandToken: start.token
+        )
+
+        XCTAssertTrue(store.saveCommand(start))
+        XCTAssertTrue(store.saveCommand(stop))
+        XCTAssertTrue(store.saveStatus(.failed(token: start.token, message: "field changed")))
+        XCTAssertTrue(store.saveHeartbeat(SharedDictationAppHeartbeat(
+            token: ownerToken,
+            lastSeenAt: Date(),
+            sessionState: .armed
+        )))
+        XCTAssertEqual(
+            store.claimCommand(
+                afterLastClaimedToken: start.token,
+                ownerToken: ownerToken,
+                source: .keyboard
+            ),
+            stop
+        )
+
+        XCTAssertFalse(store.recoverCompletedTranscriptStatus(
+            sourceCommandToken: start.token,
+            throughCommandToken: stop.token,
+            ownerToken: ownerToken
+        ))
+        XCTAssertEqual(
+            store.status(forCommandToken: start.token),
+            .failed(token: start.token, message: "field changed")
+        )
+    }
+
     func testExpiredStopCanRecoverCompletedTranscriptWithoutAStaleClaim() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)
@@ -708,6 +750,22 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         ))
     }
 
+    func testDocumentContextFingerprintAcceptsBoundedStepContextGrowth() {
+        let documentIdentifier = UUID()
+        let expected = SharedDictationDocumentContextFingerprint(
+            beforeInput: String(repeating: "x", count: 200) + "tail",
+            afterInput: "after",
+            documentIdentifier: documentIdentifier
+        )
+        let observed = SharedDictationDocumentContextFingerprint(
+            beforeInput: String((String(repeating: "x", count: 200) + "tail").suffix(100)),
+            afterInput: "after",
+            documentIdentifier: documentIdentifier
+        )
+
+        XCTAssertTrue(expected.matches(observed))
+    }
+
     func testHeartbeatRoundTripsThroughDefaults() throws {
         let defaults = try makeDefaults()
         let store = SharedDictationSessionStore(defaults: defaults)
@@ -720,6 +778,20 @@ final class SharedDictationSessionStoreTests: XCTestCase {
         store.saveHeartbeat(heartbeat)
 
         XCTAssertEqual(store.heartbeat(), heartbeat)
+    }
+
+    func testKeyboardLifecycleBlockSurvivesStoreRecreationAndCanBeCleared() throws {
+        let defaults = try makeDefaults()
+        let token = "abandoned-transcript"
+        let store = SharedDictationSessionStore(defaults: defaults)
+
+        XCTAssertTrue(store.blockKeyboardTranscript(token: token))
+        XCTAssertTrue(store.isKeyboardTranscriptBlocked(token: token))
+
+        let reopened = SharedDictationSessionStore(defaults: defaults)
+        XCTAssertTrue(reopened.isKeyboardTranscriptBlocked(token: token))
+        XCTAssertTrue(reopened.clearKeyboardTranscriptBlock(token: token))
+        XCTAssertFalse(reopened.isKeyboardTranscriptBlocked(token: token))
     }
 
     func testFileBackedStoresFenceOwnersAndRenewExpiredCommandsWithFreshHeartbeat() throws {
