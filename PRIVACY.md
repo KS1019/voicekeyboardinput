@@ -1,22 +1,33 @@
 # Voice Keyboard Privacy Policy
 
-Last updated: 2026-08-02
+Last updated: 2026-11-21
 
 Voice Keyboard is designed to process voice input only when you explicitly
 start voice input.
 
 ## Audio and speech recognition
 
-The keyboard opens the containing Voice Keyboard app for microphone capture.
-The app configures the current audio route, including supported Bluetooth
-microphones, and uses Apple speech-recognition frameworks to transcribe the
-recording. Depending on Apple’s speech-recognition availability and settings,
-audio may be processed by Apple’s services. Voice Keyboard does not operate an
-independent speech server.
+After microphone and Speech permissions have been granted in the containing
+app and Full Access is enabled, the keyboard can attempt experimental WebKit
+microphone capture without opening the app. Capture begins only when you tap
+the microphone control. Preloading the recording page does not activate the
+microphone. The keyboard displays capture and processing states; stopping
+capture submits the recording to Apple Speech for recognition. Leaving the
+keyboard or cancelling discards the attempt. Recordings are limited to one
+minute. Temporary audio files are deleted when the attempt finishes or is
+cancelled; no audio history is maintained.
+
+If capture cannot start, the keyboard falls back to the containing Voice
+Keyboard app. The app configures the current audio route, including supported
+Bluetooth microphones, and uses Apple speech-recognition frameworks. WebKit
+capture in a keyboard is not guaranteed to work on every iOS version or device.
+Depending on Apple’s speech-recognition availability and settings, audio may
+be processed by Apple’s services. Voice Keyboard does not operate an independent
+speech server or send audio to a separate third-party transcription provider.
 
 ## Temporary transcript handoff
 
-The recognized text is temporarily stored in the shared App Group container so
+For containing-app dictation, recognized text is temporarily stored in the shared App Group container so
 the keyboard extension can insert it into the text field that initiated the
 request. A normal transcript handoff expires after five minutes; recovery
 keeps a handoff eligible for at most six minutes, and command history is
@@ -25,6 +36,10 @@ successful insertion. Records that cannot be safely inserted are quarantined
 as a no-replay fence and are retained only in a small bounded local cleanup
 queue. The app and keyboard extension do not use this handoff storage for
 advertising or profiling.
+
+A successful in-keyboard result is inserted into the originating text field after
+checking that the field has not changed. Partial recognition results are not
+inserted into the document.
 
 ## Deletion and consent withdrawal
 

@@ -7,11 +7,11 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 - Build and install `VoiceKeyboardInput` on an iOS 26+ simulator or device.
 - Run `make verify` first so package, UIKit, app UI, build, preview layout, and generated-file checks are green.
 - Run `make keyboard-permission-policy-check` if `Allow Full Access` is missing in Settings or App Group handoff fails.
-- Turn `Allow Full Access` on for `Voice Keyboard` when validating the keyboard UI and App Group handoff. Direct keyboard-process STT is intentionally disabled in the product path; the containing app owns microphone and Speech authorization.
+- Turn `Allow Full Access` on for `Voice Keyboard` when validating the keyboard UI and App Group handoff. The containing app owns microphone and Speech authorization; grant both there before testing experimental WebKit capture.
 - The signed app and keyboard extension must both have the `group.com.ks1019.voicekeyboardinput` App Group entitlement. For physical devices, also enable that App Group for both bundle identifiers in the Apple Developer portal before signing.
 - On Simulator, grant microphone access for both the containing app and keyboard extension before probing if you want to bypass the permission prompt:
   `make simulator-grant-microphone`
-- On iOS 26, the keyboard speech adapter uses the legacy `SFSpeechRecognizer` audio-buffer path. On iOS 27+, it can use the `SpeechAnalyzer` path when available.
+- The experimental WebKit path uses Apple file recognition (`SFSpeechURLRecognitionRequest`). Old AVAudioEngine/SpeechAnalyzer keyboard diagnostic adapters remain excluded from the extension target.
 
 ## Enable The Keyboard
 
@@ -31,19 +31,16 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 
 ## Expected Keyboard STT Behavior
 
-- Tapping Mic in `Voice Keyboard` starts the containing-app handoff path.
-- The keyboard first shows the handoff/progress state and opens the containing app through the dictation URL route.
-- The containing app requests microphone and Speech permission, records the utterance, and publishes the transcript to the shared App Group.
-- Return to the host app and show `Voice Keyboard` again; the keyboard consumes the latest shared transcript once and inserts it into the host text field.
-- The experimental keyboard-process STT implementation remains compiled for diagnostics only and is not a product-path acceptance criterion.
-- If App Group signing is missing or mismatched, the keyboard shows `Shared App Group storage is unavailable.` instead of opening the app into a handoff path that cannot return text.
-- If the current OS cannot start either the legacy Speech path or the SpeechAnalyzer path, the keyboard shows speech unavailable rather than falling back silently.
-- The diagnostic log should include permission state, locale, audio session activation, input format, audio engine start, speech recognizer availability, recognition start, and stop reason.
-- Do not treat Simulator success as proof that real-device keyboard STT works.
-- The app-side `Start Voice Input` button runs the containing-app dictation flow and shows `Transcript Ready` after a non-empty transcript is saved for the keyboard.
-- Delete removes the previous character from the host text field.
-- Return inserts a newline into the host text field.
-- Next switches to another enabled keyboard when iOS exposes the input-mode switch key.
+- Loading the keyboard preloads a small local WebKit document without recording or asking for microphone access.
+- With Full Access and previously granted microphone/Speech permissions, tapping Mic attempts WebKit capture inside the keyboard. A second tap finishes the recording and starts Apple Speech transcription.
+- The keyboard inserts a final result only if the originating document context is still valid. Partial results never change the host field.
+- If no PCM arrives within two seconds, capture is torn down and the existing containing-app handoff is attempted. Missing permissions also use the app onboarding path.
+- The containing app can record and publish a transcript through the shared App Group. Return to the host and show the keyboard to insert that result once.
+- If App Group storage is unavailable, the fallback displays an unavailable state rather than losing a handoff.
+- Recognition failures display an error; do not silently insert partial text or start another recording.
+- Dismissing/switching the keyboard, changing the host field, Delete/Return, and memory cancellation must discard the active direct recording/result.
+- Delete removes the previous character; Return inserts a newline; Next switches keyboard when iOS exposes the input-mode switch key.
+- Simulator and build success are not proof of real-device WebKit microphone support.
 
 ## Simulator Keyboard STT Probe
 
@@ -58,18 +55,24 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 
 If the probe fails on Simulator, check macOS microphone permission for Simulator/Xcode and the Mac input device in System Settings. `simctl io` does not provide an audio injection operation in the current local Xcode help output; microphone permission is controlled through `simctl privacy`.
 
-## Physical Device STT Validation
+## Physical Device WebKit Validation (not yet verified)
 
-1. Install a signed build on an iOS 26+ physical device.
-2. Enable `Voice Keyboard` in Settings.
-3. Turn `Allow Full Access` on.
-4. Open a host text field and switch to `Voice Keyboard`.
-5. Tap Mic and speak a short phrase.
-6. If the containing app opens, speak a short phrase, then return to the host app and show `Voice Keyboard` again.
-7. Confirm whether text is inserted exactly once.
-8. Capture the `KeyboardSpeechRecognition` logs.
-9. Repeat with `Allow Full Access` off only to record whether behavior changes; do not ship an off-state requirement without a separate design update.
-10. On iOS 26, confirm logs show the legacy audio-buffer strategy before classifying any recognition failure as a platform limitation.
+Record device model, iOS version, host app, permission state, startup time,
+input level, recording duration, memory, transcription result, and fallback
+outcome. A build/test pass alone must never change this section to verified.
+Device installation requires a separately signed build; this development task
+performs unsigned validation only.
+
+1. Grant microphone and Speech permissions in the app, enable the keyboard and Full Access.
+2. Open a text field in Notes, Safari, and a third-party host in turn. Show the keyboard and wait: the microphone must stay inactive before tapping Mic.
+3. Tap Mic. Confirm the recording indicator and audible input, without switching apps. Speak Japanese and English phrases, stop, and confirm exactly one final insertion.
+4. Repeat at least ten times, including immediate start/stop and a 60-second recording. Confirm bounded memory, no retained audio files, and usable subsequent attempts.
+5. Deny microphone, deny Speech, and disable Full Access separately. Confirm controlled onboarding/fallback and no unauthorized recording. Re-enable permissions and retry.
+6. Reproduce startup failure (including WebKit process failure if available): after two seconds without PCM the existing app handoff must work, and late WebKit completion must not leave a second microphone capture running.
+7. During both recording and transcription: hide keyboard, switch keyboards, select another field, move caret, edit text from the host, press Delete/Return, background the host, and interrupt with a call. Confirm microphone release and no stale or duplicate insertion.
+8. Test silence, very quiet/loud speech, offline Apple recognition, unsupported locale, and recognition timeout. Confirm errors are visible and temporary files removed.
+9. Stop during startup and rapidly retry. Confirm canceled callbacks never insert text into the next session.
+10. Compare direct WebKit and containing-app fallback for each external microphone route below; browser audio routing may differ from the app's AVAudioSession route.
 
 ## External Microphone Route Matrix
 
