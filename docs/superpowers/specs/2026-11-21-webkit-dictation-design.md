@@ -21,3 +21,16 @@ Stop button finalizes capture and recognizes; cancellation, focus/document chang
 Test PCM validation/normalization, sample-rate conversion, startup timeout/late message handling, finish vs cancel, permissions/origin gating, and final-only insertion with session identity. Run strict package tests, unsigned simulator build and relevant UIKit tests; inspect generated project drift. Add real-device QA for repeated use, denial, multiple hosts, interruptions and disappearance. WebKit keyboard capture remains an explicitly unvalidated experiment until real iPhone testing: public WebKit API availability is not proof of keyboard microphone support.
 
 The unclear phrase “GTテキスト / Inup” is not treated as authorization to choose an unidentified third-party service. Existing text pipeline and Apple Speech remain replaceable. No Foundation Models or heavy model initialization in extension.
+
+
+## Implementation decisions and verification
+
+- Existing work was saved separately before this feature; no build-output directories were committed or removed. All commits used command-local Codex identity, leaving global Git settings unchanged.
+- Apple Speech file recognition was selected instead of adding an external provider. It prefers on-device recognition when the recognizer advertises support; otherwise Apple service availability determines recognition. No credentials or new network service settings are needed.
+- A recording is capped at 960000 samples (60 seconds), normalized to at most 90% peak with a maximum 4× boost, and encoded outside the main actor. File recognition has a 20-second deadline including encoding. Crash leftovers older than five minutes are swept on later encoding attempts.
+- Native bridge tests use actual WKWebView and synthetic microphone data. They confirm the synthetic origin, message delivery, drain, cancellation and deadline; they do not prove real keyboard microphone access. JavaScript tests execute the bundled page and check resampling continuity, stop/cancel, rejection and delayed permission resolution.
+- Independent review identified a Stop/recovery priority race. The controller now dispatches microphone taps through a tested policy that prioritizes stopping an active direct recording over every shared-store busy condition.
+- Live Apple recognition and final result insertion inside a third-party host remain unverified. In particular, delayed native Speech completion after document changes is guarded in code but not exercised by the automated controller tests. Follow the real-device QA matrix before declaring device support.
+- No signing, device provisioning or installation was performed. Existing icon-catalog warnings and unsigned simulator App Group messages remain unrelated baseline limitations.
+
+Final automated verification: 332 strict-concurrency Swift package tests and 52 UIKit tests passed with zero failures; unsigned iOS simulator build, bundled JavaScript tests, dependency/permission policy checks, generated-check and diff whitespace checks passed. Feature commits: 3e5abd8 and 1f286e0. Independent follow-up review approved the Stop priority correction.
