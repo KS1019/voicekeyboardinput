@@ -38,5 +38,9 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).KeyboardViewController</string>
 	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Voice Keyboard uses the microphone after you tap Speak to start voice input.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Voice Keyboard uses Apple speech recognition to convert your voice input to text. Audio may be processed by Apple.</string>
 </dict>
 </plist>

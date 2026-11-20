@@ -80,15 +80,17 @@ targets:
       - path: VoiceKeyboardUIKit
         excludes:
           - KeyboardRootViewPreview.swift
-      # Direct microphone/speech capture is intentionally excluded from the
-      # production keyboard extension. Keep diagnostic adapters in the repo,
-      # but run them only from a containing-app diagnostic target/config.
+      # Keep native microphone diagnostics out of the keyboard. Its
+      # experimental recording path uses the bundled WebKit page.
       - path: VoiceKeyboardExtension
         excludes:
           - AudioSessionRouting.swift
           - KeyboardAudioInputProbe.swift
           - KeyboardSpeechRecognitionDiagnostics.swift
           - KeyboardSpeechRecognitionService.swift
+          - DictationCapture.html
+      - path: VoiceKeyboardExtension/DictationCapture.html
+        buildPhase: resources
       - path: PrivacyInfo.xcprivacy
         buildPhase: resources
     dependencies:
@@ -108,6 +110,8 @@ targets:
         CFBundleDisplayName: Voice Keyboard
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
+        NSMicrophoneUsageDescription: Voice Keyboard uses the microphone after you tap Speak to start voice input.
+        NSSpeechRecognitionUsageDescription: Voice Keyboard uses Apple speech recognition to convert your voice input to text. Audio may be processed by Apple.
         NSExtension:
           NSExtensionAttributes:
             IsASCIICapable: true
@@ -148,8 +152,13 @@ targets:
     platform: iOS
     sources:
       - VoiceKeyboardUIKitTests
+      - VoiceKeyboardExtension/WebKitDictationCapture.swift
+      - path: VoiceKeyboardExtension/DictationCapture.html
+        buildPhase: resources
     dependencies:
       - target: VoiceKeyboardInput
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardModels
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uikittests

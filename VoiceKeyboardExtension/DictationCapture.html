@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Voice Keyboard microphone</title>
+</head>
+<body>
+<script>
+'use strict';
+
+const outputRate = 16000;
+const chunk = new DataView(new ArrayBuffer(1600 * 2));
+let recording;
+
+function post(session, type, data) {
+    webkit.messageHandlers.dictation.postMessage({ id: session.id, type, ...(data ? { data } : {}) });
+}
+
+function flush(session) {
+    if (session.samples === 0) return;
+    let bytes = '';
+    for (let index = 0; index < session.samples * 2; index++) {
+        bytes += String.fromCharCode(chunk.getUint8(index));
+    }
+    post(session, 'pcm', btoa(bytes));
+    session.samples = 0;
+}
+
+function resample(session, input, inputRate) {
+    // Average each output interval. Integer time units preserve the phase
+    // across input callbacks at rates such as 44.1 kHz.
+    for (const inputSample of input) {
+        const sample = Number.isFinite(inputSample) ? inputSample : 0;
+        let remaining = outputRate;
+        while (remaining > 0) {
+            const covered = Math.min(remaining, inputRate - session.phase);
+            session.sum += covered * sample;
+            session.phase += covered;
+            remaining -= covered;
+            if (session.phase === inputRate) {
+                const value = Math.max(-1, Math.min(1, session.sum / inputRate));
+                chunk.setInt16(session.samples++ * 2, Math.round(value * (value < 0 ? 32768 : 32767)), true);
+                session.sum = 0;
+                session.phase = 0;
+                if (session.samples === chunk.byteLength / 2) flush(session);
+            }
+        }
+    }
+}
+
+function release(session) {
+    recording = undefined;
+    if (session.processor) {
+        session.processor.onaudioprocess = null;
+        session.processor.disconnect();
+    }
+    session.source?.disconnect();
+    for (const track of session.stream?.getTracks() ?? []) {
+        track.onended = null;
+        track.stop();
+    }
+    session.context?.close().catch(() => {});
+}
+
+async function startDictation(id) {
+    if (recording) return;
+    const session = { id, samples: 0, phase: 0, sum: 0 };
+    recording = session;
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, autoGainControl: true },
+            video: false
+        });
+        if (recording !== session) {
+            for (const track of stream.getTracks()) track.stop();
+            return;
+        }
+        session.stream = stream;
+        for (const track of stream.getAudioTracks()) {
+            track.onended = () => {
+                if (recording !== session) return;
+                release(session);
+                post(session, 'failed');
+            };
+        }
+        const context = new AudioContext();
+        session.context = context;
+        const source = context.createMediaStreamSource(stream);
+        session.source = source;
+        // ScriptProcessor keeps this capture graph self-contained in the
+        // inline document. The output is silent and only clocks the graph.
+        const processor = context.createScriptProcessor(1024, 1, 1);
+        session.processor = processor;
+        processor.onaudioprocess = event => {
+            if (recording !== session) return;
+            event.outputBuffer.getChannelData(0).fill(0);
+            resample(session, event.inputBuffer.getChannelData(0), context.sampleRate);
+        };
+        source.connect(processor);
+        processor.connect(context.destination);
+        await context.resume();
+    } catch {
+        if (recording !== session) return;
+        release(session);
+        post(session, 'failed');
+    }
+}
+
+function cancelDictation(id) {
+    if (recording?.id === id) release(recording);
+}
+
+function stopDictation(id) {
+    const session = recording;
+    if (!session || session.id !== id) return;
+    flush(session);
+    release(session);
+    post(session, 'stopped');
+}
+</script>
+</body>
+</html>

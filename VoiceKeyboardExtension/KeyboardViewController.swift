@@ -39,13 +39,12 @@ public final class KeyboardViewController: UIInputViewController {
     private let sharedSessionStoreProvider: @Sendable () -> SharedDictationSessionStore? = {
         SharedDictationSessionStore.appGroupStore()
     }
-    private var renderTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
     private var sharedDictationPollingTask: Task<Void, Never>?
     private var sharedDeliveryTask: Task<Void, Never>?
     private var microphoneDecisionTask: Task<Void, Never>?
     private var isRecognitionActive = false
-    private var isRecognitionStopping = false
+    private var allowsDirectStartupFallback = false
     private var isMicrophoneDecisionInFlight = false
     private var isViewVisible = false
     private var lifecycleEpoch: UInt64 = 0
@@ -93,7 +92,6 @@ public final class KeyboardViewController: UIInputViewController {
     private var sharedCancellationRetryGeneration: UInt64 = 0
     private var sharedCancellationRecoveryWaitTask: Task<Void, Never>?
     private var sharedCancellationOperationGeneration: UInt64 = 0
-    private var directRecognitionStopTask: Task<Void, Never>?
 
     private func transcriptStoreCall<Result: Sendable>(
         _ operation: @escaping @Sendable (SharedDictationTranscriptStore) -> Result
@@ -217,11 +215,17 @@ public final class KeyboardViewController: UIInputViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         configureView()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(hostWillResignActive),
+            name: .NSExtensionHostWillResignActive,
+            object: nil
+        )
         renderCurrentSpeechCapture()
     }
 
-    deinit {
-        renderTask?.cancel()
+    isolated deinit {
+        speechCaptureCoordinator.cancelRecognition()
         recognitionTask?.cancel()
         sharedDictationPollingTask?.cancel()
         sharedDeliveryTask?.cancel()
@@ -230,12 +234,10 @@ public final class KeyboardViewController: UIInputViewController {
         sharedCancellationRetryTask?.cancel()
         sharedCancellationRecoveryWaitTask?.cancel()
         sharedDeliveryRecoveryRetryTask?.cancel()
-        directRecognitionStopTask?.cancel()
     }
 
     public override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
-        renderTask?.cancel()
         microphoneDecisionTask?.cancel()
         microphoneDecisionTask = nil
         isMicrophoneDecisionInFlight = false
@@ -250,13 +252,12 @@ public final class KeyboardViewController: UIInputViewController {
         // transcript may already be persisted and waiting for this keyboard
         // instance; cancelling the shared session here could orphan it.
         cancelDirectRecognition()
-        guard isViewVisible, !isRecognitionStopping else { return }
+        guard isViewVisible else { return }
         let epoch = lifecycleEpoch
         Task { @MainActor [weak self] in
             await Task.yield()
             guard let self,
                   self.isViewVisible,
-                  !self.isRecognitionStopping,
                   self.lifecycleEpoch == epoch else { return }
             self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: epoch)
         }
@@ -267,12 +268,15 @@ public final class KeyboardViewController: UIInputViewController {
         isViewVisible = true
         isOpeningContainingApp = false
         lifecycleEpoch &+= 1
-        if isRecognitionStopping {
-            finishRecognitionStopAfterAppearance()
-            return
-        }
         let epoch = lifecycleEpoch
         startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: epoch)
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if hasFullAccess {
+            speechCaptureCoordinator.preload(in: view)
+        }
     }
 
     private func startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: UInt64) {
@@ -596,15 +600,7 @@ public final class KeyboardViewController: UIInputViewController {
         microphoneDecisionTask?.cancel()
         microphoneDecisionTask = nil
         isMicrophoneDecisionInFlight = false
-        recognitionTask?.cancel()
-        recognitionTask = nil
-        recognitionGeneration &+= 1
-        isRecognitionActive = false
-        recognitionExpectedDocumentContext = nil
-        recognitionExpectedDocumentContextAfterInput = nil
-        recognitionExpectedDocumentIdentifier = nil
-        recognitionExpectedSelectedText = nil
-        isRecognitionStopping = true
+        cancelDirectRecognition()
         // A cancellation requested immediately before a keyboard switch must
         // still reach the App Group after the view disappears. Keep its
         // in-memory barrier set until the durable write/retry finishes so a
@@ -627,7 +623,19 @@ public final class KeyboardViewController: UIInputViewController {
         sharedDeliveryTask = nil
         sharedDeliveryRecoveryGeneration &+= 1
         isSharedDeliveryRecoveryInProgress = false
-        startDirectRecognitionStopTask()
+    }
+
+    @objc private func hostWillResignActive() {
+        if activeSharedCommandToken == nil {
+            microphoneDecisionTask?.cancel()
+            microphoneDecisionTask = nil
+            isMicrophoneDecisionInFlight = false
+        }
+        let wasRecognizing = isRecognitionActive
+        cancelDirectRecognition()
+        if wasRecognizing {
+            renderCurrentSpeechCapture()
+        }
     }
 
     // MARK: - View Setup
@@ -655,16 +663,11 @@ public final class KeyboardViewController: UIInputViewController {
     // MARK: - Rendering
 
     private func renderCurrentSpeechCapture(announce: Bool = false) {
-        renderTask?.cancel()
-        let speechCaptureCoordinator = speechCaptureCoordinator
-        let epoch = lifecycleEpoch
-        renderTask = Task { [weak self] in
-            let snapshot = await speechCaptureCoordinator.currentSnapshot()
-            guard !Task.isCancelled else { return }
-            guard let self else { return }
-            guard self.lifecycleEpoch == epoch else { return }
-            keyboardRootView.render(speechCapture: snapshot, announce: announce)
-        }
+        guard !isRecognitionActive else { return }
+        keyboardRootView.render(
+            speechCapture: speechCaptureCoordinator.currentSnapshot(hasFullAccess: hasFullAccess),
+            announce: announce
+        )
     }
 
     private func updateNextKeyboardButtonVisibility() {
@@ -697,7 +700,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func microphoneTapped() {
-        guard !isRecognitionStopping,
+        guard isViewVisible,
               !isMicrophoneDecisionInFlight,
               !isSharedDeliveryRecoveryInProgress,
               !isSharedCancellationInProgress else { return }
@@ -719,67 +722,75 @@ public final class KeyboardViewController: UIInputViewController {
         }
 
         if isRecognitionActive {
+            allowsDirectStartupFallback = false
+            speechCaptureCoordinator.finishRecognition()
+        } else if speechCaptureCoordinator.directRecognitionIsReady(hasFullAccess: hasFullAccess) {
             startDirectKeyboardRecognition()
-            return
+        } else {
+            beginSharedMicrophoneDecision(epoch: lifecycleEpoch)
         }
+    }
 
+    private func beginSharedMicrophoneDecision(epoch: UInt64) {
         isMicrophoneDecisionInFlight = true
-        let epoch = lifecycleEpoch
+        let expectedContext = currentDocumentContextFingerprint()
+        let expectedMutationGeneration = documentMutationGeneration
         microphoneDecisionTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.lifecycleEpoch == epoch {
+                if self.lifecycleEpoch == epoch, !Task.isCancelled {
                     self.isMicrophoneDecisionInFlight = false
                     self.microphoneDecisionTask = nil
                 }
             }
-            let directRecognitionReady = await speechCaptureCoordinator.directRecognitionIsReady()
-            guard !Task.isCancelled,
-                  self.isViewVisible,
-                  self.lifecycleEpoch == epoch,
-                  !self.isRecognitionStopping else { return }
-            await self.handleMicrophoneTap(
-                directRecognitionReady: directRecognitionReady,
-                epoch: epoch
+            await self.handleSharedMicrophoneTap(
+                epoch: epoch,
+                expectedContext: expectedContext,
+                expectedMutationGeneration: expectedMutationGeneration
             )
         }
     }
 
-    private func handleMicrophoneTap(
-        directRecognitionReady: Bool,
-        epoch: UInt64
+    private func handleSharedMicrophoneTap(
+        epoch: UInt64,
+        expectedContext: SharedDictationDocumentContextFingerprint,
+        expectedMutationGeneration: UInt64
     ) async {
-        guard isCurrentInteraction(epoch) else { return }
-
+        func canStart() -> Bool {
+            isCurrentInteraction(epoch)
+                && documentMutationGeneration == expectedMutationGeneration
+                && currentDocumentContextFingerprint() == expectedContext
+        }
+        guard canStart() else { return }
         let appHeartbeatIsFresh = await sessionStoreCall {
             $0.heartbeat()?.isFresh(maxAge: 5) == true
         } == true
-        guard isCurrentInteraction(epoch) else { return }
+        guard canStart() else { return }
         let decision = KeyboardDictationStartDecision.evaluate(
-            directKeyboardRecognitionReady: directRecognitionReady,
+            directKeyboardRecognitionReady: false,
             hasSessionStore: await sessionStoreCall({ $0.storageHealth() }) == true,
             appHeartbeatIsFresh: appHeartbeatIsFresh
         )
-        guard isCurrentInteraction(epoch) else { return }
+        guard canStart() else { return }
 
         switch decision {
         case .startDirectKeyboardRecognition:
-            startDirectKeyboardRecognition()
+            return
         case .writeSharedStartCommand:
             _ = await startSharedDictationSession(epoch: epoch)
         case .openContainingApp:
             guard await transcriptStoreCall({ $0.storageHealth() }) == true else {
-                guard isCurrentInteraction(epoch) else { return }
+                guard canStart() else { return }
                 keyboardRootView.render(
                     speechCapture: .sharedDictationUnavailable,
                     announce: true
                 )
                 return
             }
-            guard isCurrentInteraction(epoch) else { return }
+            guard canStart() else { return }
             await openContainingAppForDictation(epoch: epoch)
         case .showSharedStorageUnavailable:
-            guard isCurrentInteraction(epoch) else { return }
+            guard canStart() else { return }
             keyboardRootView.render(
                 speechCapture: .sharedDictationUnavailable,
                 announce: true
@@ -788,75 +799,56 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func startDirectKeyboardRecognition() {
-        guard !isRecognitionStopping else { return }
         sharedDictationPollingTask?.cancel()
         sharedDictationPollingTask = nil
+        speechCaptureCoordinator.preload(in: view)
 
-        if isRecognitionActive {
-            cancelDirectRecognition()
-            return
-        }
-
-        renderTask?.cancel()
-
-        let speechCaptureCoordinator = speechCaptureCoordinator
         let locale = VoiceKeyboardLocale(identifier: Locale.current.identifier)
         let context = textDocumentProxy.documentContextBeforeInput
         let epoch = lifecycleEpoch
         recognitionGeneration &+= 1
         let currentRecognitionGeneration = recognitionGeneration
         isRecognitionActive = true
+        allowsDirectStartupFallback = true
         recognitionExpectedDocumentContext = context
         recognitionExpectedDocumentContextAfterInput = textDocumentProxy.documentContextAfterInput
         recognitionExpectedDocumentIdentifier = textDocumentProxy.documentIdentifier
         recognitionExpectedSelectedText = textDocumentProxy.selectedText
         recognitionExpectedDocumentMutationGeneration = documentMutationGeneration
+        let events = speechCaptureCoordinator.recognitionEvents(
+            locale: locale,
+            documentContextBeforeInput: context,
+            hasFullAccess: { [weak self] in self?.hasFullAccess == true }
+        )
 
         recognitionTask = Task { [weak self] in
-            guard let self else { return }
-            var hasTerminalPresentation = false
-            defer {
-                if self.lifecycleEpoch == epoch,
-                   self.recognitionGeneration == currentRecognitionGeneration {
-                    self.isRecognitionActive = false
-                    self.recognitionTask = nil
-                    self.recognitionExpectedDocumentContext = nil
-                    self.recognitionExpectedDocumentContextAfterInput = nil
-                    self.recognitionExpectedDocumentIdentifier = nil
-                    self.recognitionExpectedSelectedText = nil
-                    if !self.isRecognitionStopping, !hasTerminalPresentation {
-                        self.renderCurrentSpeechCapture(announce: true)
-                    }
-                }
-            }
-
-            for await event in speechCaptureCoordinator.recognitionEvents(
-                locale: locale,
-                documentContextBeforeInput: context
-            ) {
-                guard !Task.isCancelled else { return }
-                guard lifecycleEpoch == epoch,
+            for await event in events {
+                guard let self, self.isCurrentInteraction(epoch),
                       self.recognitionGeneration == currentRecognitionGeneration,
-                      isRecognitionActive else { return }
-                switch event.state {
-                case .recognitionFailed:
-                    hasTerminalPresentation = true
-                default:
-                    break
-                }
-                keyboardRootView.render(
-                    speechCapture: activeSpeechCaptureSnapshot(for: event.state),
-                    announce: true
-                )
-                guard await apply(
-                    event.actions,
-                    epoch: epoch,
-                    recognitionGeneration: currentRecognitionGeneration
-                ) else {
-                    hasTerminalPresentation = true
+                      self.isRecognitionActive else { return }
+
+                switch event {
+                case .presentation(let snapshot):
+                    self.keyboardRootView.render(speechCapture: snapshot, announce: true)
+                case .final(let snapshot, let actions):
+                    if self.apply(actions, epoch: epoch, recognitionGeneration: currentRecognitionGeneration) {
+                        self.keyboardRootView.render(speechCapture: snapshot, announce: true)
+                    }
+                    self.resetDirectRecognition()
+                    return
+                case .startupFailed:
+                    let canFallback = self.allowsDirectStartupFallback
+                        && self.directRecognitionDocumentMatches()
+                    self.resetDirectRecognition()
+                    self.renderCurrentSpeechCapture()
+                    if canFallback {
+                        self.beginSharedMicrophoneDecision(epoch: epoch)
+                    }
                     return
                 }
             }
+            guard let self, self.recognitionGeneration == currentRecognitionGeneration else { return }
+            self.resetDirectRecognition()
         }
     }
 
@@ -1248,7 +1240,6 @@ public final class KeyboardViewController: UIInputViewController {
         !Task.isCancelled
             && isViewVisible
             && (epoch == nil || lifecycleEpoch == epoch)
-            && !isRecognitionStopping
             && !isSharedCancellationInProgress
     }
 
@@ -1496,8 +1487,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func resumeSharedDictationPollingIfNeeded(epoch: UInt64? = nil) async {
-        guard !isRecognitionStopping,
-              isViewVisible,
+        guard isViewVisible,
               isSharedDeliveryCurrent(epoch),
               sharedDictationPollingTask == nil,
               let command = await matchingActiveStartCommand(epoch: epoch) else { return }
@@ -1505,37 +1495,15 @@ public final class KeyboardViewController: UIInputViewController {
         monitorSharedDictationSession(command: command)
     }
 
-    private func finishRecognitionStopAfterAppearance() {
-        let epoch = lifecycleEpoch
-        guard let stopTask = directRecognitionStopTask else {
-            isRecognitionStopping = false
-            startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: epoch)
-            return
-        }
-        Task { [weak self] in
-            await stopTask.value
-            guard let self,
-                  self.lifecycleEpoch == epoch,
-                  self.isViewVisible else { return }
-            self.directRecognitionStopTask = nil
-            self.isRecognitionStopping = false
-            self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: epoch)
-        }
-    }
-
     private func apply(
         _ actions: [KeyboardTextInsertionAction],
         epoch: UInt64,
         recognitionGeneration: UInt64
-    ) async -> Bool {
-        guard isRecognitionActive,
+    ) -> Bool {
+        guard isRecognitionActive, hasFullAccess,
               lifecycleEpoch == epoch,
               self.recognitionGeneration == recognitionGeneration else { return false }
-        guard recognitionExpectedDocumentContext == textDocumentProxy.documentContextBeforeInput,
-              recognitionExpectedDocumentContextAfterInput == textDocumentProxy.documentContextAfterInput,
-              recognitionExpectedDocumentIdentifier == textDocumentProxy.documentIdentifier,
-              recognitionExpectedSelectedText == textDocumentProxy.selectedText,
-              recognitionExpectedDocumentMutationGeneration == documentMutationGeneration else {
+        guard directRecognitionDocumentMatches() else {
             keyboardRootView.render(
                 speechCapture: .keyboardSpeechCapture(.recognitionFailed(
                     .recognitionFailed("The text field changed while voice input was active.")
@@ -1573,9 +1541,11 @@ public final class KeyboardViewController: UIInputViewController {
             return false
         }
 
+        let documentIdentifier = recognitionExpectedDocumentIdentifier
         isApplyingProxyMutation = true
         defer { isApplyingProxyMutation = false }
         for action in actions {
+            guard textDocumentProxy.documentIdentifier == documentIdentifier else { return false }
             switch action {
             case .insertText(let value):
                 textDocumentProxy.insertText(value)
@@ -1584,7 +1554,8 @@ public final class KeyboardViewController: UIInputViewController {
                     guard !Task.isCancelled,
                           isRecognitionActive,
                           lifecycleEpoch == epoch,
-                          self.recognitionGeneration == recognitionGeneration else {
+                          self.recognitionGeneration == recognitionGeneration,
+                          textDocumentProxy.documentIdentifier == documentIdentifier else {
                         return false
                     }
                     // UITextDocumentProxy has no rollback operation. Keep a
@@ -1612,24 +1583,12 @@ public final class KeyboardViewController: UIInputViewController {
         return true
     }
 
-    private func activeSpeechCaptureSnapshot(
-        for state: KeyboardSpeechCaptureState
-    ) -> SpeechCapturePresentationSnapshot {
-        let snapshot = SpeechCapturePresentationSnapshot.keyboardSpeechCapture(state)
-        guard isRecognitionActive else { return snapshot }
-        switch state {
-        case .inserted, .unsupportedCommand:
-            return SpeechCapturePresentationSnapshot(
-                transcriptText: snapshot.transcriptText,
-                statusText: snapshot.statusText,
-                microphoneTitle: "Stop",
-                microphoneTone: snapshot.microphoneTone,
-                activeMicrophoneBars: .ready,
-                voiceActivityState: .listening(level: nil)
-            )
-        default:
-            return snapshot
-        }
+    private func directRecognitionDocumentMatches() -> Bool {
+        recognitionExpectedDocumentContext == textDocumentProxy.documentContextBeforeInput
+            && recognitionExpectedDocumentContextAfterInput == textDocumentProxy.documentContextAfterInput
+            && recognitionExpectedDocumentIdentifier == textDocumentProxy.documentIdentifier
+            && recognitionExpectedSelectedText == textDocumentProxy.selectedText
+            && recognitionExpectedDocumentMutationGeneration == documentMutationGeneration
     }
 
     private func consumeSharedDictationTranscriptIfNeeded(
@@ -2357,7 +2316,8 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func noteExternalDocumentMutation() {
         guard !isApplyingProxyMutation else { return }
-        if let expectedSelfMutationContext,
+        if !isRecognitionActive,
+           let expectedSelfMutationContext,
            expectedSelfMutationContext.hasStableMutationIdentity,
            expectedSelfMutationCallbacksDeadline.map({ $0 >= Date() }) == true,
            expectedSelfMutationContext.matches(
@@ -2377,6 +2337,10 @@ public final class KeyboardViewController: UIInputViewController {
         expectedSelfMutationCallbacksRemaining = 0
         expectedSelfMutationCallbacksDeadline = nil
         documentMutationGeneration &+= 1
+        if isRecognitionActive {
+            cancelDirectRecognition()
+            renderCurrentSpeechCapture()
+        }
     }
 
     private func currentDocumentContextFingerprint() -> SharedDictationDocumentContextFingerprint {
@@ -2671,7 +2635,7 @@ public final class KeyboardViewController: UIInputViewController {
         commandToken: String? = nil
     ) -> Bool {
         guard !Task.isCancelled,
-              !isRecognitionStopping,
+              !isRecognitionActive,
               !isSharedCancellationInProgress,
               !isSharedStorageResolutionUnknown,
               isViewVisible else { return false }
@@ -3050,7 +3014,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func renderSharedDictationUnavailableIfNeeded() {
         scheduleSharedDeliveryRecoveryRetry(epoch: lifecycleEpoch)
-        guard speechCaptureCoordinator.shouldOpenContainingAppForDictation() else {
+        guard !speechCaptureCoordinator.directRecognitionIsReady(hasFullAccess: hasFullAccess) else {
             renderCurrentSpeechCapture()
             return
         }
@@ -3108,6 +3072,10 @@ public final class KeyboardViewController: UIInputViewController {
             expectedMutationGeneration: documentMutationGeneration,
             expectedEpoch: lifecycleEpoch
         )
+        if isRecognitionActive {
+            cancelDirectRecognition()
+            renderCurrentSpeechCapture()
+        }
         if isSharedCancellationInProgress {
             enqueuePendingDocumentMutation(mutation)
             return
@@ -3118,7 +3086,6 @@ public final class KeyboardViewController: UIInputViewController {
                 || isSharedDeliveryRecoveryInProgress {
             cancelSharedDictationForLifecycleChange(then: mutation)
         } else {
-            cancelDirectRecognition()
             applyDocumentMutation(mutation)
         }
     }
@@ -3181,49 +3148,20 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func cancelDirectRecognition() {
-        guard isRecognitionActive || recognitionTask != nil else { return }
-        guard directRecognitionStopTask == nil else { return }
-        recognitionGeneration &+= 1
-        let stopGeneration = recognitionGeneration
-        let stopEpoch = lifecycleEpoch
+        speechCaptureCoordinator.cancelRecognition()
         recognitionTask?.cancel()
+        resetDirectRecognition()
+    }
+
+    private func resetDirectRecognition() {
+        recognitionGeneration &+= 1
         recognitionTask = nil
         isRecognitionActive = false
+        allowsDirectStartupFallback = false
         recognitionExpectedDocumentContext = nil
         recognitionExpectedDocumentContextAfterInput = nil
         recognitionExpectedDocumentIdentifier = nil
         recognitionExpectedSelectedText = nil
-        isRecognitionStopping = true
-        let coordinator = speechCaptureCoordinator
-        directRecognitionStopTask = Task { [weak self] in
-            await coordinator.stopRecognition()
-            guard let self,
-                  self.recognitionGeneration == stopGeneration,
-                  self.lifecycleEpoch == stopEpoch,
-                  self.isViewVisible else { return }
-            self.directRecognitionStopTask = nil
-            self.isRecognitionStopping = false
-            if self.isViewVisible {
-                self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
-            }
-        }
-    }
-
-    private func startDirectRecognitionStopTask() {
-        guard directRecognitionStopTask == nil else { return }
-        let coordinator = speechCaptureCoordinator
-        let stopGeneration = recognitionGeneration
-        let stopEpoch = lifecycleEpoch
-        directRecognitionStopTask = Task { [weak self] in
-            await coordinator.stopRecognition()
-            guard let self,
-                  self.recognitionGeneration == stopGeneration,
-                  self.lifecycleEpoch == stopEpoch,
-                  self.isViewVisible else { return }
-            self.directRecognitionStopTask = nil
-            self.isRecognitionStopping = false
-            self.startSharedDeliveryRecoveryAfterCancellationIfNeeded(epoch: self.lifecycleEpoch)
-        }
     }
 }
 
