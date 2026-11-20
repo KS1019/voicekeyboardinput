@@ -5,13 +5,13 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 ## Preconditions
 
 - Build and install `VoiceKeyboardInput` on an iOS 26+ simulator or device.
-- Run `make verify` first so package, UIKit, app UI, build, preview layout, and generated-file checks are green.
+- Run `make verify-unsigned` for local package, WebKit, UIKit, app UI, build, layout, policy, and generated-file checks without signing. Full `make verify` also runs the signed macOS security check and is the CI entry point.
 - Run `make keyboard-permission-policy-check` if `Allow Full Access` is missing in Settings or App Group handoff fails.
 - Turn `Allow Full Access` on for `Voice Keyboard` when validating the keyboard UI and App Group handoff. The containing app owns microphone and Speech authorization; grant both there before testing experimental WebKit capture.
 - The signed app and keyboard extension must both have the `group.com.ks1019.voicekeyboardinput` App Group entitlement. For physical devices, also enable that App Group for both bundle identifiers in the Apple Developer portal before signing.
 - On Simulator, grant microphone access for both the containing app and keyboard extension before probing if you want to bypass the permission prompt:
   `make simulator-grant-microphone`
-- The experimental WebKit path uses Apple file recognition (`SFSpeechURLRecognitionRequest`). Old AVAudioEngine/SpeechAnalyzer keyboard diagnostic adapters remain excluded from the extension target.
+- The experimental WebKit path uses Apple file recognition (`SFSpeechURLRecognitionRequest`), with a 20-second deadline including audio encoding.
 
 ## Enable The Keyboard
 
@@ -60,8 +60,8 @@ If the probe fails on Simulator, check macOS microphone permission for Simulator
 Record device model, iOS version, host app, permission state, startup time,
 input level, recording duration, memory, transcription result, and fallback
 outcome. A build/test pass alone must never change this section to verified.
-Device installation requires a separately signed build; this development task
-performs unsigned validation only.
+Device installation requires a separately signed build. Unsigned local
+validation does not install or provision a physical device.
 
 1. Grant microphone and Speech permissions in the app, enable the keyboard and Full Access.
 2. Open a text field in Notes, Safari, and a third-party host in turn. Show the keyboard and wait: the microphone must stay inactive before tapping Mic.
