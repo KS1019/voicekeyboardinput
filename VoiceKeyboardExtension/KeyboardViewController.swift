@@ -700,12 +700,20 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func microphoneTapped() {
-        guard isViewVisible,
-              !isMicrophoneDecisionInFlight,
-              !isSharedDeliveryRecoveryInProgress,
-              !isSharedCancellationInProgress else { return }
-
-        if activeSharedCommandToken != nil {
+        let decision = KeyboardDictationTapDecision.evaluate(
+            isVisible: isViewVisible,
+            directRecognitionIsActive: isRecognitionActive,
+            sharedInteractionIsBlocked: isMicrophoneDecisionInFlight
+                || isSharedDeliveryRecoveryInProgress || isSharedCancellationInProgress,
+            sharedSessionIsActive: activeSharedCommandToken != nil
+        )
+        switch decision {
+        case .ignore:
+            return
+        case .finishDirect:
+            allowsDirectStartupFallback = false
+            speechCaptureCoordinator.finishRecognition()
+        case .stopShared:
             isMicrophoneDecisionInFlight = true
             let epoch = lifecycleEpoch
             microphoneDecisionTask = Task { [weak self] in
@@ -718,16 +726,12 @@ public final class KeyboardViewController: UIInputViewController {
                 }
                 await self.stopSharedDictationSession(epoch: epoch)
             }
-            return
-        }
-
-        if isRecognitionActive {
-            allowsDirectStartupFallback = false
-            speechCaptureCoordinator.finishRecognition()
-        } else if speechCaptureCoordinator.directRecognitionIsReady(hasFullAccess: hasFullAccess) {
-            startDirectKeyboardRecognition()
-        } else {
-            beginSharedMicrophoneDecision(epoch: lifecycleEpoch)
+        case .start:
+            if speechCaptureCoordinator.directRecognitionIsReady(hasFullAccess: hasFullAccess) {
+                startDirectKeyboardRecognition()
+            } else {
+                beginSharedMicrophoneDecision(epoch: lifecycleEpoch)
+            }
         }
     }
 
