@@ -36,8 +36,20 @@ final class VoiceKeyboardInputUITests: XCTestCase {
         app.launchArguments = ["-onboarding.completed", "NO"]
         app.launch()
         XCTAssertTrue(app.staticTexts["onboarding.title"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["onboarding.progress"].label, "Step 1 of 3")
+        XCTAssertFalse(app.buttons["onboarding.finishButton"].exists)
+        app.buttons["onboarding.nextButton"].tap()
+        XCTAssertEqual(app.staticTexts["onboarding.progress"].label, "Step 2 of 3")
+        app.buttons["onboarding.backButton"].tap()
+        XCTAssertEqual(app.staticTexts["onboarding.progress"].label, "Step 1 of 3")
+        app.buttons["onboarding.nextButton"].tap()
+        app.swipeLeft()
+        XCTAssertEqual(app.staticTexts["onboarding.progress"].label, "Step 3 of 3")
+        app.swipeRight()
+        XCTAssertEqual(app.staticTexts["onboarding.progress"].label, "Step 2 of 3")
+        app.buttons["onboarding.nextButton"].tap()
+        XCTAssertEqual(app.staticTexts["onboarding.progress"].label, "Step 3 of 3")
         let finish = app.buttons["onboarding.finishButton"]
-        for _ in 0..<5 where !finish.isHittable { app.swipeUp() }
         XCTAssertTrue(finish.isHittable)
         finish.tap()
         XCTAssertTrue(app.staticTexts["Keyboard-first voice input"].waitForExistence(timeout: 5))

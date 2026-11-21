@@ -29,11 +29,13 @@ own lifecycle APIs rather than implementing that generic service.
 
 ## Onboarding
 
-On first launch, the containing app offers microphone and Speech authorization
-without starting a recording. It refreshes permission status when returning from
+On first launch, the containing app presents three native swipeable pages for
+microphone, Speech recognition, and keyboard setup. Back/Next controls remain
+visible while each page scrolls for larger text. Permission requests require an
+explicit tap; paging neither grants access nor starts a recording. It refreshes permission status when returning from
 Settings and explains denied or restricted access. Keyboard installation and Full
 Access remain manual Settings steps; the app does not claim to verify them.
-Continue saves completion, Later defers until the next launch, and setup can be
+Done saves completion, Later defers until the next launch, and setup can be
 reopened from the main screen. Keyboard deep links dismiss onboarding to preserve
 the existing recording handoff.
 
