@@ -3,6 +3,7 @@ import XCTest
 final class VoiceKeyboardInputUITests: XCTestCase {
     func testContainingAppQASurfaceIsAvailable() {
         let app = XCUIApplication()
+        app.launchArguments = ["-onboarding.completed", "YES"]
         app.launch()
 
         XCTAssertTrue(app.staticTexts["Keyboard-first voice input"].waitForExistence(timeout: 5))
@@ -13,4 +14,39 @@ final class VoiceKeyboardInputUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["keyboard.qa.instructions"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["settings.openButton"].waitForExistence(timeout: 5))
     }
+
+    func testOnboardingCanBeDeferredAndReopened() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-onboarding.completed", "NO"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["onboarding.title"].waitForExistence(timeout: 5))
+        app.buttons["onboarding.laterButton"].tap()
+        XCTAssertTrue(app.staticTexts["Keyboard-first voice input"].waitForExistence(timeout: 5))
+
+        let reopen = app.buttons["onboarding.openButton"]
+        if !reopen.isHittable { app.swipeUp() }
+        XCTAssertTrue(reopen.waitForExistence(timeout: 5))
+        reopen.tap()
+        XCTAssertTrue(app.staticTexts["onboarding.title"].waitForExistence(timeout: 5))
+    }
+
+    func testOnboardingCompletionPersistsAcrossLaunches() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-onboarding.completed", "NO"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["onboarding.title"].waitForExistence(timeout: 5))
+        let finish = app.buttons["onboarding.finishButton"]
+        for _ in 0..<5 where !finish.isHittable { app.swipeUp() }
+        XCTAssertTrue(finish.isHittable)
+        finish.tap()
+        XCTAssertTrue(app.staticTexts["Keyboard-first voice input"].waitForExistence(timeout: 5))
+
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Keyboard-first voice input"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["onboarding.title"].exists)
+    }
+
 }

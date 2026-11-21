@@ -27,6 +27,16 @@ are enforced separately by their Xcode targets. The package's generic
 independently tested abstractions; the live app and WebKit adapters use their
 own lifecycle APIs rather than implementing that generic service.
 
+## Onboarding
+
+On first launch, the containing app offers microphone and Speech authorization
+without starting a recording. It refreshes permission status when returning from
+Settings and explains denied or restricted access. Keyboard installation and Full
+Access remain manual Settings steps; the app does not claim to verify them.
+Continue saves completion, Later defers until the next launch, and setup can be
+reopened from the main screen. Keyboard deep links dismiss onboarding to preserve
+the existing recording handoff.
+
 ## Dictation and insertion
 
 1. Showing the keyboard preloads a local, noninteractive WebKit document without

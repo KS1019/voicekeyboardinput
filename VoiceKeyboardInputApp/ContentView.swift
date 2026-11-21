@@ -29,13 +29,18 @@ struct ContentView: View {
     @State private var previewGeneration: UInt64 = 0
     @State private var previewWorker = LiteralTranscriptPreviewWorker()
     private let voiceInputLaunchModel: VoiceInputLaunchModel
+    private let showOnboarding: () -> Void
 
     private let pipeline = LiteralTranscriptCommandPipeline(
         locale: VoiceKeyboardLocale(identifier: Locale.current.identifier)
     )
 
-    init(voiceInputLaunchModel: VoiceInputLaunchModel = VoiceInputLaunchModel()) {
+    init(
+        voiceInputLaunchModel: VoiceInputLaunchModel = VoiceInputLaunchModel(),
+        showOnboarding: @escaping () -> Void = {}
+    ) {
         self.voiceInputLaunchModel = voiceInputLaunchModel
+        self.showOnboarding = showOnboarding
     }
 
     var body: some View {
@@ -78,7 +83,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Label("Add Voice Keyboard in Settings > General > Keyboard > Keyboards.", systemImage: "keyboard")
                 Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
-                Label("Use Start Voice Input to allow microphone and speech access and try recording.", systemImage: "mic.circle")
+                Button("Set Up Voice Keyboard", action: showOnboarding)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("onboarding.openButton")
+                    .disabled(voiceInputLaunchModel.status.isStoppable)
                 Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "keyboard")
 
                 Button {
