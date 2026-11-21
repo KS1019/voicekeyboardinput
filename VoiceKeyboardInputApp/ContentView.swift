@@ -65,7 +65,7 @@ struct ContentView: View {
             Text("Keyboard-first voice input")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.primary)
-            Text("Set up Voice Keyboard, enable full access, then validate speech input from any host text field.")
+            Text("Set up Voice Keyboard, allow microphone and speech access, then try it in an app that supports custom keyboards.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             privacyPolicyLink
@@ -78,7 +78,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Label("Add Voice Keyboard in Settings > General > Keyboard > Keyboards.", systemImage: "keyboard")
                 Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
-                Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "mic.circle")
+                Label("Use Start Voice Input to allow microphone and speech access and try recording.", systemImage: "mic.circle")
+                Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "keyboard")
 
                 Button {
                     openApplicationSettings()
@@ -89,10 +90,11 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("settings.openButton")
 
-                Text("Mic opens this app. The app records and transcribes your voice, then hands the result back through the shared App Group for keyboard insertion.")
+                Text("With permission and Full Access, Mic tries to record in the keyboard. If recording cannot start there, voice input falls back to this app.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setup.voiceInputInstructions")
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -189,7 +191,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("keyboard.qa.textField")
 
-                Text("Use this field to verify the keyboard extension loads, starts keyboard STT or app handoff from Mic, inserts final text, and keeps Delete / Return responsive.")
+                Text("Use this field to try voice input, check final text insertion, and test Delete / Return.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("keyboard.qa.instructions")
@@ -230,7 +232,7 @@ struct ContentView: View {
 
     private var validationPanel: some View {
         Panel("Validation Notes") {
-            Text("The keyboard microphone button opens the containing app. The app records, transcribes, saves the transcript to the shared App Group, and the keyboard inserts that result when it appears again.")
+            Text("In-keyboard recording is experimental and still needs real-device testing. If no audio arrives within 2 seconds, the keyboard falls back to app recording. Final text is inserted only if the original text field is still valid.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

@@ -18,34 +18,30 @@ enum VoiceInputLaunchStatus: Equatable {
         case .idle:
             "Ready"
         case .sessionReady:
-            "Voice Session Ready"
+            "Ready for Voice Input"
         case .requestingPermission:
-            "Requesting Microphone"
+            "Preparing Voice Input"
         case .microphoneActive:
-            "Microphone Active"
+            "Voice Input in Progress"
         case .transcriptShared:
             "Transcript Ready"
         case .permissionDenied:
             "Microphone Permission Denied"
         case .failed:
-            "Microphone Activation Failed"
+            "Voice Input Failed"
         }
     }
 
     var message: String {
         switch self {
         case .idle:
-            "Preparing a voice session lets the keyboard start dictation without reopening this app while the session is alive."
+            "Start Voice Input to grant permissions and try recording in this app."
         case .sessionReady:
-            "Voice Keyboard can start dictation from the keyboard while this app session is alive."
+            "Ready to request voice input. Use Start Voice Input to record here."
         case .requestingPermission:
-            "Waiting for the iOS microphone permission prompt."
-        case let .microphoneActive(peakPower):
-            if let peakPower {
-                "Audio input probe passed. Peak input: \(peakPower.formatted(.number.precision(.fractionLength(1)))) dB."
-            } else {
-                "Audio input probe passed. No non-silent input was detected during the short probe."
-            }
+            "Allow microphone and Speech Recognition access if iOS asks."
+        case .microphoneActive:
+            "Voice input is in progress. Allow access if prompted. Recording ends automatically, or tap Stop to end it early."
         case let .transcriptShared(transcript):
             "Transcript saved for the keyboard: \(transcript)"
         case .permissionDenied:
