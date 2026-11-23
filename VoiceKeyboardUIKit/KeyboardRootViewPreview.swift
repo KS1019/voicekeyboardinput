@@ -82,6 +82,26 @@ private struct KeyboardRootPreview: UIViewRepresentable {
     .preferredColorScheme(.dark)
 }
 
+#Preview("Keyboard Ready Light") {
+    KeyboardRootPreview(
+        snapshot: .sharedDictationSessionStatus(.idle),
+        showsNextKeyboard: true
+    )
+    .frame(height: 260)
+    .background(Color(uiColor: .systemBackground))
+    .preferredColorScheme(.light)
+}
+
+#Preview("Keyboard Ready Dark") {
+    KeyboardRootPreview(
+        snapshot: .sharedDictationSessionStatus(.idle),
+        showsNextKeyboard: true
+    )
+    .frame(height: 260)
+    .background(Color(uiColor: .systemBackground))
+    .preferredColorScheme(.dark)
+}
+
 private extension SpeechCapturePresentationSnapshot {
     static let listeningPreview = SpeechCapturePresentationSnapshot(
         transcriptText: "Meeting notes: follow up with the team after lunch.",

@@ -25,7 +25,6 @@ struct OnboardingView: View {
     @State private var step: Step
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let finish: () -> Void
@@ -38,11 +37,11 @@ struct OnboardingView: View {
     }
 
     private var accent: Color {
-        colorScheme == .dark ? Color(red: 0.74, green: 0.69, blue: 0.96) : Color(red: 0.36, green: 0.30, blue: 0.62)
+        Color(uiColor: VoiceKeyboardPalette.accent)
     }
 
     private var background: Color {
-        colorScheme == .dark ? Color(red: 0.10, green: 0.10, blue: 0.12) : Color(red: 0.97, green: 0.96, blue: 0.93)
+        Color(uiColor: VoiceKeyboardPalette.background)
     }
 
     private var permission: OnboardingPermissionState? {
@@ -178,7 +177,7 @@ struct OnboardingView: View {
             primaryAction
                 .buttonStyle(OnboardingPrimaryButtonStyle(
                     accent: accent,
-                    foreground: colorScheme == .dark ? .black : .white
+                    foreground: Color(uiColor: VoiceKeyboardPalette.onAccent)
                 ))
                 .disabled(permissions.isRequesting)
 

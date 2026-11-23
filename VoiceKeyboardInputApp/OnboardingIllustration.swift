@@ -4,7 +4,6 @@ struct OnboardingIllustration: View {
     let step: OnboardingView.Step
     let accent: Color
     let animates: Bool
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1 / 20, paused: !animates)) { context in
@@ -57,7 +56,7 @@ struct OnboardingIllustration: View {
     }
 
     private var surface: Color {
-        colorScheme == .dark ? Color(white: 0.17) : .white.opacity(0.9)
+        Color(uiColor: VoiceKeyboardPalette.surface)
     }
 
     private func waveform(phase: Double, height: CGFloat) -> some View {

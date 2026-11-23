@@ -78,13 +78,15 @@ final class KeyboardRootView: UIView {
         updateMicrophoneButton(
             isAvailable: speechCapture.voiceActivityState.phase != .unavailable,
             tone: speechCapture.microphoneTone,
-            title: speechCapture.microphoneTitle
+            title: speechCapture.microphoneTitle,
+            isListening: speechCapture.voiceActivityState.phase == .listening
         )
         updateStatus(speechCapture.statusText, announce: announce)
     }
 
     private func configureView() {
         backgroundColor = .clear
+        tintColor = VoiceKeyboardPalette.accent
         isOpaque = false
 
         let stack = UIStackView()
@@ -303,7 +305,7 @@ final class KeyboardRootView: UIView {
     private func baseButtonConfiguration(title: String?) -> UIButton.Configuration {
         var configuration = UIButton.Configuration.glass()
         configuration.title = title
-        configuration.baseForegroundColor = .label
+        configuration.baseForegroundColor = VoiceKeyboardPalette.accent
         configuration.cornerStyle = .capsule
         configuration.imagePlacement = title == nil ? .leading : .top
         configuration.imagePadding = 2
@@ -334,13 +336,15 @@ final class KeyboardRootView: UIView {
     private func updateMicrophoneButton(
         isAvailable: Bool,
         tone: PresentationTone,
-        title: String
+        title: String,
+        isListening: Bool
     ) {
         microphoneButton?.isEnabled = isAvailable
         microphoneButton?.configuration = microphoneButtonConfiguration(
             title: title,
             isAvailable: isAvailable,
-            tone: tone
+            tone: tone,
+            isListening: isListening
         )
         microphoneButton?.accessibilityLabel = microphoneAccessibilityLabel(
             for: title,
@@ -368,7 +372,8 @@ final class KeyboardRootView: UIView {
     private func microphoneButtonConfiguration(
         title: String,
         isAvailable: Bool,
-        tone: PresentationTone
+        tone: PresentationTone,
+        isListening: Bool
     ) -> UIButton.Configuration {
         var configuration = baseButtonConfiguration(title: title)
         configuration.image = UIImage(systemName: "mic.fill")
@@ -381,9 +386,10 @@ final class KeyboardRootView: UIView {
 
         switch tone {
         case .positive:
-            // System label color and a translucent tint preserve contrast in both appearances.
-            configuration.baseForegroundColor = .label
-            configuration.baseBackgroundColor = .systemGreen.withAlphaComponent(0.22)
+            configuration.baseForegroundColor = isListening ? .label : VoiceKeyboardPalette.accent
+            configuration.baseBackgroundColor = isListening
+                ? .systemGreen.withAlphaComponent(0.22)
+                : VoiceKeyboardPalette.accent.withAlphaComponent(0.15)
         case .warning:
             configuration.baseForegroundColor = .label
             configuration.baseBackgroundColor = .systemOrange.withAlphaComponent(0.22)
@@ -391,8 +397,8 @@ final class KeyboardRootView: UIView {
             configuration.baseForegroundColor = .label
             configuration.baseBackgroundColor = .systemRed.withAlphaComponent(0.20)
         case .muted:
-            configuration.baseForegroundColor = .label
-            configuration.baseBackgroundColor = .clear
+            configuration.baseForegroundColor = VoiceKeyboardPalette.accent
+            configuration.baseBackgroundColor = VoiceKeyboardPalette.accent.withAlphaComponent(0.08)
         }
         return configuration
     }

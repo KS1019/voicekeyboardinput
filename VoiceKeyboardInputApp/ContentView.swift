@@ -59,6 +59,7 @@ struct ContentView: View {
             .background(appBackground)
             .navigationTitle("Voice Keyboard")
         }
+        .tint(Color(uiColor: VoiceKeyboardPalette.accent))
         .onDisappear {
             previewTask?.cancel()
             previewTask = nil
@@ -85,6 +86,7 @@ struct ContentView: View {
                 Label("Turn Allow Full Access on for Voice Keyboard.", systemImage: "checkmark.shield")
                 Button("Set Up Voice Keyboard", action: showOnboarding)
                     .buttonStyle(.borderedProminent)
+                    .foregroundStyle(Color(uiColor: VoiceKeyboardPalette.onAccent))
                     .accessibilityIdentifier("onboarding.openButton")
                     .disabled(voiceInputLaunchModel.status.isStoppable)
                 Label("Tap the text field below, switch to Voice Keyboard, then press Mic.", systemImage: "keyboard")
@@ -162,6 +164,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .foregroundStyle(Color(uiColor: VoiceKeyboardPalette.onAccent))
                 .controlSize(.large)
                 .accessibilityIdentifier("voiceInput.startButton")
             }
@@ -180,7 +183,7 @@ struct ContentView: View {
         }
         .font(.headline)
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color(uiColor: VoiceKeyboardPalette.surface), in: RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
@@ -222,7 +225,7 @@ struct ContentView: View {
                     .font(.body.monospaced())
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
-                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                    .background(Color(uiColor: VoiceKeyboardPalette.surface), in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -255,7 +258,7 @@ struct ContentView: View {
         case .requestingPermission:
             .orange
         case .idle, .sessionReady:
-            .blue
+            Color(uiColor: VoiceKeyboardPalette.accent)
         }
     }
 
@@ -283,7 +286,7 @@ struct ContentView: View {
     }
 
     private var appBackground: some View {
-        Color(.systemGroupedBackground)
+        Color(uiColor: VoiceKeyboardPalette.background)
             .ignoresSafeArea()
     }
 
@@ -375,7 +378,7 @@ private struct Panel<Content: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color(uiColor: VoiceKeyboardPalette.surface), in: RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
