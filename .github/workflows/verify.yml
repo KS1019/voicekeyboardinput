@@ -21,10 +21,11 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphonesimulator --show-sdk-version
 
-      - name: Install XcodeGen
+      - name: Install build tools
         run: |
-          brew install xcodegen
+          brew install xcodegen ripgrep
           xcodegen --version
+          rg --version
 
       - uses: actions/setup-node@v7
         with:
