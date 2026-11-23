@@ -16,59 +16,7 @@ packages:
     url: https://github.com/getsentry/SnapshotPreviews
     exactVersion: 0.17.0
 targets:
-  VoiceKeyboardInput:
-    type: application
-    platform: iOS
-    sources:
-      - VoiceKeyboardInputApp
-      - VoiceKeyboardAudioSupport
-      - VoiceKeyboardUIKit
-      - path: PrivacyInfo.xcprivacy
-        buildPhase: resources
-    dependencies:
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardModels
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardSharedStorage
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardInterfaces
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardCommandPipeline
-      - package: VoiceKeyboardPackage
-        product: VoiceKeyboardPresentation
-      - target: VoiceKeyboardExtension
-        embed: true
-    info:
-      path: VoiceKeyboardInputApp/Info.plist
-      properties:
-        CFBundleDisplayName: Voice Keyboard Input
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
-        CFBundleURLTypes:
-          - CFBundleURLName: com.ks1019.voicekeyboardinput
-            CFBundleURLSchemes:
-              - voicekeyboard
-        UILaunchScreen: {}
-        NSMicrophoneUsageDescription: Voice Keyboard Input uses the microphone only when you explicitly start voice input or microphone validation.
-        NSSpeechRecognitionUsageDescription: Voice Keyboard Input uses speech recognition only after you explicitly start voice input. Audio may be processed by Apple to recognize speech, and recognized text is temporarily shared with the keyboard for insertion.
-        UIBackgroundModes:
-          - audio
-    entitlements:
-      path: VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements
-      properties:
-        com.apple.security.application-groups:
-          - group.com.ks1019.voicekeyboardinput
-    settings:
-      base:
-        CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 47JGA6NAP2
-        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput
-        PROVISIONING_PROFILE_SPECIFIER: ""
-        SWIFT_OBJC_BRIDGING_HEADER: VoiceKeyboardAudioSupport/VoiceKeyboardAudioExceptionGuard.h
-      configs:
-        Debug:
-          CODE_SIGN_IDENTITY: "Apple Development"
-
+  # Keep declarations alphabetical for consistent output before and after XcodeGen 2.46.
   VoiceKeyboardExtension:
     type: app-extension
     platform: iOS
@@ -124,6 +72,59 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.keyboard
         APPLICATION_EXTENSION_API_ONLY: YES
 
+  VoiceKeyboardInput:
+    type: application
+    platform: iOS
+    sources:
+      - VoiceKeyboardInputApp
+      - VoiceKeyboardAudioSupport
+      - VoiceKeyboardUIKit
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardModels
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardSharedStorage
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardInterfaces
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardCommandPipeline
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardPresentation
+      - target: VoiceKeyboardExtension
+        embed: true
+    info:
+      path: VoiceKeyboardInputApp/Info.plist
+      properties:
+        CFBundleDisplayName: Voice Keyboard Input
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ks1019.voicekeyboardinput
+            CFBundleURLSchemes:
+              - voicekeyboard
+        UILaunchScreen: {}
+        NSMicrophoneUsageDescription: Voice Keyboard Input uses the microphone only when you explicitly start voice input or microphone validation.
+        NSSpeechRecognitionUsageDescription: Voice Keyboard Input uses speech recognition only after you explicitly start voice input. Audio may be processed by Apple to recognize speech, and recognized text is temporarily shared with the keyboard for insertion.
+        UIBackgroundModes:
+          - audio
+    entitlements:
+      path: VoiceKeyboardInputApp/VoiceKeyboardInput.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.ks1019.voicekeyboardinput
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 47JGA6NAP2
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        SWIFT_OBJC_BRIDGING_HEADER: VoiceKeyboardAudioSupport/VoiceKeyboardAudioExceptionGuard.h
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: "Apple Development"
+
   VoiceKeyboardInputPreviewTests:
     type: bundle.unit-test
     platform: iOS
@@ -138,6 +139,17 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.previewtests
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/VoiceKeyboardInput.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VoiceKeyboardInput
         BUNDLE_LOADER: $(TEST_HOST)
+
+  VoiceKeyboardInputUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - VoiceKeyboardInputUITests
+    dependencies:
+      - target: VoiceKeyboardInput
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uitests
 
   VoiceKeyboardUIKitTests:
     type: bundle.unit-test
@@ -157,16 +169,6 @@ targets:
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/VoiceKeyboardInput.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VoiceKeyboardInput
         BUNDLE_LOADER: $(TEST_HOST)
 
-  VoiceKeyboardInputUITests:
-    type: bundle.ui-testing
-    platform: iOS
-    sources:
-      - VoiceKeyboardInputUITests
-    dependencies:
-      - target: VoiceKeyboardInput
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uitests
 schemes:
   VoiceKeyboardInput:
     build:
