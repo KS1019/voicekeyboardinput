@@ -30,9 +30,12 @@ own lifecycle APIs rather than implementing that generic service.
 ## Onboarding
 
 On first launch, the containing app presents three native swipeable pages for
-microphone, Speech recognition, and keyboard setup. Back/Next controls remain
-visible while each page scrolls for larger text. Permission requests require an
-explicit tap; paging neither grants access nor starts a recording. It refreshes permission status when returning from
+microphone, Speech recognition, and keyboard setup. Each page pairs a short benefit
+with an illustrative waveform, transcript, or keyboard preview. These demos do
+not record audio. A primary permission/Settings action and secondary navigation
+remain visible while the content scrolls for larger text. Permission requests
+require an explicit tap; paging neither grants access nor starts a recording.
+It refreshes permission status when returning from
 Settings and explains denied or restricted access. Keyboard installation and Full
 Access remain manual Settings steps; the app does not claim to verify them.
 Done saves completion, Later defers until the next launch, and setup can be
