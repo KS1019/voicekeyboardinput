@@ -3,9 +3,16 @@ import Foundation
 import Speech
 import VoiceKeyboardModels
 
-/// Encodes a completed recording and owns its file until recognition terminates.
 @MainActor
-final class KeyboardFileSpeechRecognition {
+protocol KeyboardSegmentRecognizing: AnyObject {
+    func start(_ pcm: DictationPCM, locale: VoiceKeyboardLocale,
+               completion: @escaping (Result<String, SpeechRecognitionError>) -> Void)
+    func cancel()
+}
+
+/// Encodes a completed audio segment and owns its file until recognition terminates.
+@MainActor
+final class KeyboardFileSpeechRecognition: KeyboardSegmentRecognizing {
     private var id: UUID?
     private var encoding: Task<URL, any Error>?
     private var deadline: Task<Void, Never>?
@@ -33,7 +40,7 @@ final class KeyboardFileSpeechRecognition {
             return
         }
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale.identifier)),
-              recognizer.isAvailable else {
+              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
             completion(.failure(.speechRecognizerUnavailable))
             return
         }
@@ -87,7 +94,8 @@ final class KeyboardFileSpeechRecognition {
     private func startFileRecognition(_ url: URL, id: UUID) {
         audioURL = url
         encoding = nil
-        guard Self.isAuthorized, let recognizer, recognizer.isAvailable else {
+        guard Self.isAuthorized, let recognizer, recognizer.isAvailable,
+              recognizer.supportsOnDeviceRecognition else {
             finish(.failure(.speechRecognizerUnavailable), id: id)
             return
         }
@@ -95,8 +103,8 @@ final class KeyboardFileSpeechRecognition {
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.taskHint = .dictation
         request.shouldReportPartialResults = false
-        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
-        recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
+        request.requiresOnDeviceRecognition = true
+        recognition = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, error in
             let finalTranscript = result?.isFinal == true ? result?.bestTranscription.formattedString : nil
             let failed = error != nil
             Task { @MainActor [weak self] in

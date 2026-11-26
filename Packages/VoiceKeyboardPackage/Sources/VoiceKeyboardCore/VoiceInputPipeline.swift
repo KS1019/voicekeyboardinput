@@ -34,14 +34,21 @@ public struct VoiceInputPipeline: Sendable {
         for transcript: String,
         documentContextBeforeInput: String?,
         maximumOperationCount: Int,
-        locale: VoiceKeyboardLocale? = nil
+        locale: VoiceKeyboardLocale? = nil,
+        omittingLiteralPrefix: String = "",
+        interpretCommands: Bool = true
     ) -> [TextOperation]? {
         let commandPipeline = locale.map(LiteralTranscriptCommandPipeline.init(locale:)) ?? self.commandPipeline
         return commandPipeline.boundedPreview(
             for: transcript,
             documentContextBeforeInput: documentContextBeforeInput,
-            maximumOperationCount: maximumOperationCount
+            maximumOperationCount: maximumOperationCount,
+            omittingLiteralPrefix: omittingLiteralPrefix, interpretCommands: interpretCommands
         )?.operations
+    }
+
+    public func mayContainStreamingCommand(_ transcript: String) -> Bool {
+        commandPipeline.mayContainStreamingCommand(transcript)
     }
 
     public func hasIncompleteCommandPrefix(

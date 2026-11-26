@@ -3,6 +3,27 @@ import VoiceKeyboardModels
 import XCTest
 
 final class LiteralTranscriptCommandPipelineTests: XCTestCase {
+    func testStreamingDefersCommandCandidatesButCommitsOrdinaryText() {
+        let pipeline = LiteralTranscriptCommandPipeline(locale: .init(identifier: "en-US"))
+        for text in ["new", "new line", "command delete", "command delete word", "hello comma"] {
+            XCTAssertTrue(pipeline.mayContainStreamingCommand(text), text)
+        }
+        XCTAssertFalse(pipeline.mayContainStreamingCommand("hello world"))
+    }
+
+    func testStreamingRetainsEarlierLiteralContextWhenResolvingCommands() {
+        let pipeline = LiteralTranscriptCommandPipeline(locale: .init(identifier: "en-US"))
+        let preview = pipeline.boundedPreview(
+            for: "do not command delete word", documentContextBeforeInput: "do not",
+            maximumOperationCount: 64, omittingLiteralPrefix: "do not"
+        )
+        XCTAssertEqual(preview?.operations, [.insertText(" command delete word")])
+        XCTAssertNil(pipeline.boundedPreview(
+            for: "different text", documentContextBeforeInput: "hello", maximumOperationCount: 64,
+            omittingLiteralPrefix: "hello"
+        ))
+    }
+
     func testPreviewPreservesNaturalProseAroundPunctuationWords() {
         let pipeline = LiteralTranscriptCommandPipeline(
             locale: VoiceKeyboardLocale(identifier: "en-US")

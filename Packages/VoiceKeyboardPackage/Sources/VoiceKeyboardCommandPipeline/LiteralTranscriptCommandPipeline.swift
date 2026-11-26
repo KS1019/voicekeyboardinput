@@ -76,24 +76,37 @@ public struct LiteralTranscriptCommandPipeline: Sendable {
     public func boundedPreview(
         for transcript: String,
         documentContextBeforeInput: String?,
-        maximumOperationCount: Int
+        maximumOperationCount: Int,
+        omittingLiteralPrefix: String = "",
+        interpretCommands: Bool = true
     ) -> LiteralTranscriptPreview? {
         guard Self.isBounded(transcript),
               documentContextBeforeInput.map(Self.isBounded) ?? true else {
             return nil
         }
-        let parsed = parser.parse(transcript)
+        let parsed = interpretCommands ? parser.parse(transcript) : ParsedTranscript(elements: [.text(transcript)])
         guard !parsed.didOverflow else { return nil }
+        var elements = parsed.elements
+        if !omittingLiteralPrefix.isEmpty {
+            guard let first = elements.first, case .text(let text) = first,
+                  text.hasPrefix(omittingLiteralPrefix) else { return nil }
+            elements[0] = .text(String(text.dropFirst(omittingLiteralPrefix.count)))
+        }
+        let remainder = ParsedTranscript(elements: elements)
         guard let operations = planner.plan(
-                  parsed,
+                  remainder,
                   documentContextBeforeInput: documentContextBeforeInput,
                   maximumOperationCount: maximumOperationCount
               ) else { return nil }
         guard operations.allSatisfy(Self.isBounded) else { return nil }
         return LiteralTranscriptPreview(
-            elements: parsed.elements.map(Self.mapElement),
+            elements: remainder.elements.map(Self.mapElement),
             operations: operations
         )
+    }
+
+    public func mayContainStreamingCommand(_ transcript: String) -> Bool {
+        parser.mayContainStreamingCommand(transcript)
     }
 
     public func hasIncompleteCommandPrefix(for transcript: String) -> Bool {

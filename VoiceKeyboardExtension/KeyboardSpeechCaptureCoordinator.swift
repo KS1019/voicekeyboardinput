@@ -8,14 +8,27 @@ import VoiceKeyboardPresentation
 final class KeyboardSpeechCaptureCoordinator {
     enum Event: Sendable {
         case presentation(SpeechCapturePresentationSnapshot)
-        case final(SpeechCapturePresentationSnapshot, [KeyboardTextInsertionAction])
+        case failure(SpeechCapturePresentationSnapshot)
+        case transcript(String)
+        case stopping
+        case recognitionGap
+        case finished
         case startupFailed
     }
 
-    private let capture = WebKitDictationCapture()
-    private let speech = KeyboardFileSpeechRecognition()
+    private let capture: any KeyboardAudioCapturing
+    private let speech: any KeyboardSegmentRecognizing
     private var continuation: AsyncStream<Event>.Continuation?
     private var sessionID: UUID?
+    private var pendingSegments: [DictationPCM] = []
+    private var isRecognizing = false
+    private var captureFinished = false
+
+    init(capture: any KeyboardAudioCapturing = WebKitDictationCapture(),
+         speech: any KeyboardSegmentRecognizing = KeyboardFileSpeechRecognition()) {
+        self.capture = capture
+        self.speech = speech
+    }
 
     func preload(in view: UIView) {
         capture.preload(in: view)
@@ -45,10 +58,9 @@ final class KeyboardSpeechCaptureCoordinator {
 
     func recognitionEvents(
         locale: VoiceKeyboardLocale,
-        documentContextBeforeInput: String?,
         hasFullAccess: @escaping () -> Bool
     ) -> AsyncStream<Event> {
-        let (events, continuation) = AsyncStream<Event>.makeStream(bufferingPolicy: .bufferingNewest(2))
+        let (events, continuation) = AsyncStream<Event>.makeStream()
         guard sessionID == nil else {
             continuation.finish()
             return events
@@ -66,17 +78,12 @@ final class KeyboardSpeechCaptureCoordinator {
             case .started:
                 continuation.yield(.presentation(.keyboardSpeechCapture(.listening)))
             case .stopping:
-                continuation.yield(.presentation(Self.processing))
+                continuation.yield(.stopping)
+            case .segment(let pcm):
+                self.enqueue(pcm, locale: locale, id: id)
             case .finished(let pcm):
-                self.speech.start(pcm, locale: locale) { [weak self] result in
-                    guard let self, self.sessionID == id else { return }
-                    switch result {
-                    case .success(let transcript):
-                        self.end(Self.finalEvent(transcript, context: documentContextBeforeInput, locale: locale))
-                    case .failure(let error):
-                        self.end(Self.errorEvent(error))
-                    }
-                }
+                self.captureFinished = true
+                self.enqueue(pcm, locale: locale, id: id)
             case .startupFailed:
                 self.end(.startupFailed)
             case .failed:
@@ -86,36 +93,80 @@ final class KeyboardSpeechCaptureCoordinator {
         return events
     }
 
+    private func enqueue(_ pcm: DictationPCM, locale: VoiceKeyboardLocale, id: UUID) {
+        if pcm.sampleCount > 0 {
+            // Capture is bounded to 60 seconds. Bound backlog as well when
+            // recognition is slower than speech; never silently drop a segment.
+            guard pendingSegments.count < 60 else {
+                capture.cancel()
+                speech.cancel()
+                end(Self.errorEvent(.recognitionFailed("Speech recognition could not keep up. Please try again.")))
+                return
+            }
+            pendingSegments.append(pcm)
+        }
+        recognizeNext(locale: locale, id: id)
+    }
+
+    private func recognizeNext(locale: VoiceKeyboardLocale, id: UUID) {
+        guard sessionID == id, !isRecognizing else { return }
+        guard !pendingSegments.isEmpty else {
+            if captureFinished { end(.finished) }
+            return
+        }
+        isRecognizing = true
+        let pcm = pendingSegments.removeFirst()
+        speech.start(pcm, locale: locale) { [weak self] result in
+            guard let self, self.sessionID == id else { return }
+            self.isRecognizing = false
+            switch result {
+            case .success(let transcript):
+                self.continuation?.yield(.transcript(transcript))
+                self.recognizeNext(locale: locale, id: id)
+            case .failure(.recognitionFailed):
+                self.continuation?.yield(.recognitionGap)
+                self.recognizeNext(locale: locale, id: id)
+            case .failure(let error):
+                self.end(Self.errorEvent(error))
+            }
+        }
+    }
+
     func finishRecognition() {
         capture.finish()
     }
 
     func cancelRecognition() {
-        capture.cancel()
-        speech.cancel()
         end()
     }
 
     private func end(_ event: Event? = nil) {
+        capture.cancel()
+        speech.cancel()
         if let event {
             continuation?.yield(event)
         }
         continuation?.finish()
         continuation = nil
         sessionID = nil
+        pendingSegments.removeAll()
+        isRecognizing = false
+        captureFinished = false
     }
 
-    private static func finalEvent(_ transcript: String, context: String?, locale: VoiceKeyboardLocale) -> Event {
+    static func insertionResult(_ transcript: String, context: String?, locale: VoiceKeyboardLocale,
+                                omittingLiteralPrefix: String = "", interpretCommands: Bool = true) -> (SpeechCapturePresentationSnapshot, [KeyboardTextInsertionAction]) {
         guard VoiceKeyboardTextLimits.isValid(transcript),
               let operations = VoiceInputPipeline(locale: locale).boundedOperations(
                   for: transcript,
                   documentContextBeforeInput: context,
-                  maximumOperationCount: VoiceInputPipeline.maximumOperationCount
+                  maximumOperationCount: VoiceInputPipeline.maximumOperationCount,
+                  omittingLiteralPrefix: omittingLiteralPrefix, interpretCommands: interpretCommands
               ) else {
-            return errorEvent(.recognitionFailed("Voice input produced too many editing operations."))
+            return (.keyboardSpeechCapture(.recognitionFailed(.recognitionFailed("Voice input produced too many editing operations."))), [])
         }
         guard !operations.isEmpty else {
-            return .final(.keyboardSpeechCapture(.unsupportedCommand("Nothing to delete")), [])
+            return (.keyboardSpeechCapture(.unsupportedCommand("Nothing to delete")), [])
         }
         let actions = operations.map { operation -> KeyboardTextInsertionAction in
             switch operation {
@@ -139,11 +190,11 @@ final class KeyboardSpeechCaptureCoordinator {
             }
             state = .inserted(inserted.isEmpty ? "Text edited" : inserted)
         }
-        return .final(.keyboardSpeechCapture(state), actions)
+        return (.keyboardSpeechCapture(state), actions)
     }
 
     private static func errorEvent(_ error: SpeechRecognitionError) -> Event {
-        .presentation(.keyboardSpeechCapture(.recognitionFailed(error)))
+        .failure(.keyboardSpeechCapture(.recognitionFailed(error)))
     }
 
     private static let starting = SpeechCapturePresentationSnapshot(
@@ -155,12 +206,4 @@ final class KeyboardSpeechCaptureCoordinator {
         voiceActivityState: .processing
     )
 
-    private static let processing = SpeechCapturePresentationSnapshot(
-        transcriptText: "",
-        statusText: "Transcribing…",
-        microphoneTitle: "Processing",
-        microphoneTone: .warning,
-        activeMicrophoneBars: .checking,
-        voiceActivityState: .processing
-    )
 }

@@ -42,7 +42,7 @@ final class WebKitDictationCaptureTests: XCTestCase {
                 finished.fulfill()
             case .failed, .startupFailed:
                 XCTFail("The local WebKit page should deliver real PCM messages")
-            case .stopping:
+            case .stopping, .segment:
                 break
             }
         }
@@ -51,6 +51,66 @@ final class WebKitDictationCaptureTests: XCTestCase {
         await fulfillment(of: [finished], timeout: 3)
         XCTAssertEqual(sampleCount, 1600)
         XCTAssertTrue(container.subviews.compactMap { $0 as? WKWebView }.isEmpty)
+    }
+
+    func testTwoLiveSegmentsAndStopDrainDoNotReplayAudio() async throws {
+        let webView = try await loadPage()
+        try await installMicrophone(in: webView, producesPCM: true)
+        let started = expectation(description: "recording")
+        let segments = expectation(description: "two live segments")
+        segments.expectedFulfillmentCount = 2
+        let stopped = expectation(description: "tail drained")
+        var counts: [Int] = []
+        capture.start(permitsMicrophone: { true }) { event in
+            switch event {
+            case .started: started.fulfill()
+            case .segment(let pcm):
+                counts.append(pcm.sampleCount)
+                segments.fulfill()
+            case .finished(let pcm):
+                counts.append(pcm.sampleCount)
+                stopped.fulfill()
+            case .failed, .startupFailed: XCTFail("Capture failed")
+            case .stopping: break
+            }
+        }
+        await fulfillment(of: [started], timeout: 5)
+        // First 1600 samples came from resume(). Supply two speech/pause
+        // boundaries through the real audio callback, followed by a short tail.
+        _ = try await webView.evaluateJavaScript("""
+        function feed(n, value) {
+            window.testProcessor.onaudioprocess({
+                inputBuffer: { getChannelData: () => new Float32Array(n).fill(value) },
+                outputBuffer: { getChannelData: () => new Float32Array(n) }
+            });
+        }
+        feed(11200, 0); feed(1600, 0.25); feed(11200, 0); feed(321, 0.5);
+        void 0;
+        """)
+        await fulfillment(of: [segments], timeout: 5)
+        XCTAssertEqual(counts, [12800, 12800])
+        XCTAssertFalse(container.subviews.compactMap { $0 as? WKWebView }.isEmpty)
+        capture.finish()
+        await fulfillment(of: [stopped], timeout: 3)
+        XCTAssertEqual(counts, [12800, 12800, 321])
+    }
+
+    func testQuietPCMReachesNativeSegmentDelivery() async throws {
+        let webView = try await loadPage()
+        let script = Self.fakeMicrophone
+            .replacingOccurrences(of: "new Float32Array(1600)", with: "new Float32Array(128000)")
+            .replacingOccurrences(of: "fill(0.25)", with: "fill(1 / 32768)")
+        _ = try await webView.evaluateJavaScript(script + "; void 0")
+        let delivered = expectation(description: "quiet segment reaches native delivery")
+        capture.start(permitsMicrophone: { true }) { event in
+            if case .segment(let pcm) = event {
+                XCTAssertEqual(pcm.sampleCount, 128000)
+                XCTAssertGreaterThan(pcm.normalizedSamples()[0], 0)
+                delivered.fulfill()
+            }
+        }
+        await fulfillment(of: [delivered], timeout: 5)
+        capture.cancel()
     }
 
     func testNoPCMTriggersStartupFallbackAndDisposesPage() async throws {
@@ -128,6 +188,7 @@ final class WebKitDictationCaptureTests: XCTestCase {
         createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
         createScriptProcessor() {
             this.processor = { connect() {}, disconnect() {} };
+            window.testProcessor = this.processor;
             return this.processor;
         }
         resume() {

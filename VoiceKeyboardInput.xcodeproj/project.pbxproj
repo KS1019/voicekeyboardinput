@@ -10,8 +10,11 @@
 		027668303411AC9D09BA8A34 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F414C4F96A29B145506E8D42 /* PrivacyInfo.xcprivacy */; };
 		0A81C1523E325DA035FA4B5C /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 9AD2555DE61EC01BF5E7E48D /* VoiceKeyboardModels */; };
 		0CC977A46331A4524876665A /* VoiceKeyboardInputPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 654F1526357CFEBE4C2E1AEB /* VoiceKeyboardInputPreviewTests.swift */; };
+		0D19611E80437167C5702671 /* VoiceCompositionExperimentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82F9893ED4A485DB292520A8 /* VoiceCompositionExperimentTests.swift */; };
+		1347F427FE3ADC89995EE0CA /* KeyboardSpeechCaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 511A94BF8DEED82E5D264C13 /* KeyboardSpeechCaptureCoordinator.swift */; };
 		18749120FF40031274693ED5 /* SnapshottingTests in Frameworks */ = {isa = PBXBuildFile; productRef = 73BE31DA7A536DA7918CC001 /* SnapshottingTests */; };
 		1AE3E573E9BFEF72FD5B30BB /* VoiceKeyboardPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = DB43C5971A85B4C594676C15 /* VoiceKeyboardPresentation */; };
+		1AF5EC95B841D8AAD2C60E39 /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711AA4AFBC4B2CDBD62F17DA /* KeyboardViewController.swift */; };
 		1EAEDECF46F339B06204F4C1 /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 97A49A68D0E59F4A40298C00 /* VoiceKeyboardModels */; };
 		26E6373E16DCBF281B7341FF /* DictationCapture.html in Resources */ = {isa = PBXBuildFile; fileRef = BFDD48D8B1600461D50BBBFB /* DictationCapture.html */; };
 		27888B8BD009D6FF9B49B14B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0CAEE83AFDA5390DAD28016 /* Assets.xcassets */; };
@@ -20,12 +23,15 @@
 		3511727E00E4AFFB4946DCC1 /* WebKitDictationCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFDD017C1EA37DA6EC27CE0C /* WebKitDictationCaptureTests.swift */; };
 		3D86FC72E1103F2579AC5CEB /* WebKitDictationCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0961FBB9921EEC620ADCE0 /* WebKitDictationCapture.swift */; };
 		3FE664CDCC055A96C2A47C99 /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711AA4AFBC4B2CDBD62F17DA /* KeyboardViewController.swift */; };
+		40056EFEEDF41F6F8AD36591 /* VoiceKeyboardCore in Frameworks */ = {isa = PBXBuildFile; productRef = 319640D1281DE53EEE8F7B0E /* VoiceKeyboardCore */; };
 		4449B055026C6E74E16F12D6 /* KeyboardRootViewPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20DF6CEB98D29105405D8AD2 /* KeyboardRootViewPreview.swift */; };
 		49B8F15398B8F4DEB6F48E0B /* VoiceKeyboardCommandPipeline in Frameworks */ = {isa = PBXBuildFile; productRef = CB00A63C89651DE419CC4B91 /* VoiceKeyboardCommandPipeline */; };
 		4A004FDF680754D2225D2B11 /* VoiceInputLaunchModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B072E74E43466D1C21635BE3 /* VoiceInputLaunchModelTests.swift */; };
 		4A3CA6CEC598E362A5D33656 /* VoiceKeyboardPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D33502A6180D2AE9FF5DD2 /* VoiceKeyboardPalette.swift */; };
 		4AAAB0B9F861276E7C28928C /* VoiceKeyboardInterfaces in Frameworks */ = {isa = PBXBuildFile; productRef = 92AD55E9B95DF56F69039605 /* VoiceKeyboardInterfaces */; };
+		5108DA7C3D747CABDCCC72EA /* VoiceKeyboardPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = DFBBC05683279F769A566CC2 /* VoiceKeyboardPresentation */; };
 		532C570BC0820C10A82B463A /* OnboardingPermissionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED317320ECA4BD0D64211DA1 /* OnboardingPermissionModel.swift */; };
+		576BE346660223EC78E9E34A /* VoiceActivityMeterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */; };
 		65E325261794A0940527C7C4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1EB4E021CA9301314BBC924 /* ContentView.swift */; };
 		723A12F549B33D3567FBFA06 /* VoiceKeyboardSharedStorage in Frameworks */ = {isa = PBXBuildFile; productRef = EEA575842BD3C1E6F615A7BB /* VoiceKeyboardSharedStorage */; };
 		7359B653BA35B9F71CD8205D /* VoiceKeyboardExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 28C6C977F3D9454AEFE01DB2 /* VoiceKeyboardExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -33,6 +39,7 @@
 		790E56607CA15893506BA5AF /* VoiceKeyboardModels in Frameworks */ = {isa = PBXBuildFile; productRef = 560550F61295842D6AFDC23E /* VoiceKeyboardModels */; };
 		7A7ADA5CDE82737C23819424 /* VoiceKeyboardInputUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB0C45B415B57E9B1974FCED /* VoiceKeyboardInputUITests.swift */; };
 		803A6728246040701F5F9834 /* VoiceKeyboardInputApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E668C0FD03896C6082C211D8 /* VoiceKeyboardInputApp.swift */; };
+		820ABF865D224BFC096EEC49 /* VoiceKeyboardPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D33502A6180D2AE9FF5DD2 /* VoiceKeyboardPalette.swift */; };
 		901739A056D8ACAD684AB580 /* PresentationTone+UIKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49D619643FD98CF014DB0F /* PresentationTone+UIKit.swift */; };
 		944DA559A49F0088A301662F /* VoiceInputLaunchModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 284539418006C6BC0E82E233 /* VoiceInputLaunchModel.swift */; };
 		9A572158FF76BC8C5803C1AB /* DictationCapture.html in Resources */ = {isa = PBXBuildFile; fileRef = BFDD48D8B1600461D50BBBFB /* DictationCapture.html */; };
@@ -44,18 +51,24 @@
 		A5748B300F4160009EA52794 /* KeyboardFileSpeechRecognition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D48775A48661B33BF8DE20 /* KeyboardFileSpeechRecognition.swift */; };
 		A6D8352D0ACAC087E6D263C1 /* AudioSessionRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13B1E8AEE5DB2E2137419C47 /* AudioSessionRouting.swift */; };
 		AFDB19B84215FFBF72CD0F65 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD6981CA7E7609A099378F30 /* OnboardingView.swift */; };
+		B123CBA6C2809C1271956662 /* KeyboardSpeechCaptureCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F7CE752848E5525855DFC84 /* KeyboardSpeechCaptureCoordinatorTests.swift */; };
 		B509603735CECD961B5BFD77 /* VoiceKeyboardSharedStorage in Frameworks */ = {isa = PBXBuildFile; productRef = 6343E379C0582196C6AEBCD5 /* VoiceKeyboardSharedStorage */; };
 		B9C5D7C74627FCAAB5F87403 /* VoiceKeyboardPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D33502A6180D2AE9FF5DD2 /* VoiceKeyboardPalette.swift */; };
 		BDFA298A77FF05845AC3B359 /* VoiceActivityMeterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */; };
+		C0357F88EB64BC379E711B89 /* KeyboardFileSpeechRecognition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D48775A48661B33BF8DE20 /* KeyboardFileSpeechRecognition.swift */; };
 		C0A88DBA15728CC3694C2FEE /* KeyboardRootViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */; };
 		C0E7AFF1A4E851CE1D95CDD8 /* AppSpeechDictationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BD7AB6375CF09FE52E7AF16 /* AppSpeechDictationService.swift */; };
+		C6BE9927A27A797612CC638B /* VoiceCompositionExperiment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C35C71349FF235DFE88D5C06 /* VoiceCompositionExperiment.swift */; };
 		C99A9B53D76BFF3AAD252C2E /* VoiceKeyboardInterfaces in Frameworks */ = {isa = PBXBuildFile; productRef = 7DB9C02A1F53C172FF702C19 /* VoiceKeyboardInterfaces */; };
 		D3ABE0B1B9C43C27BAB29563 /* OnboardingIllustration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F1FC0A0FC397B98AAECC587 /* OnboardingIllustration.swift */; };
 		DB9ED879F0EB884B1378D44E /* VoiceKeyboardPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = 867B29CEA76EDCE20EBB06D5 /* VoiceKeyboardPresentation */; };
+		DE794ACC99056364B67FB2F1 /* PresentationTone+UIKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49D619643FD98CF014DB0F /* PresentationTone+UIKit.swift */; };
 		E8470A6DD4BF648039EBBA0C /* KeyboardRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */; };
 		F0C5189DFAC5632D48DFCD5B /* OnboardingPermissionModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23DB329619431E1E0E787834 /* OnboardingPermissionModelTests.swift */; };
 		F0FC88AE7DDCB9F936E296E8 /* VoiceKeyboardAudioExceptionGuard.m in Sources */ = {isa = PBXBuildFile; fileRef = 9C852B15A8EEC9ECC7177DF6 /* VoiceKeyboardAudioExceptionGuard.m */; };
+		F43C3CF9B40C01C4F9119203 /* ContainingAppOpener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A28AE15EE06A072B2DCA34 /* ContainingAppOpener.swift */; };
 		FA7AD15248F70FD0FE8BC9E6 /* ContainingAppOpener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A28AE15EE06A072B2DCA34 /* ContainingAppOpener.swift */; };
+		FD4D2D3851B7DC8222F27B48 /* KeyboardRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -104,6 +117,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		0F7CE752848E5525855DFC84 /* KeyboardSpeechCaptureCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSpeechCaptureCoordinatorTests.swift; sourceTree = "<group>"; };
 		13B1E8AEE5DB2E2137419C47 /* AudioSessionRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionRouting.swift; sourceTree = "<group>"; };
 		17D48775A48661B33BF8DE20 /* KeyboardFileSpeechRecognition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardFileSpeechRecognition.swift; sourceTree = "<group>"; };
 		1B49D619643FD98CF014DB0F /* PresentationTone+UIKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PresentationTone+UIKit.swift"; sourceTree = "<group>"; };
@@ -122,6 +136,7 @@
 		711AA4AFBC4B2CDBD62F17DA /* KeyboardViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardViewController.swift; sourceTree = "<group>"; };
 		734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootViewTests.swift; sourceTree = "<group>"; };
 		80949C0741E3878B55AF0C5B /* VoiceActivityMeterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceActivityMeterView.swift; sourceTree = "<group>"; };
+		82F9893ED4A485DB292520A8 /* VoiceCompositionExperimentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCompositionExperimentTests.swift; sourceTree = "<group>"; };
 		94E779FA375DB950BC1C2DF8 /* KeyboardRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRootView.swift; sourceTree = "<group>"; };
 		97D33502A6180D2AE9FF5DD2 /* VoiceKeyboardPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardPalette.swift; sourceTree = "<group>"; };
 		97F9251E6840A81273F7991A /* AppAudioInputProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAudioInputProbe.swift; sourceTree = "<group>"; };
@@ -131,6 +146,7 @@
 		AAA63B156405B0FD473FB9D6 /* VoiceKeyboardExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VoiceKeyboardExtension.entitlements; sourceTree = "<group>"; };
 		B072E74E43466D1C21635BE3 /* VoiceInputLaunchModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputLaunchModelTests.swift; sourceTree = "<group>"; };
 		BFDD48D8B1600461D50BBBFB /* DictationCapture.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = DictationCapture.html; sourceTree = "<group>"; };
+		C35C71349FF235DFE88D5C06 /* VoiceCompositionExperiment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCompositionExperiment.swift; sourceTree = "<group>"; };
 		CB0C45B415B57E9B1974FCED /* VoiceKeyboardInputUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceKeyboardInputUITests.swift; sourceTree = "<group>"; };
 		CD872C669A4B3BB59B32888C /* VoiceKeyboardPackage */ = {isa = PBXFileReference; lastKnownFileType = folder; name = VoiceKeyboardPackage; path = Packages/VoiceKeyboardPackage; sourceTree = SOURCE_ROOT; };
 		D43FFA410D9D59B60A0D530D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -164,6 +180,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				790E56607CA15893506BA5AF /* VoiceKeyboardModels in Frameworks */,
+				40056EFEEDF41F6F8AD36591 /* VoiceKeyboardCore in Frameworks */,
+				5108DA7C3D747CABDCCC72EA /* VoiceKeyboardPresentation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -282,7 +300,9 @@
 			isa = PBXGroup;
 			children = (
 				734ABC07C472C8F1BFA12F8F /* KeyboardRootViewTests.swift */,
+				0F7CE752848E5525855DFC84 /* KeyboardSpeechCaptureCoordinatorTests.swift */,
 				23DB329619431E1E0E787834 /* OnboardingPermissionModelTests.swift */,
+				82F9893ED4A485DB292520A8 /* VoiceCompositionExperimentTests.swift */,
 				B072E74E43466D1C21635BE3 /* VoiceInputLaunchModelTests.swift */,
 				EFDD017C1EA37DA6EC27CE0C /* WebKitDictationCaptureTests.swift */,
 			);
@@ -301,6 +321,7 @@
 				9F1FC0A0FC397B98AAECC587 /* OnboardingIllustration.swift */,
 				ED317320ECA4BD0D64211DA1 /* OnboardingPermissionModel.swift */,
 				DD6981CA7E7609A099378F30 /* OnboardingView.swift */,
+				C35C71349FF235DFE88D5C06 /* VoiceCompositionExperiment.swift */,
 				284539418006C6BC0E82E233 /* VoiceInputLaunchModel.swift */,
 				D7C21F21626C75804D7A00AC /* VoiceKeyboardInput.entitlements */,
 				E668C0FD03896C6082C211D8 /* VoiceKeyboardInputApp.swift */,
@@ -327,6 +348,8 @@
 			name = VoiceKeyboardUIKitTests;
 			packageProductDependencies = (
 				560550F61295842D6AFDC23E /* VoiceKeyboardModels */,
+				319640D1281DE53EEE8F7B0E /* VoiceKeyboardCore */,
+				DFBBC05683279F769A566CC2 /* VoiceKeyboardPresentation */,
 			);
 			productName = VoiceKeyboardUIKitTests;
 			productReference = 64294E39CA46A70709601B15 /* VoiceKeyboardUIKitTests.xctest */;
@@ -538,6 +561,7 @@
 				AFDB19B84215FFBF72CD0F65 /* OnboardingView.swift in Sources */,
 				2FE2A3FC8491AE79E57B263E /* PresentationTone+UIKit.swift in Sources */,
 				BDFA298A77FF05845AC3B359 /* VoiceActivityMeterView.swift in Sources */,
+				C6BE9927A27A797612CC638B /* VoiceCompositionExperiment.swift in Sources */,
 				944DA559A49F0088A301662F /* VoiceInputLaunchModel.swift in Sources */,
 				F0FC88AE7DDCB9F936E296E8 /* VoiceKeyboardAudioExceptionGuard.m in Sources */,
 				803A6728246040701F5F9834 /* VoiceKeyboardInputApp.swift in Sources */,
@@ -557,9 +581,19 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F43C3CF9B40C01C4F9119203 /* ContainingAppOpener.swift in Sources */,
+				C0357F88EB64BC379E711B89 /* KeyboardFileSpeechRecognition.swift in Sources */,
+				FD4D2D3851B7DC8222F27B48 /* KeyboardRootView.swift in Sources */,
 				C0A88DBA15728CC3694C2FEE /* KeyboardRootViewTests.swift in Sources */,
+				1347F427FE3ADC89995EE0CA /* KeyboardSpeechCaptureCoordinator.swift in Sources */,
+				B123CBA6C2809C1271956662 /* KeyboardSpeechCaptureCoordinatorTests.swift in Sources */,
+				1AF5EC95B841D8AAD2C60E39 /* KeyboardViewController.swift in Sources */,
 				F0C5189DFAC5632D48DFCD5B /* OnboardingPermissionModelTests.swift in Sources */,
+				DE794ACC99056364B67FB2F1 /* PresentationTone+UIKit.swift in Sources */,
+				576BE346660223EC78E9E34A /* VoiceActivityMeterView.swift in Sources */,
+				0D19611E80437167C5702671 /* VoiceCompositionExperimentTests.swift in Sources */,
 				4A004FDF680754D2225D2B11 /* VoiceInputLaunchModelTests.swift in Sources */,
+				820ABF865D224BFC096EEC49 /* VoiceKeyboardPalette.swift in Sources */,
 				9B38F638666465809C75BDCB /* WebKitDictationCapture.swift in Sources */,
 				3511727E00E4AFFB4946DCC1 /* WebKitDictationCaptureTests.swift in Sources */,
 			);
@@ -972,6 +1006,10 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardCore;
 		};
+		319640D1281DE53EEE8F7B0E /* VoiceKeyboardCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKeyboardCore;
+		};
 		560550F61295842D6AFDC23E /* VoiceKeyboardModels */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardModels;
@@ -1010,6 +1048,10 @@
 			productName = VoiceKeyboardCommandPipeline;
 		};
 		DB43C5971A85B4C594676C15 /* VoiceKeyboardPresentation */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKeyboardPresentation;
+		};
+		DFBBC05683279F769A566CC2 /* VoiceKeyboardPresentation */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKeyboardPresentation;
 		};

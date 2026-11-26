@@ -44,7 +44,7 @@ final class OnboardingPermissionModel {
         },
         requestSpeech: @escaping () async -> Void = {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                SFSpeechRecognizer.requestAuthorization { _ in continuation.resume() }
+                SFSpeechRecognizer.requestAuthorization { @Sendable _ in continuation.resume() }
             }
         }
     ) {

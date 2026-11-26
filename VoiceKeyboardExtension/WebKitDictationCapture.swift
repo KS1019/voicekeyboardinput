@@ -2,12 +2,21 @@ import UIKit
 import WebKit
 import VoiceKeyboardModels
 
+@MainActor
+protocol KeyboardAudioCapturing: AnyObject {
+    func preload(in container: UIView)
+    func start(permitsMicrophone: @escaping () -> Bool, handle: @escaping (WebKitDictationCapture.Event) -> Void)
+    func finish()
+    func cancel()
+}
+
 /// Owns one local WebKit document and discards it at the end of each attempt.
 @MainActor
-final class WebKitDictationCapture: NSObject, WKNavigationDelegate, WKUIDelegate {
+final class WebKitDictationCapture: NSObject, WKNavigationDelegate, WKUIDelegate, KeyboardAudioCapturing {
     enum Event {
         case started
         case stopping
+        case segment(DictationPCM)
         case finished(DictationPCM)
         case startupFailed
         case failed
@@ -142,7 +151,7 @@ final class WebKitDictationCapture: NSObject, WKNavigationDelegate, WKUIDelegate
 
     private func finishDrain() {
         guard let session, session.phase == .draining else { return }
-        end(session.pcm.sampleCount > 0 ? .finished(session.pcm) : .failed)
+        end(.finished(session.pcm))
     }
 
     private func end(_ event: Event) {
@@ -242,6 +251,10 @@ final class WebKitDictationCapture: NSObject, WKNavigationDelegate, WKUIDelegate
                 session?.handle(.started)
             }
             if session?.pcm.isFull == true { finish() }
+        case "segment" where body.count == 2:
+            guard session?.phase == .recording, let pcm = session?.pcm else { return }
+            self.session?.pcm = DictationPCM()
+            if pcm.sampleCount > 0 { session?.handle(.segment(pcm)) }
         case "stopped" where body.count == 2:
             finishDrain()
         case "failed" where body.count == 2:

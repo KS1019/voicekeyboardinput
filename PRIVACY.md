@@ -1,6 +1,6 @@
 # Voice Keyboard Privacy Policy
 
-Last updated: 2026-11-21
+Last updated: 2026-11-25
 
 Voice Keyboard is designed to process voice input only when you explicitly
 start voice input.
@@ -12,7 +12,8 @@ app and Full Access is enabled, the keyboard can attempt experimental WebKit
 microphone capture without opening the app. Capture begins only when you tap
 the microphone control. Preloading the recording page does not activate the
 microphone. The keyboard displays capture and processing states; stopping
-capture submits the recording to Apple Speech for recognition. Leaving the
+capture drains the final audio segment through on-device Apple Speech recognition.
+Finalized segments can be recognized and inserted while recording continues. Leaving the
 keyboard or cancelling discards the attempt. Recordings are limited to one
 minute. Temporary audio files are deleted when the attempt finishes or is
 cancelled; no audio history is maintained.
@@ -21,9 +22,10 @@ If capture cannot start, the keyboard falls back to the containing Voice
 Keyboard app. The app configures the current audio route, including supported
 Bluetooth microphones, and uses Apple speech-recognition frameworks. WebKit
 capture in a keyboard is not guaranteed to work on every iOS version or device.
-Depending on Apple’s speech-recognition availability and settings, audio may
-be processed by Apple’s services. Voice Keyboard does not operate an independent
-speech server or send audio to a separate third-party transcription provider.
+Both recognition paths require on-device recognition and reject unsupported local
+recognizers. There is no fallback to Apple server recognition or a third-party
+transcription provider. Required speech assets must already be available; voice
+input does not download models. Voice Keyboard does not operate a speech server.
 
 ## Temporary transcript handoff
 

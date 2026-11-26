@@ -73,6 +73,46 @@ async function record(blockLengths, sampleRate) {
     const tail = await record([1024], 48000);
     assert.equal(tail.length, 682, 'stop must flush a short final PCM chunk');
 
+    // Use the real start/audio callback/stop entry points. Two pauses must
+    // publish boundaries while the same microphone stays open; Stop drains
+    // the short tail exactly once.
+    const liveMic = microphone();
+    const live = setup(async () => liveMic.stream, 16000);
+    await live.context.startDictation('live');
+    function feed(count, value) {
+        live.processors[0].onaudioprocess({
+            inputBuffer: { getChannelData: () => new Float32Array(count).fill(value) },
+            outputBuffer: { getChannelData: () => new Float32Array(count) }
+        });
+    }
+    feed(8000, 0.25);
+    feed(16000, 0);
+    assert.equal(live.messages.filter(m => m.type === 'segment').length, 1);
+    assert.equal(liveMic.track.stopped, undefined, 'pause must not stop recording');
+    feed(8000, -0.25);
+    feed(16000, 0);
+    assert.equal(live.messages.filter(m => m.type === 'segment').length, 2);
+    feed(1234, 0.5);
+    live.context.stopDictation('live');
+    live.context.stopDictation('live');
+    assert.equal(live.messages.filter(m => m.type === 'stopped').length, 1);
+    const livePCM = Buffer.concat(live.messages.filter(m => m.type === 'pcm')
+        .map(m => Buffer.from(m.data, 'base64')));
+    assert.equal(livePCM.length, (48000 + 1234) * 2, 'no duplicated or lost PCM across boundaries');
+    assert.equal(livePCM.readInt16LE(livePCM.length - 2), 16384);
+
+    const continuous = setup(async () => microphone().stream, 16000);
+    await continuous.context.startDictation('continuous');
+    continuous.processors[0].onaudioprocess({
+        inputBuffer: { getChannelData: () => new Float32Array(16000 * 17).fill(0.1) },
+        outputBuffer: { getChannelData: () => new Float32Array(16000 * 17) }
+    });
+    assert.equal(continuous.messages.filter(m => m.type === 'segment').length, 2,
+        'uninterrupted speech must commit without waiting for Stop');
+    continuous.context.stopDictation('continuous');
+    assert.equal(continuous.messages.filter(m => m.type === 'pcm')
+        .reduce((sum, m) => sum + Buffer.from(m.data, 'base64').length, 0), 16000 * 17 * 2);
+
     const failure = setup(async () => { throw new Error('permission denied'); });
     await failure.context.startDictation('denied');
     assert.deepEqual(failure.messages.map(message => message.type), ['failed']);

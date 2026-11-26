@@ -175,6 +175,8 @@ struct ContentView: View {
     private var developerDetails: some View {
         DisclosureGroup("Developer Details", isExpanded: $showsDeveloperDetails) {
             VStack(alignment: .leading, spacing: 14) {
+                NavigationLink("Composition Lab") { VoiceCompositionExperimentView() }
+                    .accessibilityIdentifier("composition.open")
                 commandPreviewPanel
                 setupPanel
                 validationPanel
@@ -202,7 +204,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("keyboard.qa.textField")
 
-                Text("Use this field to try voice input, check final text insertion, and test Delete / Return.")
+                Text("Use this field to try voice input, check live text insertion, and test Delete / Return.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("keyboard.qa.instructions")

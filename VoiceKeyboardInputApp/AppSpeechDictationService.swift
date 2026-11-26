@@ -60,6 +60,18 @@ enum AppAudioEngineOperationStatus: Sendable {
     case timedOut
 }
 
+/// Audio notifications may be posted while the audio subsystem holds a lock.
+/// Callers hop to MainActor explicitly for UI/session state updates.
+enum AppAudioNotifications {
+    static func observe(
+        _ name: Notification.Name,
+        object: Any?,
+        using block: @escaping @Sendable (Notification) -> Void
+    ) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(forName: name, object: object, queue: nil, using: block)
+    }
+}
+
 @MainActor
 final class AppSpeechDictationService {
     func transcribe(
@@ -320,7 +332,8 @@ final class AppSpeechDictationRun {
             throw AppSpeechDictationError.alreadyStarted
         }
         didStart = true
-        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
+        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable,
+              recognizer.supportsOnDeviceRecognition else {
             throw AppSpeechDictationError.recognizerUnavailable
         }
 
@@ -396,9 +409,7 @@ final class AppSpeechDictationRun {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
+        request.requiresOnDeviceRecognition = true
         self.request = request
         let tapGate = AudioTapGate()
         audioTapGate = tapGate
@@ -477,9 +488,11 @@ final class AppSpeechDictationRun {
                         self.requestFinalResult()
                     }
                 }
-                task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+                task = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, error in
+                    let transcript = result?.bestTranscription.formattedString
+                    let isFinal = result?.isFinal == true
                     Task { @MainActor in
-                        self?.handle(result: result, error: error)
+                        self?.handle(transcript: transcript, isFinal: isFinal, error: error)
                     }
                 }
             }
@@ -490,12 +503,12 @@ final class AppSpeechDictationRun {
         }
     }
 
-    private func handle(result: SFSpeechRecognitionResult?, error: Error?) {
-        if let transcript = result?.bestTranscription.formattedString, !transcript.isEmpty {
+    private func handle(transcript: String?, isFinal: Bool, error: Error?) {
+        if let transcript, !transcript.isEmpty {
             latestTranscript = transcript
         }
 
-        if result?.isFinal == true {
+        if isFinal {
             finishWithLatestTranscript()
             return
         }
@@ -693,12 +706,10 @@ final class AppSpeechDictationRun {
     }
 
     private func installAudioSessionObservers() {
-        let notificationCenter = NotificationCenter.default
         let preparationMonitor = self.preparationMonitor
-        interruptionObserver = notificationCenter.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
+        interruptionObserver = AppAudioNotifications.observe(
+            AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
         ) { [weak self, preparationMonitor] notification in
             preparationMonitor.markChanged()
             guard let interruptionTypeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -708,10 +719,9 @@ final class AppSpeechDictationRun {
                 self?.complete(.failure(AppSpeechDictationError.audioInterrupted))
             }
         }
-        routeChangeObserver = notificationCenter.addObserver(
-            forName: AVAudioSession.routeChangeNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
+        routeChangeObserver = AppAudioNotifications.observe(
+            AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance()
         ) { [weak self, preparationMonitor] _ in
             preparationMonitor.markChanged()
             Task { @MainActor in
@@ -734,10 +744,9 @@ final class AppSpeechDictationRun {
                 self.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
             }
         }
-        engineConfigurationObserver = notificationCenter.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
+        engineConfigurationObserver = AppAudioNotifications.observe(
+            .AVAudioEngineConfigurationChange,
+            object: engine
         ) { [weak self, preparationMonitor] _ in
             preparationMonitor.markChanged()
             Task { @MainActor in
@@ -751,20 +760,18 @@ final class AppSpeechDictationRun {
                 self.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
             }
         }
-        mediaServicesLostObserver = notificationCenter.addObserver(
-            forName: AVAudioSession.mediaServicesWereLostNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
+        mediaServicesLostObserver = AppAudioNotifications.observe(
+            AVAudioSession.mediaServicesWereLostNotification,
+            object: AVAudioSession.sharedInstance()
         ) { [weak self, preparationMonitor] _ in
             preparationMonitor.markChanged()
             Task { @MainActor in
                 self?.complete(.failure(AppSpeechDictationError.audioConfigurationChanged))
             }
         }
-        mediaServicesResetObserver = notificationCenter.addObserver(
-            forName: AVAudioSession.mediaServicesWereResetNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
+        mediaServicesResetObserver = AppAudioNotifications.observe(
+            AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance()
         ) { [weak self, preparationMonitor] _ in
             preparationMonitor.markChanged()
             Task { @MainActor in

@@ -7,6 +7,20 @@ typealias SharedDictationSessionStore = VoiceKeyboardInput.SharedDictationSessio
 
 @MainActor
 final class VoiceInputLaunchModelTests: XCTestCase {
+    func testAudioNotificationPosterDoesNotWaitForMainThread() {
+        let name = Notification.Name("VoiceKeyboardTests.audioRouteChanged")
+        let token = AppAudioNotifications.observe(name, object: nil) { _ in }
+        defer { NotificationCenter.default.removeObserver(token) }
+        let posted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            NotificationCenter.default.post(name: name, object: nil)
+            posted.signal()
+        }
+        // Model the main thread waiting on an audio lock. Notification posting
+        // must complete even when the main queue cannot run its next job.
+        XCTAssertEqual(posted.wait(timeout: .now() + 0.5), .success)
+    }
+
     func testTimedOutAudioOperationRetainsOwnershipUntilLateDeactivation() {
         let coordinator = AppAudioSessionOperationCoordinator()
         guard let token = coordinator.begin() else {

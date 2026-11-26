@@ -412,6 +412,15 @@ package struct VoiceCommandParser: Sendable {
         return JapaneseNaturalLanguageBoundaries(prefix: prefix, suffix: suffix)
     }
 
+    package func mayContainStreamingCommand(_ transcript: String) -> Bool {
+        let words = transcript.lowercased().split(whereSeparator: \.isWhitespace)
+        let starts = Set(commandMap.keys.compactMap { $0.split(separator: " ").first })
+        if words.contains(where: { starts.contains($0) }) { return true }
+        return isJapaneseLocale && japaneseUnspacedAliases.contains { match in
+            match.alias.first.map { transcript.contains($0) } == true
+        }
+    }
+
     package func hasIncompleteCommandPrefix(_ transcript: String) -> Bool {
         let words = transcript
             .split(whereSeparator: { $0.isWhitespace })

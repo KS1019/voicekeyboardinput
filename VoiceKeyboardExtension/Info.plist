@@ -41,6 +41,6 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Voice Keyboard uses the microphone after you tap Speak to start voice input.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Voice Keyboard uses Apple speech recognition to convert your voice input to text. Audio may be processed by Apple.</string>
+	<string>Voice Keyboard uses on-device Apple speech recognition to convert your voice input to text. Voice input is unavailable when the local recognizer is unsupported.</string>
 </dict>
 </plist>

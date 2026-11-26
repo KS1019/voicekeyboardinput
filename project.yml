@@ -51,7 +51,7 @@ targets:
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         NSMicrophoneUsageDescription: Voice Keyboard uses the microphone after you tap Speak to start voice input.
-        NSSpeechRecognitionUsageDescription: Voice Keyboard uses Apple speech recognition to convert your voice input to text. Audio may be processed by Apple.
+        NSSpeechRecognitionUsageDescription: Voice Keyboard uses on-device Apple speech recognition to convert your voice input to text. Voice input is unavailable when the local recognizer is unsupported.
         NSExtension:
           NSExtensionAttributes:
             IsASCIICapable: true
@@ -106,7 +106,7 @@ targets:
               - voicekeyboard
         UILaunchScreen: {}
         NSMicrophoneUsageDescription: Voice Keyboard Input uses the microphone only when you explicitly start voice input or microphone validation.
-        NSSpeechRecognitionUsageDescription: Voice Keyboard Input uses speech recognition only after you explicitly start voice input. Audio may be processed by Apple to recognize speech, and recognized text is temporarily shared with the keyboard for insertion.
+        NSSpeechRecognitionUsageDescription: Voice Keyboard Input uses on-device speech recognition only after you explicitly start voice input. Recognized text is temporarily shared with the keyboard for insertion. Voice input is unavailable when the local recognizer is unsupported.
         UIBackgroundModes:
           - audio
     entitlements:
@@ -157,12 +157,23 @@ targets:
     sources:
       - VoiceKeyboardUIKitTests
       - VoiceKeyboardExtension/WebKitDictationCapture.swift
+      - VoiceKeyboardExtension/KeyboardSpeechCaptureCoordinator.swift
+      - VoiceKeyboardExtension/KeyboardViewController.swift
+      - VoiceKeyboardExtension/ContainingAppOpener.swift
+      - path: VoiceKeyboardUIKit
+        excludes:
+          - KeyboardRootViewPreview.swift
+      - VoiceKeyboardExtension/KeyboardFileSpeechRecognition.swift
       - path: VoiceKeyboardExtension/DictationCapture.html
         buildPhase: resources
     dependencies:
       - target: VoiceKeyboardInput
       - package: VoiceKeyboardPackage
         product: VoiceKeyboardModels
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardCore
+      - package: VoiceKeyboardPackage
+        product: VoiceKeyboardPresentation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ks1019.voicekeyboardinput.uikittests

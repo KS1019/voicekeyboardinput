@@ -27,6 +27,23 @@ function flush(session) {
     session.samples = 0;
 }
 
+function segmentIfNeeded(session, value) {
+    session.segmentSamples++;
+    if (Math.abs(value) >= 0.01) {
+        session.voicedSamples++;
+        session.silentSamples = 0;
+    } else {
+        session.silentSamples++;
+    }
+    // Commit at a pause, with an eight-second ceiling for uninterrupted speech.
+    if ((session.voicedSamples >= 1600 && session.silentSamples >= 11200)
+        || session.segmentSamples >= outputRate * 8) {
+        flush(session);
+        post(session, 'segment');
+        session.segmentSamples = session.voicedSamples = session.silentSamples = 0;
+    }
+}
+
 function resample(session, input, inputRate) {
     // Average each output interval. Integer time units preserve the phase
     // across input callbacks at rates such as 44.1 kHz.
@@ -44,6 +61,7 @@ function resample(session, input, inputRate) {
                 session.sum = 0;
                 session.phase = 0;
                 if (session.samples === chunk.byteLength / 2) flush(session);
+                segmentIfNeeded(session, value);
             }
         }
     }
@@ -65,7 +83,7 @@ function release(session) {
 
 async function startDictation(id) {
     if (recording) return;
-    const session = { id, samples: 0, phase: 0, sum: 0 };
+    const session = { id, samples: 0, phase: 0, sum: 0, segmentSamples: 0, voicedSamples: 0, silentSamples: 0 };
     recording = session;
     try {
         const stream = await navigator.mediaDevices.getUserMedia({

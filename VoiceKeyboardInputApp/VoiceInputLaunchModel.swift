@@ -1880,7 +1880,7 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
                     gate.cancel()
                     return
                 }
-                AVAudioApplication.requestRecordPermission { isGranted in
+                AVAudioApplication.requestRecordPermission { @Sendable isGranted in
                     gate.finish(isGranted)
                 }
             }
@@ -1909,7 +1909,9 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
                         gate.cancel()
                         return
                     }
-                    SFSpeechRecognizer.requestAuthorization { status in
+                    // TCC invokes this legacy callback off-main. Explicit
+                    // Sendable prevents inheriting this method's MainActor.
+                    SFSpeechRecognizer.requestAuthorization { @Sendable status in
                         gate.finish(status == .authorized)
                     }
                 }

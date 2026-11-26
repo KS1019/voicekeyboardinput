@@ -31,13 +31,15 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 
 ## Expected Keyboard STT Behavior
 
-- Loading the keyboard preloads a small local WebKit document without recording or asking for microphone access.
-- With Full Access and previously granted microphone/Speech permissions, tapping Mic attempts WebKit capture inside the keyboard. A second tap finishes the recording and starts Apple Speech transcription.
+- Loading/focusing the keyboard does not initialize WebKit. Tapping Mic loads the local capture document.
+- With Full Access and previously granted microphone/Speech permissions, tapping Mic attempts WebKit capture inside the keyboard. Pauses of roughly 0.7 seconds commit audio for Apple Speech transcription while capture continues (uninterrupted audio is split at eight seconds). A second tap drains the remaining audio, then waits for queued recognition.
 - The keyboard inserts a final result only if the originating document context is still valid. Partial results never change the host field.
 - If no PCM arrives within two seconds, capture is torn down and the existing containing-app handoff is attempted. Missing permissions also use the app onboarding path.
 - The containing app can record and publish a transcript through the shared App Group. Return to the host and show the keyboard to insert that result once.
 - If App Group storage is unavailable, the fallback displays an unavailable state rather than losing a handoff.
-- Recognition failures display an error; do not silently insert partial text or start another recording.
+- A segment without a recognition result must not discard later segments or the Stop tail. Permission/startup failures remain terminal, but already-recognized pending text is preserved literally. Missing audio must be reported; commands must not execute after a recognition gap in that recording.
+- Audio chunks are not command boundaries: ordinary text is inserted live, while potential command wording waits for Stop. Check `new line` + `item` and `command delete` + `word`, including preceding prose.
+- Nonempty quiet PCM must reach recognition. After Stop, the latest result must remain visible without “Continue speaking.” Delayed self-insertion callbacks must not cancel recording when the expected field/context still matches; a real field/context change must cancel it.
 - Dismissing/switching the keyboard, changing the host field, Delete/Return, and memory cancellation must discard the active direct recording/result.
 - Delete removes the previous character; Return inserts a newline; Next switches keyboard when iOS exposes the input-mode switch key.
 - Simulator and build success are not proof of real-device WebKit microphone support.
@@ -65,7 +67,7 @@ validation does not install or provision a physical device.
 
 1. Grant microphone and Speech permissions in the app, enable the keyboard and Full Access.
 2. Open a text field in Notes, Safari, and a third-party host in turn. Show the keyboard and wait: the microphone must stay inactive before tapping Mic.
-3. Tap Mic. Confirm the recording indicator and audible input, without switching apps. Speak Japanese and English phrases, stop, and confirm exactly one final insertion.
+3. Tap Mic. Confirm the recording indicator and audible input, without switching apps. Speak a phrase, pause, and verify insertion before Stop. Repeat with a second phrase, then speak a short tail and Stop. Verify all three appear once, in order. Repeat in Japanese and English, including punctuation/delete commands that depend on the previous segment.
 4. Repeat at least ten times, including immediate start/stop and a 60-second recording. Confirm bounded memory, no retained audio files, and usable subsequent attempts.
 5. Deny microphone, deny Speech, and disable Full Access separately. Confirm controlled onboarding/fallback and no unauthorized recording. Re-enable permissions and retry.
 6. Reproduce startup failure (including WebKit process failure if available): after two seconds without PCM the existing app handoff must work, and late WebKit completion must not leave a second microphone capture running.
@@ -101,3 +103,10 @@ XCTest covers the stable layers:
 - `make preview-layout-test` verifies SwiftUI preview layout rendering.
 
 Do not treat those as proof that iOS accepted the custom keyboard in Settings. That remains manual or future device-lab automation.
+
+## Responsiveness regression checks
+
+- Focus the app's Keyboard Extension QA field, type text, scroll, and reopen onboarding.
+- Tap Start Voice Input and immediately focus/type in the QA field. Verify scrolling and Stop remain usable while audio initializes.
+- Repeat with Voice Keyboard selected (not only the system keyboard), and while connecting/disconnecting Bluetooth audio. Record a hang stack if the device still freezes.
+- The simulator tests cover UI interactions, real local WebKit message delivery with synthetic PCM, and ordered recognition with a test recognizer. They do not establish real-device microphone access, Apple Speech accuracy at chunk boundaries, or signed App Group handoff behavior.
