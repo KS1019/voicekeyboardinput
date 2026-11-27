@@ -48,20 +48,31 @@ the existing recording handoff.
    requesting microphone access. Capture requires an explicit tap, Full Access,
    and microphone/Speech authorization previously granted in the containing app.
    Navigation and microphone requests are restricted to the recording document.
-2. JavaScript resamples input to mono 16 kHz Int16 PCM. Native message validation
-   bounds chunk size and caps the recording at 60 seconds. Capture counts as
-   started only after PCM arrives. Startup failure, including no PCM within two
-   seconds, tears down capture and attempts the containing-app handoff.
-3. Stop finishes capture. Audio is normalized, encoded to a temporary m4a file,
-   and submitted with `SFSpeechURLRecognitionRequest`. A 20-second deadline
-   includes encoding. Recognition requests on-device processing when supported;
-   otherwise Apple service availability applies. Recognition failure displays
-   an error rather than automatically starting another recording.
-4. Only a final transcript enters the existing command pipeline. Insertion
+2. JavaScript resamples input to mono 16 kHz Int16 PCM and segments it at pauses
+   or eight seconds. Native capture validates and bounds each chunk; continuous
+   delivery keeps recording active until Stop. Startup failure (no PCM within
+   two seconds) attempts the app handoff; a three-second PCM stall after startup
+   reports capture failure. Silent PCM counts as delivery.
+3. Each segment is normalized, encoded to a temporary m4a file, and submitted
+   sequentially with `SFSpeechURLRecognitionRequest`, requiring on-device Apple
+   recognition. A 20-second segment deadline includes encoding. Stop drains the
+   remaining audio and queued recognition. Backlog is bounded to 60 seconds of
+   PCM; overload fails explicitly rather than silently discarding segments.
+4. Only final segment transcripts enter the existing command pipeline. Insertion
    checks the session, document identity, surrounding context, selection, and
    mutation generation. Partial results never edit the host field. Cancellation,
    keyboard dismissal, document changes, and memory warnings discard the direct
    attempt; stale callbacks cannot complete a newer session.
+
+Long direct sessions compact already-inserted transcript context. At rollover,
+pending command wording is inserted literally and the remaining session uses
+plain text, avoiding destructive interpretation of truncated command context.
+
+The app fallback keeps its audio engine active until Stop, renewing on-device
+recognition requests at 45-second boundaries or natural finals. A bounded PCM
+history transfers unprocessed audio across natural-final boundaries; an uncovered
+boundary fails explicitly. Stop drains admitted callbacks and pending audio before
+publishing the aggregate transcript. Shared-transcript size limits still apply.
 
 Temporary audio is removed on completion/cancellation. Later encoding attempts
 also sweep crash leftovers older than five minutes. Shared handoffs use durable

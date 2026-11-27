@@ -1,6 +1,7 @@
 import AVFAudio
 import Foundation
 import Speech
+import VoiceKeyboardModels
 
 enum AppSpeechDictationError: LocalizedError {
     case recognizerUnavailable
@@ -12,6 +13,8 @@ enum AppSpeechDictationError: LocalizedError {
     case audioRouteLost
     case audioConfigurationChanged
     case audioTapDrainTimedOut
+    case transcriptTooLong
+    case recognitionBoundaryUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -33,6 +36,10 @@ enum AppSpeechDictationError: LocalizedError {
             "Audio input changed while recording. Please try again."
         case .audioTapDrainTimedOut:
             "Audio input did not stop safely. Please try voice input again."
+        case .transcriptTooLong:
+            "Voice input is too long. Stop and start a new recording."
+        case .recognitionBoundaryUnavailable:
+            "Speech recognition could not preserve the audio boundary. Please try again."
         }
     }
 }
@@ -89,6 +96,100 @@ final class AppSpeechDictationRun {
         private let condition = NSCondition()
         private var isActive = true
         private var inFlightCallbacks = 0
+        private var routedRequest: SFSpeechAudioBufferRecognitionRequest?
+        private var requestGeneration = 0
+        private var callbacksByGeneration: [Int: Int] = [:]
+        private struct HistoryEntry {
+            let start: Int64
+            let buffer: AVAudioPCMBuffer
+        }
+        private var history: [HistoryEntry] = []
+        private var pendingReplay: [AVAudioPCMBuffer] = []
+        private var totalFrames: Int64 = 0
+        private var requestStartFrame: Int64 = 0
+        private var sampleRate: Double = 0
+        private var routedFrameCount: Int64 = 0
+        private var historyIsValid = true
+        private let deliver: @Sendable (AVAudioPCMBuffer, SFSpeechAudioBufferRecognitionRequest) -> Void
+
+        init(deliver: @escaping @Sendable (AVAudioPCMBuffer, SFSpeechAudioBufferRecognitionRequest) -> Void = { buffer, request in request.append(buffer) }) {
+            self.deliver = deliver
+        }
+
+        private static func copy(_ source: AVAudioPCMBuffer, offset: Int = 0, count: Int? = nil) -> AVAudioPCMBuffer? {
+            let length = count ?? Int(source.frameLength)
+            guard length > 0,
+                  let copy = AVAudioPCMBuffer(pcmFormat: source.format, frameCapacity: AVAudioFrameCount(length)) else { return nil }
+            copy.frameLength = AVAudioFrameCount(length)
+            let sourceBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: source.audioBufferList))
+            let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+            for index in sourceBuffers.indices {
+                guard let sourceData = sourceBuffers[index].mData,
+                      let destinationData = destinationBuffers[index].mData else { return nil }
+                let bytesPerFrame = Int(sourceBuffers[index].mDataByteSize) / Int(source.frameLength)
+                memcpy(destinationData, sourceData.advanced(by: offset * bytesPerFrame), length * bytesPerFrame)
+            }
+            return copy
+        }
+
+        func renew(to request: SFSpeechAudioBufferRecognitionRequest, recognizedEndTime: TimeInterval?) -> Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            guard isActive, historyIsValid else { return false }
+            guard totalFrames > requestStartFrame else {
+                routeUnlocked(to: request, start: totalFrames, replay: [])
+                return true
+            }
+            let endTime = recognizedEndTime ?? 0
+            guard endTime.isFinite, endTime >= 0 else { return false }
+            let boundary = requestStartFrame + Int64((endTime * sampleRate).rounded(.up))
+            guard boundary <= totalFrames,
+                  boundary >= (history.first?.start ?? totalFrames) else { return false }
+            var replay: [AVAudioPCMBuffer] = []
+            for entry in history {
+                let offset = max(0, Int(boundary - entry.start))
+                let count = Int(entry.buffer.frameLength) - offset
+                if count > 0 {
+                    guard let buffer = Self.copy(entry.buffer, offset: offset, count: count) else { return false }
+                    replay.append(buffer)
+                }
+            }
+            routeUnlocked(to: request, start: boundary, replay: replay)
+            return true
+        }
+
+        private func routeUnlocked(to request: SFSpeechAudioBufferRecognitionRequest, start: Int64, replay: [AVAudioPCMBuffer]) {
+            requestGeneration += 1
+            routedRequest = request
+            requestStartFrame = start
+            pendingReplay = replay
+            routedFrameCount = replay.reduce(0) { $0 + Int64($1.frameLength) }
+        }
+
+        func route(to request: SFSpeechAudioBufferRecognitionRequest) -> Int {
+            condition.lock()
+            defer { condition.unlock() }
+            let previous = requestGeneration
+            routeUnlocked(to: request, start: totalFrames, replay: [])
+            return previous
+        }
+
+        func drainRequest(_ generation: Int, timeout: TimeInterval) -> Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            let deadline = Date().addingTimeInterval(timeout)
+            while callbacksByGeneration[generation, default: 0] > 0 {
+                if !condition.wait(until: deadline) { return false }
+            }
+            return true
+        }
+
+        func invalidateAndFrameCount() -> Int64 {
+            condition.lock()
+            defer { condition.unlock() }
+            isActive = false
+            return routedFrameCount
+        }
 
         @discardableResult
         func invalidate() -> Bool {
@@ -115,30 +216,78 @@ final class AppSpeechDictationRun {
                 }
             }
             let didDrain = inFlightCallbacks == 0
+            let replay = didDrain && !isActive ? pendingReplay : []
+            let destination = routedRequest
+            if !replay.isEmpty {
+                pendingReplay.removeAll()
+                inFlightCallbacks += 1
+            }
             condition.unlock()
+            if let destination, !replay.isEmpty {
+                replay.forEach { deliver($0, destination) }
+                condition.lock()
+                inFlightCallbacks -= 1
+                condition.broadcast()
+                condition.unlock()
+            }
             return didDrain
         }
 
-        func append(
-            _ buffer: AVAudioPCMBuffer,
-            to request: SFSpeechAudioBufferRecognitionRequest
-        ) {
+        func append(_ buffer: AVAudioPCMBuffer) {
             condition.lock()
-            guard isActive else {
+            guard isActive, let destination = routedRequest else {
                 condition.unlock()
                 return
             }
+            let generation = requestGeneration
+            let replay = pendingReplay
+            pendingReplay.removeAll()
+            if let copied = Self.copy(buffer) {
+                sampleRate = buffer.format.sampleRate
+                history.append(HistoryEntry(start: totalFrames, buffer: copied))
+            } else {
+                historyIsValid = false
+            }
+            totalFrames += Int64(buffer.frameLength)
+            routedFrameCount += Int64(buffer.frameLength)
+            let oldestFrame = totalFrames - Int64(sampleRate * 5)
+            history.removeAll { $0.start + Int64($0.buffer.frameLength) <= oldestFrame }
             inFlightCallbacks += 1
+            callbacksByGeneration[generation, default: 0] += 1
             condition.unlock()
             defer {
                 condition.lock()
+                callbacksByGeneration[generation, default: 0] -= 1
+                if callbacksByGeneration[generation] == 0 {
+                    callbacksByGeneration.removeValue(forKey: generation)
+                    condition.broadcast()
+                }
                 inFlightCallbacks -= 1
                 if inFlightCallbacks == 0 {
                     condition.broadcast()
                 }
                 condition.unlock()
             }
-            request.append(buffer)
+            replay.forEach { deliver($0, destination) }
+            deliver(buffer, destination)
+        }
+    }
+
+    private final class RecognitionRequestDrain: @unchecked Sendable {
+        let gate: AudioTapGate
+        let request: SFSpeechAudioBufferRecognitionRequest
+        let generation: Int
+
+        init(gate: AudioTapGate, request: SFSpeechAudioBufferRecognitionRequest, generation: Int) {
+            self.gate = gate
+            self.request = request
+            self.generation = generation
+        }
+
+        func finish() -> Bool {
+            guard gate.drainRequest(generation, timeout: 2) else { return false }
+            request.endAudio()
+            return true
         }
     }
 
@@ -259,7 +408,7 @@ final class AppSpeechDictationRun {
     }
 
     private let locale: Locale
-    private let maximumDuration: TimeInterval
+    private let maximumDuration: TimeInterval?
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -267,6 +416,11 @@ final class AppSpeechDictationRun {
     private var continuation: CheckedContinuation<String, Error>?
     private var pendingError: Error?
     private var latestTranscript = ""
+    private var completedTranscript = ""
+    private var recognizer: SFSpeechRecognizer?
+    private var pendingRecognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionGeneration = 0
+    private var segmentDrainTask: Task<Void, Never>?
     private var didFinish = false
     private var isAwaitingFinalResult = false
     private var stopRequested = false
@@ -298,7 +452,7 @@ final class AppSpeechDictationRun {
     private var audioSessionGeneration: UInt64?
     private var ownershipReleaseWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(locale: Locale, maximumDuration: TimeInterval) {
+    init(locale: Locale, maximumDuration: TimeInterval? = nil) {
         self.locale = locale
         self.maximumDuration = maximumDuration
     }
@@ -337,6 +491,7 @@ final class AppSpeechDictationRun {
             throw AppSpeechDictationError.recognizerUnavailable
         }
 
+        self.recognizer = recognizer
         let session = AVAudioSession.sharedInstance()
         guard let ownershipToken = AppAudioSessionOperationCoordinator.shared.acquireOwnership() else {
             throw AppSpeechDictationError.audioInputUnavailable
@@ -406,13 +561,11 @@ final class AppSpeechDictationRun {
         preparationChannelCount = format.channelCount
         preparationSampleRate = format.sampleRate
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.addsPunctuation = true
-        request.requiresOnDeviceRecognition = true
+        let request = makeRecognitionRequest()
         self.request = request
         let tapGate = AudioTapGate()
         audioTapGate = tapGate
+        tapGate.route(to: request)
 
         guard !stopRequested else {
             await cleanup()
@@ -424,7 +577,7 @@ final class AppSpeechDictationRun {
         }
 
         guard VKInstallAudioInputTap(inputNode, { buffer, _ in
-            tapGate.append(buffer, to: request)
+            tapGate.append(buffer)
         }) else {
             await cleanup()
             throw AppSpeechDictationError.audioConfigurationChanged
@@ -477,24 +630,8 @@ final class AppSpeechDictationRun {
                     self.complete(.failure(CancellationError()))
                     return
                 }
-                timeoutTask = Task { [weak self] in
-                    guard let self else { return }
-                    do {
-                        try await Task.sleep(for: .seconds(self.maximumDuration))
-                    } catch {
-                        return
-                    }
-                    await MainActor.run {
-                        self.requestFinalResult()
-                    }
-                }
-                task = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, error in
-                    let transcript = result?.bestTranscription.formattedString
-                    let isFinal = result?.isFinal == true
-                    Task { @MainActor in
-                        self?.handle(transcript: transcript, isFinal: isFinal, error: error)
-                    }
-                }
+                startRecognition(request)
+
             }
         } onCancel: {
             Task { @MainActor in
@@ -503,27 +640,113 @@ final class AppSpeechDictationRun {
         }
     }
 
-    private func handle(transcript: String?, isFinal: Bool, error: Error?) {
-        if let transcript, !transcript.isEmpty {
-            latestTranscript = transcript
-        }
+    private func makeRecognitionRequest() -> SFSpeechAudioBufferRecognitionRequest {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        request.addsPunctuation = true
+        request.requiresOnDeviceRecognition = true
+        return request
+    }
 
-        if isFinal {
-            finishWithLatestTranscript()
-            return
+    private func startRecognition(_ request: SFSpeechAudioBufferRecognitionRequest) {
+        recognitionGeneration += 1
+        let generation = recognitionGeneration
+        latestTranscript = ""
+        task = recognizer?.recognitionTask(with: request) { @Sendable [weak self] result, error in
+            let transcript = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal == true
+            let recognizedEndTime = result?.bestTranscription.segments.last.map { $0.timestamp + $0.duration }
+            Task { @MainActor in
+                guard let self, generation == self.recognitionGeneration, !self.didFinish else { return }
+                self.handle(transcript: transcript, isFinal: isFinal, error: error, recognizedEndTime: recognizedEndTime)
+            }
         }
-
-        if let error {
-            complete(.failure(error))
+        timeoutTask?.cancel()
+        if stopRequested {
+            startFinalizationTimeout()
+        } else {
+            timeoutTask = Task { [weak self] in
+                guard let self else { return }
+                do { try await Task.sleep(for: .seconds(self.maximumDuration ?? 45)) }
+                catch { return }
+                guard !Task.isCancelled, !self.didFinish else { return }
+                if self.maximumDuration != nil { self.requestFinalResult() }
+                else { self.rotateRecognitionRequest() }
+            }
         }
     }
 
+    private func rotateRecognitionRequest() {
+        guard !didFinish, !stopRequested, pendingRecognitionRequest == nil,
+              let previous = request, let gate = audioTapGate else { return }
+        let next = makeRecognitionRequest()
+        pendingRecognitionRequest = next
+        request = next
+        let previousGeneration = gate.route(to: next)
+        let drain = RecognitionRequestDrain(gate: gate, request: previous, generation: previousGeneration)
+        let generation = recognitionGeneration
+        startFinalizationTimeout(after: 5)
+        segmentDrainTask = Task { [weak self] in
+            let drained = await Task.detached { drain.finish() }.value
+            guard let self, !Task.isCancelled, !self.didFinish,
+                  generation == self.recognitionGeneration else { return }
+            guard drained else {
+                self.complete(.failure(AppSpeechDictationError.audioTapDrainTimedOut))
+                return
+            }
+            self.startFinalizationTimeout()
+        }
+    }
+
+    private func handle(transcript: String?, isFinal: Bool, error: Error?, recognizedEndTime: TimeInterval? = nil) {
+        guard !didFinish else { return }
+        if isFinal { latestTranscript = transcript ?? "" }
+        else if let transcript, !transcript.isEmpty { latestTranscript = transcript }
+        if isFinal {
+            guard maximumDuration == nil else {
+                finishWithLatestTranscript()
+                return
+            }
+            let separator = completedTranscript.isEmpty || latestTranscript.isEmpty ? "" : " "
+            let combined = completedTranscript + separator + latestTranscript
+            guard combined.isEmpty || VoiceKeyboardTextLimits.isValid(combined) else {
+                complete(.failure(AppSpeechDictationError.transcriptTooLong))
+                return
+            }
+            completedTranscript = combined
+            latestTranscript = ""
+            segmentDrainTask?.cancel()
+            segmentDrainTask = nil
+            if let next = pendingRecognitionRequest {
+                pendingRecognitionRequest = nil
+                task = nil
+                startRecognition(next)
+            } else if stopRequested {
+                finishWithLatestTranscript()
+            } else {
+                let next = makeRecognitionRequest()
+                request = next
+                guard audioTapGate?.renew(to: next, recognizedEndTime: recognizedEndTime) == true else {
+                    complete(.failure(AppSpeechDictationError.recognitionBoundaryUnavailable))
+                    return
+                }
+                task = nil
+                startRecognition(next)
+            }
+            return
+        }
+        if let error { complete(.failure(error)) }
+    }
+
     private func finishWithLatestTranscript() {
-        guard !latestTranscript.isEmpty else {
+        let separator = completedTranscript.isEmpty || latestTranscript.isEmpty ? "" : " "
+        let transcript = completedTranscript + separator + latestTranscript
+        guard !transcript.isEmpty else {
             complete(.failure(AppSpeechDictationError.emptyTranscript))
             return
         }
-        complete(.success(latestTranscript))
+        complete(.success(transcript))
     }
 
     private func requestFinalResult() {
@@ -607,7 +830,7 @@ final class AppSpeechDictationRun {
         }
     }
 
-    private func startFinalizationTimeout() {
+    private func startFinalizationTimeout(after delay: TimeInterval = 3) {
         guard !didFinish else { return }
         // Speech recognition normally emits a final callback after endAudio.
         // Do not turn the last volatile hypothesis into a command if the
@@ -616,7 +839,7 @@ final class AppSpeechDictationRun {
         timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
             do {
-                try await Task.sleep(for: .seconds(3))
+                try await Task.sleep(for: .seconds(delay))
             } catch {
                 return
             }
@@ -660,6 +883,15 @@ final class AppSpeechDictationRun {
         // continuation to finish yet. `start()` observes this flag after each
         // awaited setup phase and performs the normal cleanup path.
         guard continuation != nil, !isAwaitingFinalResult else { return }
+        let stoppedFrameCount = audioTapGate?.invalidateAndFrameCount()
+        if maximumDuration == nil, stoppedFrameCount == 0 {
+            let previousRequestIsFinalizing = pendingRecognitionRequest != nil
+            pendingRecognitionRequest = nil
+            if !previousRequestIsFinalizing, !completedTranscript.isEmpty, latestTranscript.isEmpty {
+                finishWithLatestTranscript()
+                return
+            }
+        }
         // AVAudioEngine.start() runs off-main. Never call removeTap/stop on
         // the same engine until that operation has settled; doing so can
         // trigger an audio graph assertion or deadlock on rapid Stop.
@@ -803,6 +1035,10 @@ final class AppSpeechDictationRun {
         pendingError = nil
         pendingStopTask?.cancel()
         pendingStopTask = nil
+        segmentDrainTask?.cancel()
+        segmentDrainTask = nil
+        pendingRecognitionRequest = nil
+        recognitionGeneration += 1
         timeoutTask?.cancel()
         timeoutTask = nil
         drainWatchdogTask?.cancel()
@@ -1560,6 +1796,104 @@ final class AppSpeechDictationRun {
 
     static func testRun(maximumDuration: TimeInterval) -> AppSpeechDictationRun {
         AppSpeechDictationRun(locale: Locale(identifier: "en_US"), maximumDuration: maximumDuration)
+    }
+
+    private final class AudioReplayTestRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var samples: [ObjectIdentifier: [Float]] = [:]
+
+        func append(_ buffer: AVAudioPCMBuffer, to request: SFSpeechAudioBufferRecognitionRequest) {
+            lock.lock()
+            defer { lock.unlock() }
+            let values = Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+            samples[ObjectIdentifier(request), default: []].append(contentsOf: values)
+        }
+
+        func values(for request: SFSpeechAudioBufferRecognitionRequest) -> [Float] {
+            lock.lock()
+            defer { lock.unlock() }
+            return samples[ObjectIdentifier(request), default: []]
+        }
+    }
+
+    private final class AudioReplayTestBuffer: @unchecked Sendable {
+        let buffer: AVAudioPCMBuffer
+        init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+    }
+
+    static func testAtomicStopAgainstAudioCallback() -> Bool {
+        for _ in 0..<40 {
+            let recorder = AudioReplayTestRecorder()
+            let gate = AudioTapGate { recorder.append($0, to: $1) }
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            let format = AVAudioFormat(standardFormatWithSampleRate: 1_000, channels: 1)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1)!
+            buffer.frameLength = 1
+            buffer.floatChannelData![0][0] = 0.0001
+            let box = AudioReplayTestBuffer(buffer)
+            let done = DispatchSemaphore(value: 0)
+            gate.route(to: request)
+            Thread {
+                gate.append(box.buffer)
+                done.signal()
+            }.start()
+            let frames = gate.invalidateAndFrameCount()
+            guard done.wait(timeout: .now() + 1) == .success else { return false }
+            gate.waitUntilDrained()
+            if Int64(recorder.values(for: request).count) != frames { return false }
+        }
+        return true
+    }
+
+    static func testReplayedAudio(input: [Float], recognizedEndTime: TimeInterval?, tail: [Float]) -> [Float]? {
+        let recorder = AudioReplayTestRecorder()
+        let gate = AudioTapGate { recorder.append($0, to: $1) }
+        let first = SFSpeechAudioBufferRecognitionRequest()
+        let second = SFSpeechAudioBufferRecognitionRequest()
+        let format = AVAudioFormat(standardFormatWithSampleRate: 1_000, channels: 1)!
+        func buffer(_ samples: [Float]) -> AVAudioPCMBuffer {
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            for (index, sample) in samples.enumerated() { buffer.floatChannelData![0][index] = sample }
+            return buffer
+        }
+        gate.route(to: first)
+        gate.append(buffer(input))
+        guard gate.renew(to: second, recognizedEndTime: recognizedEndTime) else { return nil }
+        if !tail.isEmpty { gate.append(buffer(tail)) }
+        gate.invalidate()
+        gate.waitUntilDrained()
+        return recorder.values(for: second)
+    }
+
+    static func testContinuousRun() -> AppSpeechDictationRun {
+        let run = AppSpeechDictationRun(locale: Locale(identifier: "en_US"))
+        let request = run.makeRecognitionRequest()
+        run.request = request
+        let gate = AudioTapGate()
+        gate.route(to: request)
+        run.audioTapGate = gate
+        run.startRecognition(request)
+        return run
+    }
+
+    var testRecognitionGeneration: Int { recognitionGeneration }
+    var testDidFinish: Bool { didFinish }
+    var testHasPendingRecognition: Bool { pendingRecognitionRequest != nil }
+
+    func testReceiveRecognition(_ transcript: String, isFinal: Bool, generation: Int? = nil) {
+        guard generation == nil || generation == recognitionGeneration else { return }
+        handle(transcript: transcript, isFinal: isFinal, error: nil)
+    }
+
+    func testRotateRecognition() { rotateRecognitionRequest() }
+
+    func testAppendSilentAudio() {
+        let format = AVAudioFormat(standardFormatWithSampleRate: 1_000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 10)!
+        buffer.frameLength = 10
+        for index in 0..<10 { buffer.floatChannelData![0][index] = 0 }
+        audioTapGate?.append(buffer)
     }
 
     func testWaitForCompletion() async throws -> String {

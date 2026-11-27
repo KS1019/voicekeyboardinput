@@ -893,6 +893,105 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         }
     }
 
+    func testContinuousDictationRenewsFinalSegmentsUntilUserStop() async throws {
+        let run = AppSpeechDictationRun.testContinuousRun()
+        let resultTask = Task { try await run.testWaitForCompletion() }
+        await run.testWaitUntilCompletionReady()
+        let initialGeneration = run.testRecognitionGeneration
+
+        run.testReceiveRecognition("first sentence", isFinal: true)
+        XCTAssertFalse(run.testDidFinish)
+        XCTAssertGreaterThan(run.testRecognitionGeneration, initialGeneration)
+        run.testReceiveRecognition("stale duplicate", isFinal: true, generation: initialGeneration)
+        run.testReceiveRecognition("", isFinal: true)
+        XCTAssertFalse(run.testDidFinish)
+
+        run.testAppendSilentAudio()
+        run.finishForUserStop()
+        run.testReceiveRecognition("last sentence", isFinal: true)
+        let result = try await resultTask.value
+        XCTAssertEqual(result, "first sentence last sentence")
+    }
+
+    func testContinuousDictationStopKeepsQueuedSegmentAfterRotation() async throws {
+        let run = AppSpeechDictationRun.testContinuousRun()
+        let resultTask = Task { try await run.testWaitForCompletion() }
+        await run.testWaitUntilCompletionReady()
+
+        run.testRotateRecognition()
+        XCTAssertTrue(run.testHasPendingRecognition)
+        run.testAppendSilentAudio()
+        run.finishForUserStop()
+        run.testReceiveRecognition("before boundary", isFinal: true)
+        XCTAssertFalse(run.testDidFinish)
+        XCTAssertFalse(run.testHasPendingRecognition)
+        run.testReceiveRecognition("after boundary", isFinal: true)
+        let result = try await resultTask.value
+        XCTAssertEqual(result, "before boundary after boundary")
+    }
+
+    func testStopWithEmptyQueuedRequestStillWaitsForPreviousSegment() async throws {
+        let run = AppSpeechDictationRun.testContinuousRun()
+        let resultTask = Task { try await run.testWaitForCompletion() }
+        await run.testWaitUntilCompletionReady()
+        run.testReceiveRecognition("first", isFinal: true)
+        run.testAppendSilentAudio()
+        run.testRotateRecognition()
+        run.finishForUserStop()
+        XCTAssertFalse(run.testDidFinish)
+        run.testReceiveRecognition("second", isFinal: true)
+        let result = try await resultTask.value
+        XCTAssertEqual(result, "first second")
+    }
+
+    func testNaturalFinalReplaysExactTailBeforeNewLiveFrames() {
+        let replay = AppSpeechDictationRun.testReplayedAudio(
+            input: Array(0..<10).map(Float.init), recognizedEndTime: 0.005, tail: [10, 11, 12]
+        )
+        XCTAssertEqual(replay, Array(5..<13).map(Float.init))
+    }
+
+    func testStopSnapshotIncludesEveryAdmittedAudioCallback() {
+        XCTAssertTrue(AppSpeechDictationRun.testAtomicStopAgainstAudioCallback())
+    }
+
+    func testEmptyFinalReplaysWholeRetainedRequestWithoutDroppingQuietAudio() {
+        let replay = AppSpeechDictationRun.testReplayedAudio(
+            input: [0.0001, 0.0002, 0.0003], recognizedEndTime: nil, tail: [0.0004]
+        )
+        XCTAssertEqual(replay, [0.0001, 0.0002, 0.0003, 0.0004])
+    }
+
+    func testStopFlushesReplayWithoutAnotherAudioCallback() {
+        let replay = AppSpeechDictationRun.testReplayedAudio(
+            input: Array(0..<10).map(Float.init), recognizedEndTime: 0.005, tail: []
+        )
+        XCTAssertEqual(replay, Array(5..<10).map(Float.init))
+    }
+
+    func testContinuousDictationStopAfterFinalWithNoNewAudioKeepsConfirmedText() async throws {
+        let run = AppSpeechDictationRun.testContinuousRun()
+        let resultTask = Task { try await run.testWaitForCompletion() }
+        await run.testWaitUntilCompletionReady()
+        run.testReceiveRecognition("confirmed sentence", isFinal: true)
+        run.finishForUserStop()
+        let result = try await resultTask.value
+        XCTAssertEqual(result, "confirmed sentence")
+    }
+
+    func testContinuousDictationCancellationRejectsLateSegments() async throws {
+        let run = AppSpeechDictationRun.testContinuousRun()
+        let resultTask = Task { try await run.testWaitForCompletion() }
+        await run.testWaitUntilCompletionReady()
+        run.testReceiveRecognition("first sentence", isFinal: true)
+        run.testCancel()
+        run.testReceiveRecognition("late tail", isFinal: true)
+        do {
+            _ = try await resultTask.value
+            XCTFail("Cancellation must win over a late final result")
+        } catch is CancellationError {}
+    }
+
     func testUnknownURLDoesNotStartDictation() async throws {
         let controller = DictationSessionControllerSpy(startStatus: .microphoneActive(peakPower: -12))
         let model = VoiceInputLaunchModel(sessionController: controller)

@@ -95,9 +95,11 @@ final class KeyboardSpeechCaptureCoordinator {
 
     private func enqueue(_ pcm: DictationPCM, locale: VoiceKeyboardLocale, id: UUID) {
         if pcm.sampleCount > 0 {
-            // Capture is bounded to 60 seconds. Bound backlog as well when
-            // recognition is slower than speech; never silently drop a segment.
-            guard pendingSegments.count < 60 else {
+            // Bound backlog when recognition is slower than ongoing capture;
+            // never silently drop a segment.
+            let queuedSamples = pendingSegments.reduce(0) { $0 + $1.sampleCount }
+            guard pendingSegments.count < 60,
+                  queuedSamples + pcm.sampleCount <= DictationPCM.sampleRate * 60 else {
                 capture.cancel()
                 speech.cancel()
                 end(Self.errorEvent(.recognitionFailed("Speech recognition could not keep up. Please try again.")))

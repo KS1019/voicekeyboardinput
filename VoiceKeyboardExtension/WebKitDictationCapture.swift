@@ -45,6 +45,12 @@ final class WebKitDictationCapture: NSObject, WKNavigationDelegate, WKUIDelegate
     private var pageLoaded = false
     private var session: Session?
     private var deadline: Task<Void, Never>?
+    private let recordingStallTimeout: Duration
+
+    init(recordingStallTimeout: Duration = .seconds(3)) {
+        self.recordingStallTimeout = recordingStallTimeout
+        super.init()
+    }
 
     isolated deinit {
         dispose()
@@ -247,8 +253,10 @@ final class WebKitDictationCapture: NSObject, WKNavigationDelegate, WKUIDelegate
             guard session?.pcm.append(base64: base64) == true else { return }
             if session?.phase == .starting {
                 session?.phase = .recording
-                setDeadline(.seconds(DictationPCM.maximumDuration), id: sessionID) { $0.finish() }
                 session?.handle(.started)
+            }
+            if session?.phase == .recording {
+                setDeadline(recordingStallTimeout, id: sessionID) { $0.end(.failed) }
             }
             if session?.pcm.isFull == true { finish() }
         case "segment" where body.count == 2:

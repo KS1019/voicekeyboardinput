@@ -37,6 +37,8 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 - If no PCM arrives within two seconds, capture is torn down and the existing containing-app handoff is attempted. Missing permissions also use the app onboarding path.
 - The containing app can record and publish a transcript through the shared App Group. Return to the host and show the keyboard to insert that result once.
 - If App Group storage is unavailable, the fallback displays an unavailable state rather than losing a handoff.
+- Continuous capture has no whole-session timer. A three-second gap in PCM delivery is a capture failure (silent audio still delivers PCM). Pending recognition audio remains bounded; a recognizer that cannot keep up reports an error.
+- Very long direct dictation rolls already-inserted context out of memory. Pending command wording is inserted literally at that boundary, and subsequent input stays plain text until Stop to avoid interpreting a truncated phrase as a destructive command.
 - A segment without a recognition result must not discard later segments or the Stop tail. Permission/startup failures remain terminal, but already-recognized pending text is preserved literally. Missing audio must be reported; commands must not execute after a recognition gap in that recording.
 - Audio chunks are not command boundaries: ordinary text is inserted live, while potential command wording waits for Stop. Check `new line` + `item` and `command delete` + `word`, including preceding prose.
 - Nonempty quiet PCM must reach recognition. After Stop, the latest result must remain visible without “Continue speaking.” Delayed self-insertion callbacks must not cancel recording when the expected field/context still matches; a real field/context change must cancel it.
@@ -49,8 +51,8 @@ Use this checklist for behavior XCTest cannot reliably automate yet: enabling th
 1. Boot the target Simulator and install the app.
 2. Run `make simulator-grant-microphone`.
 3. Open the app and tap `Start Voice Input`.
-4. Speak into the Mac microphone during the short dictation window.
-5. Confirm the app reports `Transcript Ready`.
+4. Speak into the Mac microphone for more than eight seconds, pause, speak again, and continue across a 45-second recognition boundary before tapping Stop. Confirm the app remains active until Stop.
+5. Confirm the app reports `Transcript Ready` and preserves text before/after the pause and the final spoken tail. Repeat Stop immediately after a segment final and during segment rotation.
 6. Load `Voice Keyboard` in the app text field.
 7. Tap Mic in the keyboard and speak a short phrase.
 8. Confirm either that recognized text is inserted or that the keyboard reports a specific Speech/microphone unavailable state.
@@ -68,7 +70,7 @@ validation does not install or provision a physical device.
 1. Grant microphone and Speech permissions in the app, enable the keyboard and Full Access.
 2. Open a text field in Notes, Safari, and a third-party host in turn. Show the keyboard and wait: the microphone must stay inactive before tapping Mic.
 3. Tap Mic. Confirm the recording indicator and audible input, without switching apps. Speak a phrase, pause, and verify insertion before Stop. Repeat with a second phrase, then speak a short tail and Stop. Verify all three appear once, in order. Repeat in Japanese and English, including punctuation/delete commands that depend on the previous segment.
-4. Repeat at least ten times, including immediate start/stop and a 60-second recording. Confirm bounded memory, no retained audio files, and usable subsequent attempts.
+4. Repeat at least ten times, including immediate start/stop and recordings longer than 60 seconds. Verify pauses and recognition segment boundaries do not stop capture; only Stop or an explicit failure/lifecycle interruption ends it. Confirm bounded memory, no retained audio files, and usable subsequent attempts.
 5. Deny microphone, deny Speech, and disable Full Access separately. Confirm controlled onboarding/fallback and no unauthorized recording. Re-enable permissions and retry.
 6. Reproduce startup failure (including WebKit process failure if available): after two seconds without PCM the existing app handoff must work, and late WebKit completion must not leave a second microphone capture running.
 7. During both recording and transcription: hide keyboard, switch keyboards, select another field, move caret, edit text from the host, press Delete/Return, background the host, and interrupt with a call. Confirm microphone release and no stale or duplicate insertion.

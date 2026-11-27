@@ -41,7 +41,7 @@ enum VoiceInputLaunchStatus: Equatable {
         case .requestingPermission:
             "Allow microphone and Speech Recognition access if iOS asks."
         case .microphoneActive:
-            "Voice input is in progress. Allow access if prompted. Recording ends automatically, or tap Stop to end it early."
+            "Voice input is in progress. Allow access if prompted. Tap Stop when you have finished speaking."
         case let .transcriptShared(transcript):
             "Transcript saved for the keyboard: \(transcript)"
         case .permissionDenied:
@@ -1804,7 +1804,7 @@ final class AppMicrophoneActivator: MicrophoneActivating, StoppableSessionAwareM
             return .failed("Voice input is already active.")
         }
 
-        let run = AppSpeechDictationRun(locale: Locale.current, maximumDuration: 8)
+        let run = AppSpeechDictationRun(locale: Locale.current)
         activeRun = ActiveRunLease(
             sessionID: sessionID,
             commandToken: commandToken,

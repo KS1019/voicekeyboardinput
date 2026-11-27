@@ -95,6 +95,54 @@ final class WebKitDictationCaptureTests: XCTestCase {
         XCTAssertEqual(counts, [12800, 12800, 321])
     }
 
+    func testOngoingPCMRefreshesWatchdogUntilExplicitStop() async throws {
+        capture = WebKitDictationCapture(recordingStallTimeout: .milliseconds(500))
+        let webView = try await loadPage()
+        try await installMicrophone(in: webView, producesPCM: true)
+        let started = expectation(description: "capture started")
+        let finished = expectation(description: "explicit Stop")
+        var didFinish = false
+        capture.start(permitsMicrophone: { true }) { event in
+            switch event {
+            case .started: started.fulfill()
+            case .finished:
+                didFinish = true
+                finished.fulfill()
+            case .failed, .startupFailed: XCTFail("Ongoing PCM must keep capture alive")
+            case .stopping, .segment: break
+            }
+        }
+        await fulfillment(of: [started], timeout: 5)
+        for _ in 0..<8 {
+            try await Task.sleep(for: .milliseconds(150))
+            _ = try await webView.evaluateJavaScript("""
+            window.testProcessor.onaudioprocess({
+                inputBuffer: { getChannelData: () => new Float32Array(1600).fill(0.25) },
+                outputBuffer: { getChannelData: () => new Float32Array(1600) }
+            }); void 0;
+            """)
+        }
+        XCTAssertFalse(didFinish)
+        capture.finish()
+        await fulfillment(of: [finished], timeout: 3)
+    }
+
+    func testMissingPCMAfterStartupFailsInsteadOfReportingSuccessfulStop() async throws {
+        capture = WebKitDictationCapture(recordingStallTimeout: .milliseconds(200))
+        let webView = try await loadPage()
+        try await installMicrophone(in: webView, producesPCM: true)
+        let failed = expectation(description: "capture stalled")
+        capture.start(permitsMicrophone: { true }) { event in
+            switch event {
+            case .failed: failed.fulfill()
+            case .finished, .startupFailed: XCTFail("Stalled capture is a failure after startup")
+            default: break
+            }
+        }
+        await fulfillment(of: [failed], timeout: 5)
+        XCTAssertTrue(container.subviews.compactMap { $0 as? WKWebView }.isEmpty)
+    }
+
     func testQuietPCMReachesNativeSegmentDelivery() async throws {
         let webView = try await loadPage()
         let script = Self.fakeMicrophone

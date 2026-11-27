@@ -88,6 +88,56 @@ final class KeyboardSpeechCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(controller.proxy.text, "host edited")
     }
 
+    func testLongDictationRollsOverWithoutRepeatingTextOrEnablingDeletion() async throws {
+        let capture = SegmentCapture()
+        let speech = SegmentRecognizer()
+        let coordinator = KeyboardSpeechCaptureCoordinator(capture: capture, speech: speech)
+        let controller = HostKeyboardController(speechCaptureCoordinator: coordinator)
+        controller.loadViewIfNeeded()
+        controller.viewWillAppear(false)
+        controller.startDirectKeyboardRecognition()
+        defer { controller.viewWillDisappear(false) }
+        let prefix = String(repeating: "a", count: VoiceKeyboardTextLimits.maximumCharacterCount - 8)
+        var expected = ""
+        for segment in [prefix, "do not", "command delete word", "afterwards"] {
+            capture.send(.segment(Self.pcm))
+            speech.complete(segment)
+            expected += (expected.isEmpty ? "" : " ") + segment
+            try await waitForText(expected, in: controller.proxy)
+            XCTAssertFalse(capture.stopped)
+        }
+        XCTAssertTrue(allLabels(in: controller.view).compactMap(\.text).contains(where: {
+            $0.contains("Long dictation continues as plain text")
+        }))
+        coordinator.finishRecognition()
+        await Task.yield()
+        XCTAssertEqual(controller.proxy.text, expected)
+    }
+
+    func testInsertionPlanningFailureStopsWithoutMarkingTranscriptCommitted() async throws {
+        let capture = SegmentCapture()
+        let speech = SegmentRecognizer()
+        let coordinator = KeyboardSpeechCaptureCoordinator(capture: capture, speech: speech)
+        let controller = HostKeyboardController(speechCaptureCoordinator: coordinator)
+        let oversizedGrapheme = "a" + String(repeating: "\u{301}", count: VoiceKeyboardTextLimits.maximumUnicodeScalarCount)
+        controller.proxy.text = oversizedGrapheme
+        controller.loadViewIfNeeded()
+        controller.viewWillAppear(false)
+        controller.startDirectKeyboardRecognition()
+        defer { controller.viewWillDisappear(false) }
+        capture.send(.segment(Self.pcm))
+        speech.complete("hello")
+        for _ in 0..<50 {
+            if capture.stopped { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(capture.stopped)
+        XCTAssertEqual(controller.proxy.text, oversizedGrapheme)
+        try await Task.sleep(for: .milliseconds(350))
+        let labels = allLabels(in: controller.view).compactMap(\.text)
+        XCTAssertTrue(labels.contains(where: { $0.contains("Voice input failed") }), "Rendered labels: \(labels)")
+    }
+
     func testRecognitionFailurePreservesLaterSegmentsAndStopTail() async {
         let capture = SegmentCapture()
         let speech = SegmentRecognizer()
@@ -231,6 +281,26 @@ final class KeyboardSpeechCaptureCoordinatorTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("Expected \(expected), got \(proxy.text)")
+    }
+
+    func testSlowRecognizerStopsExplicitlyBeforeUnboundedAudioBacklog() async {
+        let capture = SegmentCapture()
+        let speech = SegmentRecognizer()
+        let coordinator = KeyboardSpeechCaptureCoordinator(capture: capture, speech: speech)
+        let events = coordinator.recognitionEvents(locale: .init(identifier: "en-US"), hasFullAccess: { true })
+        var segment = DictationPCM()
+        let chunk = Data(repeating: 1, count: 3200).base64EncodedString()
+        for _ in 0..<80 { XCTAssertTrue(segment.append(base64: chunk)) }
+        for _ in 0..<8 { capture.send(.segment(segment)) }
+        XCTAssertFalse(capture.stopped)
+        capture.send(.segment(segment))
+        XCTAssertTrue(capture.stopped)
+        var failed = false
+        for await event in events {
+            if case .failure = event { failed = true }
+        }
+        XCTAssertTrue(failed)
+        XCTAssertEqual(speech.starts, 1)
     }
 
     func testCancellationDiscardsQueuedSegmentsAndLateResult() async {

@@ -805,6 +805,16 @@ public class KeyboardViewController: UIInputViewController {
     }
 
     func startDirectKeyboardRecognition() {
+        // A late shared-session probe must not replace direct capture's status or result.
+        sharedDeliveryRecoveryGeneration &+= 1
+        sharedDeliveryRecoveryRetryGeneration &+= 1
+        sharedDeliveryTask?.cancel()
+        sharedDeliveryTask = nil
+        sharedDeliveryRecoveryRetryTask?.cancel()
+        sharedDeliveryRecoveryRetryTask = nil
+        sharedCancellationRecoveryWaitTask?.cancel()
+        sharedCancellationRecoveryWaitTask = nil
+        isSharedDeliveryRecoveryInProgress = false
         sharedDictationPollingTask?.cancel()
         sharedDictationPollingTask = nil
         speechCaptureCoordinator.preload(in: view)
@@ -832,6 +842,7 @@ public class KeyboardViewController: UIInputViewController {
             var lastSnapshot: SpeechCapturePresentationSnapshot?
             var isDraining = false
             var hadRecognitionGap = false
+            var usesPlainText = false
             let pipeline = VoiceInputPipeline(locale: locale)
             for await event in events {
                 guard let self, self.isCurrentInteraction(epoch),
@@ -840,11 +851,19 @@ public class KeyboardViewController: UIInputViewController {
 
                 @MainActor func commitTranscript(interpretCommands: Bool = true) -> Bool {
                     guard transcript != committedPrefix else { return true }
+                    // Limit planner input without weakening the full host-context insertion fence.
                     let (snapshot, actions) = KeyboardSpeechCaptureCoordinator.insertionResult(
-                        transcript, context: self.textDocumentProxy.documentContextBeforeInput, locale: locale,
+                        transcript,
+                        context: self.textDocumentProxy.documentContextBeforeInput.map { String($0.suffix(4096)) },
+                        locale: locale,
                         omittingLiteralPrefix: committedPrefix,
-                        interpretCommands: interpretCommands && !hadRecognitionGap
+                        interpretCommands: interpretCommands && !hadRecognitionGap && !usesPlainText
                     )
+                    guard snapshot.microphoneTone != .critical else {
+                        self.cancelDirectRecognition()
+                        self.keyboardRootView.render(speechCapture: snapshot, announce: true)
+                        return false
+                    }
                     guard self.apply(actions, epoch: epoch, recognitionGeneration: currentRecognitionGeneration) else {
                         self.cancelDirectRecognition()
                         return false
@@ -858,7 +877,8 @@ public class KeyboardViewController: UIInputViewController {
                     self.keyboardRootView.render(speechCapture: SpeechCapturePresentationSnapshot(
                         transcriptText: lastSnapshot?.transcriptText ?? "",
                         statusText: isDraining ? "Transcribing remaining audio…" :
-                            (transcript != committedPrefix ? "Command wording held until Stop." : "Continue speaking or tap Stop."),
+                            (usesPlainText ? "Long dictation continues as plain text. Tap Stop to finish." :
+                                (transcript != committedPrefix ? "Command wording held until Stop." : "Continue speaking or tap Stop.")),
                         microphoneTitle: isDraining ? "Processing" : "Stop", microphoneTone: .warning,
                         activeMicrophoneBars: .ready,
                         voiceActivityState: isDraining ? .processing : .listening
@@ -886,14 +906,21 @@ public class KeyboardViewController: UIInputViewController {
                     guard !segment.isEmpty else { continue }
                     let joinsJapanese = Locale(identifier: locale.identifier).language.languageCode?.identifier == "ja"
                         && transcript.last?.isASCII == false && segment.first?.isASCII == false
-                    transcript += (transcript.isEmpty || joinsJapanese ? "" : " ") + segment
+                    let separator = transcript.isEmpty || joinsJapanese ? "" : " "
+                    if !VoiceKeyboardTextLimits.isValid(transcript + separator + segment) {
+                        guard commitTranscript(interpretCommands: false) else { return }
+                        usesPlainText = true
+                        transcript = String(transcript.suffix(1))
+                        committedPrefix = transcript
+                    }
+                    transcript += separator + segment
                     guard VoiceKeyboardTextLimits.isValid(transcript) else {
                         self.cancelDirectRecognition()
                         self.keyboardRootView.render(speechCapture: .keyboardSpeechCapture(
                             .recognitionFailed(.recognitionFailed("Voice input is too long."))), announce: true)
                         return
                     }
-                    if hadRecognitionGap || !pipeline.mayContainStreamingCommand(transcript) {
+                    if usesPlainText || hadRecognitionGap || !pipeline.mayContainStreamingCommand(transcript) {
                         guard commitTranscript() else { return }
                     }
                     renderProgress()
