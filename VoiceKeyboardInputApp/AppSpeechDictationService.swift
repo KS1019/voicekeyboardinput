@@ -708,8 +708,7 @@ final class AppSpeechDictationRun {
                 finishWithLatestTranscript()
                 return
             }
-            let separator = completedTranscript.isEmpty || latestTranscript.isEmpty ? "" : " "
-            let combined = completedTranscript + separator + latestTranscript
+            let combined = joinedTranscript
             guard combined.isEmpty || VoiceKeyboardTextLimits.isValid(combined) else {
                 complete(.failure(AppSpeechDictationError.transcriptTooLong))
                 return
@@ -739,9 +738,17 @@ final class AppSpeechDictationRun {
         if let error { complete(.failure(error)) }
     }
 
+    private var joinedTranscript: String {
+        guard let last = completedTranscript.last, let first = latestTranscript.first else {
+            return completedTranscript + latestTranscript
+        }
+        let joinsJapanese = locale.language.languageCode?.identifier == "ja" && !last.isASCII && !first.isASCII
+        let separator = joinsJapanese || last.isWhitespace || first.isWhitespace ? "" : " "
+        return completedTranscript + separator + latestTranscript
+    }
+
     private func finishWithLatestTranscript() {
-        let separator = completedTranscript.isEmpty || latestTranscript.isEmpty ? "" : " "
-        let transcript = completedTranscript + separator + latestTranscript
+        let transcript = joinedTranscript
         guard !transcript.isEmpty else {
             complete(.failure(AppSpeechDictationError.emptyTranscript))
             return
@@ -843,10 +850,8 @@ final class AppSpeechDictationRun {
             } catch {
                 return
             }
-            await MainActor.run {
-                guard let self, !self.didFinish else { return }
-                self.complete(.failure(AppSpeechDictationError.emptyTranscript))
-            }
+            guard let self, !Task.isCancelled, !self.didFinish else { return }
+            self.complete(.failure(AppSpeechDictationError.emptyTranscript))
         }
     }
 
@@ -1866,8 +1871,8 @@ final class AppSpeechDictationRun {
         return recorder.values(for: second)
     }
 
-    static func testContinuousRun() -> AppSpeechDictationRun {
-        let run = AppSpeechDictationRun(locale: Locale(identifier: "en_US"))
+    static func testContinuousRun(locale: Locale = Locale(identifier: "en_US")) -> AppSpeechDictationRun {
+        let run = AppSpeechDictationRun(locale: locale)
         let request = run.makeRecognitionRequest()
         run.request = request
         let gate = AudioTapGate()

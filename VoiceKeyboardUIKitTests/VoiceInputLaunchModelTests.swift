@@ -913,6 +913,18 @@ final class VoiceInputLaunchModelTests: XCTestCase {
         XCTAssertEqual(result, "first sentence last sentence")
     }
 
+    func testJapaneseSegmentsJoinAtStopWithoutAnExtraSpace() async throws {
+        let run = AppSpeechDictationRun.testContinuousRun(locale: Locale(identifier: "ja_JP"))
+        let resultTask = Task { try await run.testWaitForCompletion() }
+        await run.testWaitUntilCompletionReady()
+        run.testReceiveRecognition("今日は", isFinal: true)
+        run.testAppendSilentAudio()
+        run.finishForUserStop()
+        run.testReceiveRecognition("晴れです。", isFinal: true)
+        let result = try await resultTask.value
+        XCTAssertEqual(result, "今日は晴れです。")
+    }
+
     func testContinuousDictationStopKeepsQueuedSegmentAfterRotation() async throws {
         let run = AppSpeechDictationRun.testContinuousRun()
         let resultTask = Task { try await run.testWaitForCompletion() }
